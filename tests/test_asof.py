@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -68,6 +69,11 @@ class AsOfValidationTests(unittest.TestCase):
 
     def instrument(self, *, data_available_at: datetime | None = None) -> InstrumentSnapshot:
         return InstrumentSnapshot(
+            instrument_id="instrument-test",
+            listing_id="listing-test",
+            universe_snapshot_id="universe-1",
+            exchange="NSE",
+            segment="CM",
             symbol="TEST",
             board=Board.MAIN,
             market_cap_bucket=MarketCapBucket.SMALL,
@@ -100,6 +106,12 @@ class AsOfValidationTests(unittest.TestCase):
             uncertainty=Decimal("0.25"),
             sample_count=32,
             model_version="test-model-v1",
+            instrument_id="instrument-test",
+            listing_id="listing-test",
+            universe_snapshot_id="universe-1",
+            data_snapshot_id="snapshot-1",
+            data_snapshot_fingerprint=self.snapshot().content_fingerprint,
+            instrument_fingerprint=self.instrument().content_fingerprint,
         )
         signals = SignalFeatures(
             relative_strength=Decimal("0.8"),
@@ -108,6 +120,13 @@ class AsOfValidationTests(unittest.TestCase):
             liquidity_quality=Decimal("0.9"),
             news_score=Decimal("0.1"),
             estimated_cost_bps=Decimal("30"),
+            instrument_id="instrument-test",
+            listing_id="listing-test",
+            universe_snapshot_id="universe-1",
+            data_snapshot_id="snapshot-1",
+            data_snapshot_fingerprint=self.snapshot().content_fingerprint,
+            instrument_fingerprint=self.instrument().content_fingerprint,
+            provider_version="signal-test-v1",
         )
         setup = TradeSetup(
             symbol="TEST",
@@ -125,6 +144,13 @@ class AsOfValidationTests(unittest.TestCase):
             stop_reason="test invalidation",
             target_reason="test target",
             entry_expires_at=entry_at + timedelta(hours=6),
+            instrument_id="instrument-test",
+            listing_id="listing-test",
+            universe_snapshot_id="universe-1",
+            data_snapshot_id="snapshot-1",
+            data_snapshot_fingerprint=self.snapshot().content_fingerprint,
+            instrument_fingerprint=self.instrument().content_fingerprint,
+            provider_version="signal-test-v1",
         )
         return Candidate(self.instrument(), forecast, signals, setup, evidence_ids)
 
@@ -150,7 +176,20 @@ class AsOfValidationTests(unittest.TestCase):
             "evidence available": lambda: self.evidence(available_at=naive),
             "instrument data": lambda: self.instrument(data_available_at=naive),
             "forecast as_of": lambda: ForecastSummary(
-                "TEST", naive, 8, Decimal("1"), Decimal("-1"), Decimal("0.2"), 10, "v1"
+                "TEST",
+                naive,
+                8,
+                Decimal("1"),
+                Decimal("-1"),
+                Decimal("0.2"),
+                10,
+                "v1",
+                "instrument-test",
+                "listing-test",
+                "universe-1",
+                "snapshot-1",
+                self.snapshot().content_fingerprint,
+                self.instrument().content_fingerprint,
             ),
             "setup entry": lambda: TradeSetup(
                 "TEST",
@@ -168,6 +207,13 @@ class AsOfValidationTests(unittest.TestCase):
                 "stop",
                 "target",
                 entry_expires_at=NEXT_SESSION_ENTRY + timedelta(hours=6),
+                instrument_id="instrument-test",
+                listing_id="listing-test",
+                universe_snapshot_id="universe-1",
+                data_snapshot_id="snapshot-1",
+                data_snapshot_fingerprint=self.snapshot().content_fingerprint,
+                instrument_fingerprint=self.instrument().content_fingerprint,
+                provider_version="signal-test-v1",
             ),
         }
         for label, factory in factories.items():
@@ -209,6 +255,24 @@ class AsOfValidationTests(unittest.TestCase):
                 cost_schedule_version="cost-1",
             )
 
+    def test_snapshot_finality_must_belong_to_market_session_in_india(self) -> None:
+        with self.assertRaisesRegex(ValueError, "belong to market_session"):
+            DataSnapshot(
+                snapshot_id="snapshot-wrong-finality-date",
+                decision_time=DECISION_TIME,
+                market_session=MARKET_SESSION,
+                evidence=(),
+                session_finalized_at=DECISION_TIME - timedelta(days=1),
+                universe_snapshot_id="universe-1",
+                calendar_version="calendar-1",
+                trial_id="trial-1",
+                model_bundle_id="bundle-1",
+                data_content_hash="data-hash-1",
+                source_revision="source-1",
+                execution_policy_version="execution-1",
+                cost_schedule_version="cost-1",
+            )
+
     def test_candidate_rejects_price_available_before_session_finality(self) -> None:
         candidate = self.candidate()
         impossible_instrument = self.instrument(
@@ -216,9 +280,18 @@ class AsOfValidationTests(unittest.TestCase):
         )
         candidate = Candidate(
             impossible_instrument,
-            candidate.forecast,
-            candidate.signals,
-            candidate.setup,
+            replace(
+                candidate.forecast,
+                instrument_fingerprint=impossible_instrument.content_fingerprint,
+            ),
+            replace(
+                candidate.signals,
+                instrument_fingerprint=impossible_instrument.content_fingerprint,
+            ),
+            replace(
+                candidate.setup,
+                instrument_fingerprint=impossible_instrument.content_fingerprint,
+            ),
             candidate.evidence_ids,
         )
         with self.assertRaisesRegex(DataIntegrityError, "before session finalization"):
@@ -230,11 +303,26 @@ class AsOfValidationTests(unittest.TestCase):
             published_at=DECISION_TIME + timedelta(minutes=1),
             available_at=DECISION_TIME + timedelta(minutes=2),
         )
+        target_snapshot = self.snapshot((future,))
+        candidate = self.candidate(evidence_ids=("future",))
+        candidate = Candidate(
+            candidate.instrument,
+            replace(
+                candidate.forecast,
+                data_snapshot_fingerprint=target_snapshot.content_fingerprint,
+            ),
+            replace(
+                candidate.signals,
+                data_snapshot_fingerprint=target_snapshot.content_fingerprint,
+            ),
+            replace(
+                candidate.setup,
+                data_snapshot_fingerprint=target_snapshot.content_fingerprint,
+            ),
+            candidate.evidence_ids,
+        )
         with self.assertRaisesRegex(LookaheadViolation, "future evidence"):
-            validate_candidate(
-                self.candidate(evidence_ids=("future",)),
-                self.snapshot((future,)),
-            )
+            validate_candidate(candidate, target_snapshot)
 
     def test_candidate_rejects_missing_evidence(self) -> None:
         with self.assertRaisesRegex(DataIntegrityError, "missing evidence: absent"):
@@ -245,6 +333,29 @@ class AsOfValidationTests(unittest.TestCase):
 
     def test_next_session_entry_is_valid(self) -> None:
         validate_candidate(self.candidate(entry_at=NEXT_SESSION_ENTRY), self.snapshot())
+
+    def test_stale_forecast_is_rejected_even_when_the_symbol_is_unchanged(self) -> None:
+        with self.assertRaisesRegex(DataIntegrityError, "forecast is stale"):
+            validate_candidate(
+                self.candidate(forecast_as_of=DECISION_TIME - timedelta(days=1)),
+                self.snapshot(),
+            )
+
+    def test_provider_outputs_must_bind_the_exact_data_snapshot(self) -> None:
+        candidate = self.candidate()
+        wrong_forecast = replace(candidate.forecast, data_snapshot_id="old-snapshot")
+        wrong_signals = replace(candidate.signals, data_snapshot_id="old-snapshot")
+        wrong_setup = replace(candidate.setup, data_snapshot_id="old-snapshot")
+        rebound = Candidate(
+            candidate.instrument,
+            wrong_forecast,
+            wrong_signals,
+            wrong_setup,
+            candidate.evidence_ids,
+        )
+
+        with self.assertRaisesRegex(DataIntegrityError, "data snapshot"):
+            validate_candidate(rebound, self.snapshot())
 
     def test_same_market_session_entry_is_rejected(self) -> None:
         after_cutoff_same_session = DECISION_TIME + timedelta(minutes=1)

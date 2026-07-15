@@ -6,7 +6,8 @@ import json
 import os
 import re
 import tempfile
-from dataclasses import asdict, is_dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, fields, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -17,6 +18,38 @@ from typing import Any
 AUDIT_SCHEMA_VERSION = "audit-v1"
 _RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+_SENSITIVE_KEY_PARTS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "credential",
+    "password",
+    "private_key",
+    "secret",
+    "access_token",
+    "refresh_token",
+    "request_token",
+    "session_token",
+    "auth_token",
+    "cookie",
+    "set_cookie",
+)
+_SENSITIVE_VALUE_MARKERS = re.compile(
+    r"(?:authorization\s*:|set-cookie\s*:|cookie\s*:|"
+    r"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|"
+    r"client[_-]?secret|password|private[_-]?key)\s*[=:])",
+    re.IGNORECASE,
+)
+_PIPELINE_RESULT_KEYS = frozenset(
+    {
+        "run_id",
+        "pipeline_version",
+        "snapshot_id",
+        "decision",
+        "status",
+        "integrity_hash",
+    }
+)
 
 
 class AuditExistsError(FileExistsError):
@@ -29,6 +62,102 @@ class InvalidAuditRunId(ValueError):
 
 class AuditIntegrityError(ValueError):
     """Raised when an audit record is malformed or fails hash verification."""
+
+
+def _is_sensitive_key(name: str) -> bool:
+    normalized = name.casefold().replace("-", "_")
+    return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
+
+
+def _validate_payload_before_write(value: Any, seen: set[int] | None = None) -> None:
+    """Reject secrets and invoke content-integrity hooks before serialization."""
+
+    if seen is None:
+        seen = set()
+    if value is None or isinstance(value, (bool, int, Decimal, date, datetime, Enum)):
+        return
+    if isinstance(value, str):
+        if _SENSITIVE_VALUE_MARKERS.search(value):
+            raise AuditIntegrityError("audit payload contains a secret-bearing marker")
+        return
+
+    marker = id(value)
+    if marker in seen:
+        return
+    seen.add(marker)
+    try:
+        verifier = getattr(value, "verify_integrity", None)
+        if verifier is None:
+            verifier = getattr(value, "verify_content_identity", None)
+        if verifier is not None:
+            try:
+                verifier()
+            except Exception as exc:
+                raise AuditIntegrityError(
+                    "audit payload failed embedded integrity verification"
+                ) from exc
+
+        if is_dataclass(value):
+            for item in fields(value):
+                if _is_sensitive_key(item.name):
+                    raise AuditIntegrityError(
+                        "audit payload contains a sensitive dataclass field"
+                    )
+                _validate_payload_before_write(getattr(value, item.name), seen)
+        elif isinstance(value, Mapping):
+            if _PIPELINE_RESULT_KEYS.issubset(
+                {key for key in value if isinstance(key, str)}
+            ):
+                raise AuditIntegrityError(
+                    "untyped pipeline-result mappings cannot be audited"
+                )
+            for key, item in value.items():
+                if isinstance(key, str) and _is_sensitive_key(key):
+                    raise AuditIntegrityError(
+                        "audit payload contains a sensitive mapping key"
+                    )
+                _validate_payload_before_write(key, seen)
+                _validate_payload_before_write(item, seen)
+        elif isinstance(value, (tuple, list, set, frozenset)):
+            for item in value:
+                _validate_payload_before_write(item, seen)
+    finally:
+        seen.remove(marker)
+
+
+def _pipeline_result_run_ids(value: Any, seen: set[int] | None = None) -> set[str]:
+    """Find embedded typed pipeline results without accepting look-alike mappings."""
+
+    if seen is None:
+        seen = set()
+    if value is None or isinstance(
+        value,
+        (bool, int, str, Decimal, date, datetime, Enum),
+    ):
+        return set()
+    marker = id(value)
+    if marker in seen:
+        return set()
+    seen.add(marker)
+    try:
+        from india_swing.pipeline import PipelineResult
+
+        if type(value) is PipelineResult:
+            return {value.run_id}
+        found: set[str] = set()
+        if is_dataclass(value):
+            for item in fields(value):
+                found.update(_pipeline_result_run_ids(getattr(value, item.name), seen))
+        elif isinstance(value, Mapping):
+            for key, item in value.items():
+                found.update(_pipeline_result_run_ids(key, seen))
+                found.update(_pipeline_result_run_ids(item, seen))
+        elif isinstance(value, (tuple, list, set, frozenset)):
+            for item in value:
+                found.update(_pipeline_result_run_ids(item, seen))
+        return found
+    finally:
+        seen.remove(marker)
 
 
 def json_value(value: Any) -> Any:
@@ -110,7 +239,32 @@ def verify_audit_envelope(envelope: Any) -> dict[str, Any]:
 class AuditWriter:
     schema_version = AUDIT_SCHEMA_VERSION
 
+    def write_pipeline_result(
+        self,
+        output_dir: Path,
+        result: Any,
+        payload: Mapping[str, Any] | None = None,
+    ) -> Path:
+        from india_swing.pipeline import PipelineResult
+
+        if type(result) is not PipelineResult:
+            raise TypeError("result must be an exact PipelineResult")
+        manifest = dict(payload or {})
+        existing = manifest.get("result")
+        if existing is not None and existing is not result:
+            raise AuditIntegrityError(
+                "pipeline audit payload contains a different result object"
+            )
+        manifest["result"] = result
+        return self.write(output_dir, result.run_id, manifest)
+
     def write(self, output_dir: Path, run_id: str, payload: Any) -> Path:
+        _validate_payload_before_write(payload)
+        embedded_run_ids = _pipeline_result_run_ids(payload)
+        if embedded_run_ids and embedded_run_ids != {run_id}:
+            raise AuditIntegrityError(
+                "audit filename run_id does not match its embedded pipeline result"
+            )
         path = _audit_path(output_dir, run_id)
         output_dir = path.parent
         output_dir.mkdir(parents=True, exist_ok=True)

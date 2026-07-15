@@ -33,6 +33,11 @@ class RiskEngineTests(unittest.TestCase):
     def setUp(self) -> None:
         decision_time = datetime(2026, 7, 15, 16, 0, tzinfo=IST)
         instrument = InstrumentSnapshot(
+            instrument_id="instrument-reliance",
+            listing_id="listing-reliance",
+            universe_snapshot_id="universe-1",
+            exchange="NSE",
+            segment="CM",
             symbol="RELIANCE",
             board=Board.MAIN,
             market_cap_bucket=MarketCapBucket.LARGE,
@@ -56,6 +61,12 @@ class RiskEngineTests(unittest.TestCase):
             uncertainty=D("0.25"),
             sample_count=100,
             model_version="kronos-small@pilot",
+            instrument_id="instrument-reliance",
+            listing_id="listing-reliance",
+            universe_snapshot_id="universe-1",
+            data_snapshot_id="snapshot-1",
+            data_snapshot_fingerprint="snapshot-fingerprint-1",
+            instrument_fingerprint=instrument.content_fingerprint,
         )
         signals = SignalFeatures(
             relative_strength=D("0.85"),
@@ -64,6 +75,13 @@ class RiskEngineTests(unittest.TestCase):
             liquidity_quality=D("0.95"),
             news_score=D("0.30"),
             estimated_cost_bps=D("80"),
+            instrument_id="instrument-reliance",
+            listing_id="listing-reliance",
+            universe_snapshot_id="universe-1",
+            data_snapshot_id="snapshot-1",
+            data_snapshot_fingerprint="snapshot-fingerprint-1",
+            instrument_fingerprint=instrument.content_fingerprint,
+            provider_version="signal-test-v1",
         )
         setup = TradeSetup(
             symbol="RELIANCE",
@@ -82,6 +100,13 @@ class RiskEngineTests(unittest.TestCase):
             target_reason="cost-adjusted 2.5R objective",
             cancel_conditions=("gap above entry range", "liquidity deterioration"),
             entry_expires_at=decision_time + timedelta(days=1, hours=23),
+            instrument_id="instrument-reliance",
+            listing_id="listing-reliance",
+            universe_snapshot_id="universe-1",
+            data_snapshot_id="snapshot-1",
+            data_snapshot_fingerprint="snapshot-fingerprint-1",
+            instrument_fingerprint=instrument.content_fingerprint,
+            provider_version="signal-test-v1",
         )
         self.candidate = Candidate(
             instrument=instrument,
@@ -98,6 +123,12 @@ class RiskEngineTests(unittest.TestCase):
             risks=("overnight gap",),
             evidence_ids=("price-1", "forecast-1"),
             model_version="tradingagents@01477f9",
+            instrument_id="instrument-reliance",
+            listing_id="listing-reliance",
+            universe_snapshot_id="universe-1",
+            data_snapshot_id="snapshot-1",
+            data_snapshot_fingerprint="snapshot-fingerprint-1",
+            instrument_fingerprint=instrument.content_fingerprint,
         )
         self.portfolio = PortfolioState(
             capital=D("100000"),
@@ -224,11 +255,24 @@ class RiskEngineTests(unittest.TestCase):
         self.assertEqual(decision.net_reward_risk, D("2.5"))
 
     def test_liquidity_notional_and_remaining_open_risk_caps_bind_quantity(self) -> None:
+        liquidity_instrument = replace(
+            self.candidate.instrument,
+            median_daily_traded_value=D("400000"),
+        )
         liquidity_candidate = replace(
             self.candidate,
-            instrument=replace(
-                self.candidate.instrument,
-                median_daily_traded_value=D("400000"),
+            instrument=liquidity_instrument,
+            forecast=replace(
+                self.candidate.forecast,
+                instrument_fingerprint=liquidity_instrument.content_fingerprint,
+            ),
+            signals=replace(
+                self.candidate.signals,
+                instrument_fingerprint=liquidity_instrument.content_fingerprint,
+            ),
+            setup=replace(
+                self.candidate.setup,
+                instrument_fingerprint=liquidity_instrument.content_fingerprint,
             ),
         )
         notional_policy = replace(self.policy, max_position_notional=D("1200"))
@@ -307,6 +351,10 @@ class RiskEngineTests(unittest.TestCase):
             dict(decision.metadata),
             {
                 "rank": "3",
+                "instrument_id": "instrument-reliance",
+                "instrument_fingerprint": self.candidate.instrument.content_fingerprint,
+                "listing_id": "listing-reliance",
+                "universe_snapshot_id": "universe-1",
                 "risk_policy": "pilot-v1",
                 "forecast_model": "kronos-small@pilot",
                 "research_model": "tradingagents@01477f9",

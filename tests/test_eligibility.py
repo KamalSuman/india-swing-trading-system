@@ -49,6 +49,11 @@ class EligibilityTests(unittest.TestCase):
         data_available_at: datetime | None = None,
     ) -> InstrumentSnapshot:
         return InstrumentSnapshot(
+            instrument_id="instrument-test",
+            listing_id="listing-test",
+            universe_snapshot_id=self.snapshot.universe_snapshot_id,
+            exchange="NSE",
+            segment="CM",
             symbol="TEST",
             board=board,
             market_cap_bucket=market_cap_bucket,
@@ -132,6 +137,17 @@ class EligibilityTests(unittest.TestCase):
                 )
                 self.assertTrue(result.actionable)
                 self.assertEqual((), result.reasons)
+
+    def test_unknown_board_or_surveillance_fails_closed(self) -> None:
+        cases = (
+            self.instrument(board=Board.UNKNOWN),
+            self.instrument(surveillance=Surveillance.UNKNOWN),
+        )
+        for instrument in cases:
+            with self.subTest(instrument=instrument):
+                result = evaluate_eligibility(instrument, self.policy, self.snapshot)
+                self.assertFalse(result.actionable)
+                self.assertTrue(any("unknown" in reason for reason in result.reasons))
 
 
 if __name__ == "__main__":

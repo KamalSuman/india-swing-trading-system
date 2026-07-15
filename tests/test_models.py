@@ -21,6 +21,12 @@ class ResearchAssessmentTests(unittest.TestCase):
             "risks": ("gap risk",),
             "evidence_ids": ("evidence-1",),
             "model_version": "research-v1",
+            "instrument_id": "instrument-test",
+            "listing_id": "listing-test",
+            "universe_snapshot_id": "universe-1",
+            "data_snapshot_id": "snapshot-1",
+            "data_snapshot_fingerprint": "snapshot-fingerprint-1",
+            "instrument_fingerprint": "instrument-fingerprint-1",
         }
 
         for overrides in invalid_values:
@@ -39,6 +45,12 @@ class ResearchAssessmentTests(unittest.TestCase):
                 risks=("gap risk",),
                 evidence_ids=("evidence-1", "evidence-1"),
                 model_version="research-v1",
+                instrument_id="instrument-test",
+                listing_id="listing-test",
+                universe_snapshot_id="universe-1",
+                data_snapshot_id="snapshot-1",
+                data_snapshot_fingerprint="snapshot-fingerprint-1",
+                instrument_fingerprint="instrument-fingerprint-1",
             )
 
 
