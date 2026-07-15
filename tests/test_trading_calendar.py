@@ -139,6 +139,14 @@ class TradingCalendarTests(unittest.TestCase):
             trading_calendar.advance_sessions(date(2026, 7, 17), 2).day,
             date(2026, 7, 22),
         )
+        self.assertEqual(
+            trading_calendar.previous_session(date(2026, 7, 21)).day,
+            date(2026, 7, 17),
+        )
+        self.assertEqual(
+            trading_calendar.previous_session(date(2026, 7, 20)).day,
+            date(2026, 7, 17),
+        )
 
     def test_session_arithmetic_fails_closed_outside_coverage(self) -> None:
         trading_calendar = snapshot()
@@ -147,6 +155,10 @@ class TradingCalendarTests(unittest.TestCase):
             trading_calendar.next_session(date(2026, 7, 16))
         with self.assertRaises(CalendarCoverageError):
             trading_calendar.next_session(COVERAGE_END)
+        with self.assertRaises(CalendarCoverageError):
+            trading_calendar.previous_session(COVERAGE_START)
+        with self.assertRaises(CalendarCoverageError):
+            trading_calendar.previous_session(date(2026, 7, 23))
         with self.assertRaises(CalendarCoverageError):
             trading_calendar.advance_sessions(date(2026, 7, 22), 1)
 

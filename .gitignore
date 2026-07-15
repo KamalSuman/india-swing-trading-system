@@ -17,3 +17,5 @@ build/
 var/audit/*.json
 !var/audit/.gitkeep
 var/market_data/
+var/reference_data/
+var/daily_reports/

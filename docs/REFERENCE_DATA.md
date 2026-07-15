@@ -1,7 +1,9 @@
 # NSE reference-data boundary
 
-Status: contracts and synthetic tests are implemented. No official NSE security
-master, surveillance file, holiday circular, or live universe has been imported.
+Status: contracts, synthetic tests, and a collection-only NSE CM MII security
+master importer are implemented. No imported market-data artifact is committed
+to the repository, and no surveillance file, holiday circular, or live universe
+has been materialized.
 
 The pipeline now requires content-addressed calendar and universe artifacts. A
 current Kite instrument dump remains inventory-only and cannot be labelled
@@ -16,6 +18,59 @@ The safest free starting point for dated NSE cash-market membership is the daily
 [circular MSD60315](https://nsearchives.nseindia.com/content/circulars/MSD60315.pdf)
 from 5 February 2024. The current field contract is described in the
 [NSE Masters Data specification](https://nsearchives.nseindia.com/web/mediaattachment/2026-04/NSE-Masters_Data-v1.8_20260428121249.pdf).
+The exact 120-column ISO-tag CSV order is specified in Annexure 10 of PART-D in
+[NSE capital-market consolidated circular CMTR73927](https://nsearchives.nseindia.com/content/circulars/CMTR73927.zip).
+
+The report catalogue shows the human-facing display name rather than the
+downloaded filename. Search for `MII` or `Security File`, select the dated
+**NSE Listed securities** entry, and keep the `.csv.gz` compressed. Do not select
+the separate **NSE Listed and BSE Exclusive securities** interoperability entry.
+
+## Implemented manual import boundary
+
+The reference-data CLI accepts exactly one manually downloaded NSE-only file:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m india_swing.reference_data.cli security-master import `
+  --file C:\path\to\NSE_CM_security_DDMMYYYY.csv.gz
+```
+
+The importer does not download or scrape anything. It:
+
+- opens one regular non-link file descriptor, verifies its identity before and
+  after the bounded read, and rejects path swaps or concurrent mutation;
+- rejects corrupt, concatenated, trailing, non-UTF-8, or unknown-schema gzip data;
+- pins the current 120-column ISO-tag header and exact dated filename pattern;
+- validates every row and rejects duplicate instrument IDs or symbol-series keys;
+- rejects interoperability content carrying BSE-exclusive alternative-venue rows;
+- rejects nonblank values in ISO scope/type fields that are blank under the
+  currently pinned NSE cash-market schema;
+- preserves every source field and assigns exactly one auditable row disposition;
+- preserves the raw source identifier while exposing an ISIN only when its
+  12-character structure and check digit validate;
+- stores the original bytes, deterministic normalized JSON, hashes, row digest,
+  parser/schema/policy versions, and internally observed availability times;
+- durably publishes the local artifact atomically under a process-released
+  advisory lock and verifies it again on every read;
+- remains `COLLECTION_ONLY` and `actionable=false`.
+
+The filename date is stored as `claimed_report_date`, never as historical
+knowledge time. The CSV has no internal report-date control row, so a local file
+cannot independently prove that date or its origin. Its acquisition mode is
+therefore `UNVERIFIED_MANUAL_FILE`, `verified_report_date` remains null, and
+freshness selection refuses to use the filename claim. The archive is
+partitioned by successful validation date. The manual public channel rejects
+claimed dates before 5 February 2024 and implausibly far-future filenames.
+Re-importing identical content keeps the earliest stored artifact; conflicting
+bytes for the same claimed date fail closed under an atomic per-date import lock.
+An authorized downloader or acquisition receipt must establish source URL,
+retrieval evidence, and a verified report date before point-in-time promotion.
+
+NSE master date/time integers use NSE's documented epoch of 1 January 1980, not
+the Unix epoch. The importer deliberately preserves them as raw integers. It
+also treats `BidIntrvl` as the paise-denominated tick field and does not substitute
+the currently reserved ISO-tag `TickSz` column.
 
 Daily surveillance/regulatory enrichment comes from `REG1_INDDDMMYY.csv` (and
 the older `REG_INDDDMMYY.csv`). The consolidated REG1 file is generated after
@@ -94,12 +149,13 @@ The current reference contracts supply:
 - a next-session gate that requires listing validity to persist through entry
   and keeps entry/expiry inside one executable live-continuous window.
 
-`POINT_IN_TIME_VERIFIED` construction is deliberately disabled. It will remain
-disabled until an official-artifact importer binds the original archived bytes,
-approved dataset kind, dated filename, retrieval/publication metadata, parser
-and schema versions, raw and scoped row counts, ordered row digest, and source
-hashes. Merely wrapping Kite, bhavcopy, or hand-built rows in reference models
-cannot enable real alerts.
+`POINT_IN_TIME_VERIFIED` construction remains deliberately disabled. The MII
+importer now binds original archived bytes, the approved dataset kind, dated
+filename, locally observed availability, parser/schema versions, row counts,
+ordered row digest, and source hashes. It cannot establish authoritative
+publication time, stable cross-vintage identity, REG1 surveillance, the trading
+calendar, or liquidity completeness. Merely importing this file—or wrapping
+Kite, bhavcopy, or hand-built rows in reference models—cannot enable real alerts.
 
 Synthetic decisions carry `execution_eligible=false` inside the decision itself
 and identify their reference readiness. The audit writer accepts only intact

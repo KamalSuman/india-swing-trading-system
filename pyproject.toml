@@ -16,6 +16,9 @@ kite = ["kiteconnect==5.2.0"]
 [project.scripts]
 india-swing-demo = "india_swing.demo:main"
 india-swing-market-data = "india_swing.market_data.cli:main"
+india-swing-reference-data = "india_swing.reference_data.cli:main"
+india-swing-daily-reports = "india_swing.daily_reports.cli:main"
+india-swing-evidence = "india_swing.reconciliation.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -371,6 +371,18 @@ class CalendarSnapshot:
                 return calendar_day
         raise CalendarCoverageError("no next trading session exists within calendar coverage")
 
+    def previous_session(self, before: date) -> CalendarDay:
+        """Return the preceding declared session without inferring missing dates."""
+
+        self.day(before)
+        offset = (before - self.coverage_start).days
+        for calendar_day in reversed(self.days[:offset]):
+            if calendar_day.is_session:
+                return calendar_day
+        raise CalendarCoverageError(
+            "no previous trading session exists within calendar coverage"
+        )
+
     def advance_sessions(self, start: date, sessions: int) -> CalendarDay:
         if type(sessions) is not int or sessions < 0:
             raise ValueError("sessions must be a non-negative integer")
