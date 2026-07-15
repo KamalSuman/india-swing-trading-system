@@ -4,14 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "india-swing"
-version = "0.1.0"
+version = "0.2.0"
 description = "Bias-aware Indian equity swing-trade research and alert pipeline"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
+[project.optional-dependencies]
+kite = ["kiteconnect==5.2.0"]
+
 [project.scripts]
 india-swing-demo = "india_swing.demo:main"
+india-swing-market-data = "india_swing.market_data.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

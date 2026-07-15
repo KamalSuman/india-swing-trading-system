@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -23,6 +23,27 @@ from india_swing.domain.models import (
     TradeSetup,
 )
 from india_swing.pipeline import Pipeline
+from india_swing.reference.calendar import (
+    CalendarDay,
+    CalendarDayKind,
+    CalendarSnapshot,
+    SessionWindow,
+    SessionWindowPhase,
+)
+from india_swing.reference.context import ReferenceContext
+from india_swing.reference.models import (
+    EffectiveExternalRecordRef,
+    ExternalRecordRef,
+    ReferenceReadiness,
+)
+from india_swing.reference.universe import (
+    EligibilityStateRef,
+    ListingMapping,
+    ListingState,
+    UniverseDisposition,
+    UniverseEntry,
+    UniverseSnapshot,
+)
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -77,14 +98,184 @@ def build_demo():
             content_hash="demo-market-hash-v1",
         ),
     )
+
+    calendar_source_id = "a" * 64
+    calendar_start = date(2026, 7, 15)
+    calendar_end = date(2026, 7, 28)
+    calendar_days: list[CalendarDay] = []
+    for offset in range((calendar_end - calendar_start).days + 1):
+        day = calendar_start + timedelta(days=offset)
+        reference = ExternalRecordRef(
+            event_time=datetime.combine(day, time(0), tzinfo=IST),
+            knowledge_time=datetime(2026, 7, 1, 12, 0, tzinfo=IST),
+            source="SYNTHETIC_CALENDAR_FIXTURE",
+            content_hash=f"{day.toordinal():064x}",
+            source_snapshot_id=calendar_source_id,
+        )
+        if day.weekday() < 5:
+            calendar_days.append(
+                CalendarDay(
+                    day=day,
+                    kind=CalendarDayKind.REGULAR,
+                    reference=reference,
+                    session_windows=(
+                        SessionWindow(
+                            opens_at=datetime.combine(day, time(9, 15), tzinfo=IST),
+                            closes_at=datetime.combine(day, time(15, 30), tzinfo=IST),
+                            phase=SessionWindowPhase.LIVE_CONTINUOUS,
+                        ),
+                    ),
+                    data_ready_at=datetime.combine(day, time(16, 0), tzinfo=IST),
+                )
+            )
+        else:
+            calendar_days.append(
+                CalendarDay(
+                    day=day,
+                    kind=CalendarDayKind.WEEKEND,
+                    reference=reference,
+                )
+            )
+    calendar = CalendarSnapshot.create(
+        exchange="NSE",
+        segment="CM",
+        cutoff=decision_time,
+        coverage_start=calendar_start,
+        coverage_end=calendar_end,
+        days=tuple(calendar_days),
+        source_snapshot_ids=(calendar_source_id,),
+        readiness=ReferenceReadiness.SYNTHETIC_TEST,
+    )
+
+    master_source_id = "b" * 64
+    eligibility_source_id = "c" * 64
+    liquidity_source_id = "d" * 64
+
+    def universe_entry(
+        *,
+        number: int,
+        instrument_id: str,
+        listing_id: str,
+        symbol: str,
+        surveillance: Surveillance,
+        disposition: UniverseDisposition,
+        reason_codes: tuple[str, ...],
+    ) -> UniverseEntry:
+        listing_reference = ExternalRecordRef(
+            event_time=datetime(2020, 1, 1, tzinfo=IST),
+            knowledge_time=datetime(2026, 7, 15, 8, 30, tzinfo=IST),
+            source="SYNTHETIC_SECURITY_MASTER_FIXTURE",
+            content_hash=f"{number:064x}",
+            source_snapshot_id=master_source_id,
+        )
+        eligibility_reference = ExternalRecordRef(
+            event_time=datetime.combine(decision_time.date(), time(0), tzinfo=IST),
+            knowledge_time=datetime(2026, 7, 15, 16, 0, tzinfo=IST),
+            source="SYNTHETIC_ELIGIBILITY_FIXTURE",
+            content_hash=f"{number + 100:064x}",
+            source_snapshot_id=eligibility_source_id,
+        )
+        return UniverseEntry(
+            source_record_id=f"{number + 200:064x}",
+            listing=ListingMapping(
+                instrument_id=instrument_id,
+                listing_id=listing_id,
+                exchange="NSE",
+                segment="CM",
+                tradingsymbol=symbol,
+                series="EQ",
+                isin=f"INE{number:04d}A0101",
+                valid_from=date(2020, 1, 1),
+                valid_to_exclusive=None,
+                reference=listing_reference,
+            ),
+            board=Board.MAIN,
+            listing_state=ListingState.ACTIVE,
+            suspended=False,
+            surveillance=surveillance,
+            disposition=disposition,
+            reason_codes=reason_codes,
+            eligibility_refs=(
+                EligibilityStateRef(
+                    effective=EffectiveExternalRecordRef(
+                        reference=eligibility_reference,
+                        effective_from_session=decision_time.date(),
+                        effective_to_exclusive=None,
+                        schema_version="synthetic-eligibility/v1",
+                    ),
+                    instrument_id=instrument_id,
+                    listing_id=listing_id,
+                    board=Board.MAIN,
+                    listing_state=ListingState.ACTIVE,
+                    suspended=False,
+                    surveillance=surveillance,
+                ),
+            ),
+            liquidity_snapshot_id=liquidity_source_id,
+            liquidity_cutoff_session=decision_time.date(),
+        )
+
+    universe_entries = tuple(
+        sorted(
+            (
+                universe_entry(
+                    number=1,
+                    instrument_id="synthetic-instrument-small",
+                    listing_id="synthetic-listing-small",
+                    symbol="DEMO-SMALL",
+                    surveillance=Surveillance.NONE,
+                    disposition=UniverseDisposition.ACTIONABLE,
+                    reason_codes=(),
+                ),
+                universe_entry(
+                    number=2,
+                    instrument_id="synthetic-instrument-large",
+                    listing_id="synthetic-listing-large",
+                    symbol="DEMO-LARGE",
+                    surveillance=Surveillance.NONE,
+                    disposition=UniverseDisposition.ACTIONABLE,
+                    reason_codes=(),
+                ),
+                universe_entry(
+                    number=3,
+                    instrument_id="synthetic-instrument-gsm",
+                    listing_id="synthetic-listing-gsm",
+                    symbol="DEMO-GSM",
+                    surveillance=Surveillance.GSM,
+                    disposition=UniverseDisposition.EXCLUDED,
+                    reason_codes=("GSM_BLOCKED",),
+                ),
+            ),
+            key=lambda entry: entry.source_record_id,
+        )
+    )
+    universe = UniverseSnapshot.create(
+        exchange="NSE",
+        segment="CM",
+        market_session=decision_time.date(),
+        cutoff=decision_time,
+        calendar_snapshot_id=calendar.snapshot_id,
+        universe_rules_version="synthetic-universe-rules/v1",
+        selection_key="NSE:CM:SYNTHETIC_ALL_ROWS",
+        scoped_source_row_ids=tuple(
+            entry.source_record_id for entry in universe_entries
+        ),
+        security_master_snapshot_ids=(master_source_id,),
+        eligibility_snapshot_ids=(eligibility_source_id,),
+        liquidity_snapshot_ids=(liquidity_source_id,),
+        readiness=ReferenceReadiness.SYNTHETIC_TEST,
+        entries=universe_entries,
+    )
+    reference_context = ReferenceContext(calendar=calendar, universe=universe)
+
     snapshot = DataSnapshot(
         snapshot_id="synthetic-2026-07-15-v1",
         decision_time=decision_time,
         market_session=decision_time.date(),
         evidence=evidence,
         session_finalized_at=datetime(2026, 7, 15, 16, 30, tzinfo=IST),
-        universe_snapshot_id="synthetic-universe-2026-07-15-v1",
-        calendar_version="synthetic-calendar-v1",
+        universe_snapshot_id=universe.snapshot_id,
+        calendar_version=calendar.version,
         trial_id="synthetic-demo-trial-v1",
         model_bundle_id="synthetic-demo-bundle-v1",
         data_content_hash="synthetic-data-hash-v1",
@@ -95,6 +286,11 @@ def build_demo():
 
     instruments = [
         InstrumentSnapshot(
+            instrument_id="synthetic-instrument-small",
+            listing_id="synthetic-listing-small",
+            universe_snapshot_id=universe.snapshot_id,
+            exchange="NSE",
+            segment="CM",
             symbol="DEMO-SMALL",
             board=Board.MAIN,
             market_cap_bucket=MarketCapBucket.SMALL,
@@ -110,6 +306,11 @@ def build_demo():
             data_available_at=datetime(2026, 7, 15, 16, 35, tzinfo=IST),
         ),
         InstrumentSnapshot(
+            instrument_id="synthetic-instrument-large",
+            listing_id="synthetic-listing-large",
+            universe_snapshot_id=universe.snapshot_id,
+            exchange="NSE",
+            segment="CM",
             symbol="DEMO-LARGE",
             board=Board.MAIN,
             market_cap_bucket=MarketCapBucket.LARGE,
@@ -121,21 +322,6 @@ def build_demo():
             quoted_spread_bps=Decimal("8"),
             lower_circuit_locked=False,
             history_sessions=1000,
-            price_session=decision_time.date(),
-            data_available_at=datetime(2026, 7, 15, 16, 35, tzinfo=IST),
-        ),
-        InstrumentSnapshot(
-            symbol="DEMO-GSM",
-            board=Board.MAIN,
-            market_cap_bucket=MarketCapBucket.MICRO,
-            active=True,
-            suspended=False,
-            surveillance=Surveillance.GSM,
-            last_price=Decimal("40"),
-            median_daily_traded_value=Decimal("2000000"),
-            quoted_spread_bps=Decimal("40"),
-            lower_circuit_locked=False,
-            history_sessions=300,
             price_session=decision_time.date(),
             data_available_at=datetime(2026, 7, 15, 16, 35, tzinfo=IST),
         ),
@@ -151,6 +337,12 @@ def build_demo():
             Decimal("0.25"),
             50,
             "synthetic-kronos-adapter-v0",
+            "synthetic-instrument-small",
+            "synthetic-listing-small",
+            universe.snapshot_id,
+            snapshot.snapshot_id,
+            snapshot.content_fingerprint,
+            instruments[0].content_fingerprint,
         ),
         "DEMO-LARGE": ForecastSummary(
             "DEMO-LARGE",
@@ -161,6 +353,12 @@ def build_demo():
             Decimal("0.15"),
             50,
             "synthetic-kronos-adapter-v0",
+            "synthetic-instrument-large",
+            "synthetic-listing-large",
+            universe.snapshot_id,
+            snapshot.snapshot_id,
+            snapshot.content_fingerprint,
+            instruments[1].content_fingerprint,
         ),
     }
     signal_values = {
@@ -172,6 +370,13 @@ def build_demo():
                 Decimal("0.72"),
                 Decimal("0.35"),
                 Decimal("30"),
+                "synthetic-instrument-small",
+                "synthetic-listing-small",
+                universe.snapshot_id,
+                snapshot.snapshot_id,
+                snapshot.content_fingerprint,
+                instruments[0].content_fingerprint,
+                "synthetic-signal-provider-v0",
             ),
             TradeSetup(
                 "DEMO-SMALL",
@@ -190,6 +395,13 @@ def build_demo():
                 "The first synthetic resistance zone above 2.5R begins near 115.",
                 ("cancel above 104", "cancel on a new adverse filing"),
                 entry_expires_at=datetime(2026, 7, 16, 15, 15, tzinfo=IST),
+                instrument_id="synthetic-instrument-small",
+                listing_id="synthetic-listing-small",
+                universe_snapshot_id=universe.snapshot_id,
+                data_snapshot_id=snapshot.snapshot_id,
+                data_snapshot_fingerprint=snapshot.content_fingerprint,
+                instrument_fingerprint=instruments[0].content_fingerprint,
+                provider_version="synthetic-signal-provider-v0",
             ),
             ("demo-small-announcement", "demo-market-snapshot"),
         ),
@@ -201,6 +413,13 @@ def build_demo():
                 Decimal("0.95"),
                 Decimal("0"),
                 Decimal("18"),
+                "synthetic-instrument-large",
+                "synthetic-listing-large",
+                universe.snapshot_id,
+                snapshot.snapshot_id,
+                snapshot.content_fingerprint,
+                instruments[1].content_fingerprint,
+                "synthetic-signal-provider-v0",
             ),
             TradeSetup(
                 "DEMO-LARGE",
@@ -219,6 +438,13 @@ def build_demo():
                 "Synthetic resistance and forecast range converge near 1065.",
                 ("cancel above 1015",),
                 entry_expires_at=datetime(2026, 7, 16, 15, 15, tzinfo=IST),
+                instrument_id="synthetic-instrument-large",
+                listing_id="synthetic-listing-large",
+                universe_snapshot_id=universe.snapshot_id,
+                data_snapshot_id=snapshot.snapshot_id,
+                data_snapshot_fingerprint=snapshot.content_fingerprint,
+                instrument_fingerprint=instruments[1].content_fingerprint,
+                provider_version="synthetic-signal-provider-v0",
             ),
             ("demo-market-snapshot",),
         ),
@@ -232,6 +458,12 @@ def build_demo():
             ("overnight gap", "liquidity deterioration"),
             ("demo-small-announcement", "demo-market-snapshot"),
             "synthetic-tradingagents-adapter-v0",
+            "synthetic-instrument-small",
+            "synthetic-listing-small",
+            universe.snapshot_id,
+            snapshot.snapshot_id,
+            snapshot.content_fingerprint,
+            instruments[0].content_fingerprint,
         ),
         "DEMO-LARGE": ResearchAssessment(
             "DEMO-LARGE",
@@ -241,6 +473,12 @@ def build_demo():
             ("weak catalyst",),
             ("demo-market-snapshot",),
             "synthetic-tradingagents-adapter-v0",
+            "synthetic-instrument-large",
+            "synthetic-listing-large",
+            universe.snapshot_id,
+            snapshot.snapshot_id,
+            snapshot.content_fingerprint,
+            instruments[1].content_fingerprint,
         ),
     }
     pipeline = Pipeline(
@@ -251,7 +489,7 @@ def build_demo():
         RiskPolicy(require_validated_probabilities=False),
     )
     portfolio = PortfolioState(Decimal("100000"), Decimal("0"), Decimal("0"))
-    return pipeline, snapshot, instruments, portfolio
+    return pipeline, snapshot, instruments, portfolio, reference_context
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -259,8 +497,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path, default=Path("var/audit"))
     args = parser.parse_args(argv)
 
-    pipeline, snapshot, instruments, portfolio = build_demo()
-    result = pipeline.run(snapshot, instruments, portfolio)
+    pipeline, snapshot, instruments, portfolio, reference_context = build_demo()
+    result = pipeline.run(snapshot, instruments, portfolio, reference_context)
     payload = {
         "mode": "SYNTHETIC_DEMO_ONLY",
         "run_status": result.status,
@@ -268,10 +506,11 @@ def main(argv: list[str] | None = None) -> int:
         "failure_type": result.failure_type,
         "snapshot": snapshot,
         "portfolio": portfolio,
+        "reference_context": reference_context,
         "policy": pipeline.policy,
         "result": result,
     }
-    audit_path = AuditWriter().write(args.output_dir, result.run_id, payload)
+    audit_path = AuditWriter().write_pipeline_result(args.output_dir, result, payload)
     summary = {
         "mode": "SYNTHETIC_DEMO_ONLY",
         "run_status": result.status,

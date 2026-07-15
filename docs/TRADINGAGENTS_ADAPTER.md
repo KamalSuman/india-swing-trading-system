@@ -43,7 +43,8 @@ assess(request: CandidateResearchRequest) -> CandidateResearchAssessment
 `CandidateResearchRequest` contains:
 
 - A unique run and candidate identifier.
-- Exact NSE symbol and resolved company identity.
+- Exact NSE symbol, stable instrument/listing IDs, and the instrument-content
+  fingerprint used by the scanner.
 - An immutable `as_of` timestamp in Asia/Kolkata.
 - The point-in-time price, volume, technical, fundamental, corporate-action, announcement, sector, market-regime, and forecast context prepared by the application.
 - Kronos distribution summaries and deterministic signal evidence.
@@ -62,8 +63,16 @@ The request must not contain broker credentials or grant access to order APIs. C
 - Data-quality warnings and missing-source disclosures.
 - Execution status, failure category, elapsed time, model-call count, and token/cost metadata when available.
 - References to the persisted full report and input snapshot.
+- Exact universe, data-snapshot, data-content, and instrument fingerprints echoed
+  from the request; any mismatch invalidates the assessment.
 
 It does not contain an approved order, final quantity, guaranteed confidence, or permission to notify or execute. Invalid, incomplete, timed-out, or unparseable results fail closed and cannot become a trade alert.
+
+The adapter must expose stable identity material containing only immutable
+configuration: pinned source revision, graph configuration, prompts, model IDs,
+and decoding parameters. Runtime clients and caches stay private and outside
+that material. The pipeline fingerprints this identity before the first call
+and recomputes it at finalization; a configuration change fails the run closed.
 
 ## Retained upstream components
 

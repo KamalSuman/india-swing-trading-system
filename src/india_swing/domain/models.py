@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import date, datetime
+from dataclasses import dataclass, field, fields
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
+
+from india_swing.identity import content_id
 
 
 ZERO = Decimal("0")
 ONE = Decimal("1")
+INDIA_STANDARD_TIME = timezone(timedelta(hours=5, minutes=30))
 
 
 def require_aware(value: datetime, field_name: str) -> None:
@@ -15,7 +18,15 @@ def require_aware(value: datetime, field_name: str) -> None:
         raise ValueError(f"{field_name} must be timezone-aware")
 
 
+def require_decimal(value: Decimal, field_name: str) -> None:
+    if type(value) is not Decimal:
+        raise TypeError(f"{field_name} must be a Decimal")
+    if not value.is_finite():
+        raise ValueError(f"{field_name} must be finite")
+
+
 def require_probability(value: Decimal, field_name: str) -> None:
+    require_decimal(value, field_name)
     if value < ZERO or value > ONE:
         raise ValueError(f"{field_name} must be between 0 and 1")
 
@@ -23,6 +34,7 @@ def require_probability(value: Decimal, field_name: str) -> None:
 class Board(str, Enum):
     MAIN = "MAIN"
     SME = "SME"
+    UNKNOWN = "UNKNOWN"
 
 
 class MarketCapBucket(str, Enum):
@@ -38,6 +50,7 @@ class Surveillance(str, Enum):
     ASM = "ASM"
     GSM = "GSM"
     TRADE_TO_TRADE = "TRADE_TO_TRADE"
+    UNKNOWN = "UNKNOWN"
 
 
 class ResearchVerdict(str, Enum):
@@ -98,16 +111,26 @@ class DataSnapshot:
     source_revision: str
     execution_policy_version: str
     cost_schedule_version: str
+    content_fingerprint: str = field(init=False)
 
     def __post_init__(self) -> None:
         if not self.snapshot_id.strip():
             raise ValueError("snapshot_id is required")
         require_aware(self.decision_time, "decision_time")
         require_aware(self.session_finalized_at, "session_finalized_at")
-        if self.market_session > self.decision_time.date():
+        if type(self.evidence) is not tuple or any(
+            type(item) is not EvidenceItem for item in self.evidence
+        ):
+            raise TypeError("snapshot evidence must be an immutable EvidenceItem tuple")
+        if self.market_session > self.decision_time.astimezone(INDIA_STANDARD_TIME).date():
             raise ValueError("market_session cannot be after the decision date")
         if self.session_finalized_at > self.decision_time:
             raise ValueError("session data must be finalized before the decision cutoff")
+        if (
+            self.session_finalized_at.astimezone(INDIA_STANDARD_TIME).date()
+            != self.market_session
+        ):
+            raise ValueError("session_finalized_at must belong to market_session in India")
         required_lineage = (
             "universe_snapshot_id",
             "calendar_version",
@@ -124,10 +147,44 @@ class DataSnapshot:
         evidence_ids = [item.evidence_id for item in self.evidence]
         if len(evidence_ids) != len(set(evidence_ids)):
             raise ValueError("evidence IDs must be unique within a snapshot")
+        object.__setattr__(
+            self,
+            "content_fingerprint",
+            self._calculated_content_fingerprint(),
+        )
+
+    def _calculated_content_fingerprint(self) -> str:
+        return content_id(
+            {
+                "snapshot_id": self.snapshot_id,
+                "decision_time": self.decision_time,
+                "market_session": self.market_session,
+                "evidence": self.evidence,
+                "session_finalized_at": self.session_finalized_at,
+                "universe_snapshot_id": self.universe_snapshot_id,
+                "calendar_version": self.calendar_version,
+                "trial_id": self.trial_id,
+                "model_bundle_id": self.model_bundle_id,
+                "data_content_hash": self.data_content_hash,
+                "source_revision": self.source_revision,
+                "execution_policy_version": self.execution_policy_version,
+                "cost_schedule_version": self.cost_schedule_version,
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        if self.content_fingerprint != self._calculated_content_fingerprint():
+            raise ValueError("data snapshot content identity verification failed")
 
 
 @dataclass(frozen=True, slots=True)
 class InstrumentSnapshot:
+    instrument_id: str
+    listing_id: str
+    universe_snapshot_id: str
+    exchange: str
+    segment: str
     symbol: str
     board: Board
     market_cap_bucket: MarketCapBucket
@@ -141,10 +198,30 @@ class InstrumentSnapshot:
     history_sessions: int
     price_session: date
     data_available_at: datetime
+    content_fingerprint: str = field(init=False)
 
     def __post_init__(self) -> None:
-        if not self.symbol.strip():
-            raise ValueError("symbol is required")
+        for name in (
+            "instrument_id",
+            "listing_id",
+            "universe_snapshot_id",
+            "exchange",
+            "segment",
+            "symbol",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required")
+        for name in ("exchange", "segment", "symbol"):
+            value = getattr(self, name)
+            if value != value.strip().upper():
+                raise ValueError(f"{name} must be normalized uppercase text")
+        for name in (
+            "last_price",
+            "median_daily_traded_value",
+            "quoted_spread_bps",
+        ):
+            require_decimal(getattr(self, name), name)
         if self.last_price <= ZERO:
             raise ValueError("last_price must be positive")
         if self.median_daily_traded_value < ZERO:
@@ -154,6 +231,25 @@ class InstrumentSnapshot:
         if self.history_sessions < 0:
             raise ValueError("history_sessions cannot be negative")
         require_aware(self.data_available_at, "data_available_at")
+        object.__setattr__(
+            self,
+            "content_fingerprint",
+            self._calculated_content_fingerprint(),
+        )
+
+    def _calculated_content_fingerprint(self) -> str:
+        return content_id(
+            {
+                item.name: getattr(self, item.name)
+                for item in fields(self)
+                if item.name != "content_fingerprint"
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        if self.content_fingerprint != self._calculated_content_fingerprint():
+            raise ValueError("instrument snapshot content identity verification failed")
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,9 +262,34 @@ class ForecastSummary:
     uncertainty: Decimal
     sample_count: int
     model_version: str
+    instrument_id: str
+    listing_id: str
+    universe_snapshot_id: str
+    data_snapshot_id: str
+    data_snapshot_fingerprint: str
+    instrument_fingerprint: str
 
     def __post_init__(self) -> None:
         require_aware(self.as_of, "forecast.as_of")
+        for name in (
+            "symbol",
+            "model_version",
+            "instrument_id",
+            "listing_id",
+            "universe_snapshot_id",
+            "data_snapshot_id",
+            "data_snapshot_fingerprint",
+            "instrument_fingerprint",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"forecast {name} is required")
+        for name in (
+            "median_return_pct",
+            "downside_return_pct",
+            "uncertainty",
+        ):
+            require_decimal(getattr(self, name), f"forecast.{name}")
         if self.horizon_sessions <= 0:
             raise ValueError("horizon_sessions must be positive")
         if self.sample_count <= 0:
@@ -184,8 +305,36 @@ class SignalFeatures:
     liquidity_quality: Decimal
     news_score: Decimal
     estimated_cost_bps: Decimal
+    instrument_id: str
+    listing_id: str
+    universe_snapshot_id: str
+    data_snapshot_id: str
+    data_snapshot_fingerprint: str
+    instrument_fingerprint: str
+    provider_version: str
 
     def __post_init__(self) -> None:
+        for name in (
+            "instrument_id",
+            "listing_id",
+            "universe_snapshot_id",
+            "data_snapshot_id",
+            "data_snapshot_fingerprint",
+            "instrument_fingerprint",
+            "provider_version",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"signals {name} is required")
+        for name in (
+            "relative_strength",
+            "trend_quality",
+            "volume_confirmation",
+            "liquidity_quality",
+            "news_score",
+            "estimated_cost_bps",
+        ):
+            require_decimal(getattr(self, name), f"signals.{name}")
         for name in (
             "relative_strength",
             "trend_quality",
@@ -219,14 +368,49 @@ class TradeSetup:
     probability_status: ProbabilityStatus = ProbabilityStatus.PROVISIONAL
     calibration_sample_size: int = 0
     entry_expires_at: datetime | None = None
+    instrument_id: str = ""
+    listing_id: str = ""
+    universe_snapshot_id: str = ""
+    data_snapshot_id: str = ""
+    data_snapshot_fingerprint: str = ""
+    instrument_fingerprint: str = ""
+    provider_version: str = ""
 
     def __post_init__(self) -> None:
+        for name in (
+            "symbol",
+            "instrument_id",
+            "listing_id",
+            "universe_snapshot_id",
+            "data_snapshot_id",
+            "data_snapshot_fingerprint",
+            "instrument_fingerprint",
+            "provider_version",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"setup {name} is required")
         require_aware(self.decision_time, "setup.decision_time")
         require_aware(self.earliest_entry_at, "earliest_entry_at")
         if self.entry_expires_at is not None:
             require_aware(self.entry_expires_at, "entry_expires_at")
             if self.entry_expires_at <= self.earliest_entry_at:
                 raise ValueError("entry_expires_at must be after earliest_entry_at")
+        if type(self.cancel_conditions) is not tuple or any(
+            not isinstance(condition, str) or not condition.strip()
+            for condition in self.cancel_conditions
+        ):
+            raise TypeError("cancel_conditions must be an immutable text tuple")
+        for name in (
+            "entry_low",
+            "entry_high",
+            "stop",
+            "target",
+            "target_probability",
+            "stop_probability",
+            "expected_time_exit_r",
+        ):
+            require_decimal(getattr(self, name), f"setup.{name}")
         if not (ZERO < self.stop < self.entry_low <= self.entry_high < self.target):
             raise ValueError("long setup must satisfy 0 < stop < entry_low <= entry_high < target")
         require_probability(self.target_probability, "target_probability")
@@ -253,9 +437,83 @@ class Candidate:
     evidence_ids: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        expected_types = (
+            ("instrument", self.instrument, InstrumentSnapshot),
+            ("forecast", self.forecast, ForecastSummary),
+            ("signals", self.signals, SignalFeatures),
+            ("setup", self.setup, TradeSetup),
+        )
+        for name, value, expected_type in expected_types:
+            if type(value) is not expected_type:
+                raise TypeError(
+                    f"candidate {name} must be an exact {expected_type.__name__}"
+                )
+        if type(self.evidence_ids) is not tuple or any(
+            not isinstance(evidence_id, str) or not evidence_id.strip()
+            for evidence_id in self.evidence_ids
+        ):
+            raise TypeError("candidate evidence_ids must be an immutable text tuple")
+        if len(self.evidence_ids) != len(set(self.evidence_ids)):
+            raise ValueError("candidate evidence IDs must be unique")
         symbols = {self.instrument.symbol, self.forecast.symbol, self.setup.symbol}
         if len(symbols) != 1:
             raise ValueError("candidate components must refer to the same symbol")
+        instrument_ids = {
+            self.instrument.instrument_id,
+            self.forecast.instrument_id,
+            self.signals.instrument_id,
+            self.setup.instrument_id,
+        }
+        if len(instrument_ids) != 1:
+            raise ValueError("candidate components must refer to the same instrument ID")
+        listing_ids = {
+            self.instrument.listing_id,
+            self.forecast.listing_id,
+            self.signals.listing_id,
+            self.setup.listing_id,
+        }
+        if len(listing_ids) != 1:
+            raise ValueError("candidate components must refer to the same listing ID")
+        universe_ids = {
+            self.instrument.universe_snapshot_id,
+            self.forecast.universe_snapshot_id,
+            self.signals.universe_snapshot_id,
+            self.setup.universe_snapshot_id,
+        }
+        if len(universe_ids) != 1:
+            raise ValueError(
+                "candidate components must refer to the same universe snapshot"
+            )
+        if len(
+            {
+                self.forecast.data_snapshot_id,
+                self.signals.data_snapshot_id,
+                self.setup.data_snapshot_id,
+            }
+        ) != 1:
+            raise ValueError(
+                "forecast, signals, and setup must refer to the same data snapshot"
+            )
+        if len(
+            {
+                self.forecast.data_snapshot_fingerprint,
+                self.signals.data_snapshot_fingerprint,
+                self.setup.data_snapshot_fingerprint,
+            }
+        ) != 1:
+            raise ValueError(
+                "forecast, signals, and setup must bind the same snapshot content"
+            )
+        component_instrument_fingerprints = {
+            self.instrument.content_fingerprint,
+            self.forecast.instrument_fingerprint,
+            self.signals.instrument_fingerprint,
+            self.setup.instrument_fingerprint,
+        }
+        if len(component_instrument_fingerprints) != 1:
+            raise ValueError(
+                "candidate components must bind the same instrument content"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,12 +525,38 @@ class ResearchAssessment:
     risks: tuple[str, ...]
     evidence_ids: tuple[str, ...]
     model_version: str
+    instrument_id: str
+    listing_id: str
+    universe_snapshot_id: str
+    data_snapshot_id: str
+    data_snapshot_fingerprint: str
+    instrument_fingerprint: str
 
     def __post_init__(self) -> None:
-        required_text = ("symbol", "thesis", "bear_case", "model_version")
+        required_text = (
+            "symbol",
+            "thesis",
+            "bear_case",
+            "model_version",
+            "instrument_id",
+            "listing_id",
+            "universe_snapshot_id",
+            "data_snapshot_id",
+            "data_snapshot_fingerprint",
+            "instrument_fingerprint",
+        )
         for name in required_text:
             if not getattr(self, name).strip():
                 raise ValueError(f"research {name} is required")
+        if type(self.risks) is not tuple or any(
+            not isinstance(risk, str) or not risk.strip() for risk in self.risks
+        ):
+            raise TypeError("research risks must be an immutable text tuple")
+        if type(self.evidence_ids) is not tuple or any(
+            not isinstance(evidence_id, str) or not evidence_id.strip()
+            for evidence_id in self.evidence_ids
+        ):
+            raise TypeError("research evidence IDs must be an immutable text tuple")
         if not self.evidence_ids:
             raise ValueError("research assessment must cite curated evidence")
         if len(self.evidence_ids) != len(set(self.evidence_ids)):
@@ -289,6 +573,14 @@ class PortfolioState:
     pilot_realized_pnl: Decimal = ZERO
 
     def __post_init__(self) -> None:
+        for name in (
+            "capital",
+            "open_risk",
+            "gross_exposure",
+            "daily_realized_pnl",
+            "pilot_realized_pnl",
+        ):
+            require_decimal(getattr(self, name), f"portfolio.{name}")
         if self.capital <= ZERO:
             raise ValueError("capital must be positive")
         if self.open_risk < ZERO or self.gross_exposure < ZERO:
@@ -322,6 +614,21 @@ class RiskPolicy:
     )
 
     def __post_init__(self) -> None:
+        decimal_fields = (
+            "per_trade_risk",
+            "max_open_risk",
+            "max_position_notional",
+            "max_gross_exposure",
+            "max_turnover_participation",
+            "min_net_reward_risk",
+            "min_expected_r",
+            "estimated_round_trip_cost_bps",
+            "max_spread_bps",
+            "max_daily_loss",
+            "max_pilot_drawdown",
+        )
+        for name in decimal_fields:
+            require_decimal(getattr(self, name), f"risk_policy.{name}")
         positive_fields = (
             "per_trade_risk",
             "max_open_risk",
@@ -373,9 +680,43 @@ class TradeDecision:
     entry_expires_at: datetime | None = None
     max_holding_sessions: int = 0
     order_type: str = ""
+    reference_readiness: str = "UNBOUND"
+    execution_eligible: bool = False
+    integrity_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
         require_aware(self.decision_time, "decision.decision_time")
+        for name in (
+            "planned_max_loss",
+            "estimated_cost",
+            "net_reward_risk",
+            "expected_r",
+            "target_probability",
+            "stop_probability",
+        ):
+            require_decimal(getattr(self, name), f"decision.{name}")
+        for name in ("entry_low", "entry_high", "stop", "target"):
+            value = getattr(self, name)
+            if value is not None:
+                require_decimal(value, f"decision.{name}")
+        if type(self.reasons) is not tuple or any(
+            not isinstance(reason, str) or not reason.strip() for reason in self.reasons
+        ):
+            raise TypeError("decision reasons must be an immutable text tuple")
+        if type(self.cancel_conditions) is not tuple or any(
+            not isinstance(condition, str) or not condition.strip()
+            for condition in self.cancel_conditions
+        ):
+            raise TypeError(
+                "decision cancel_conditions must be an immutable text tuple"
+            )
+        if type(self.metadata) is not tuple or any(
+            type(item) is not tuple
+            or len(item) != 2
+            or not all(isinstance(value, str) for value in item)
+            for item in self.metadata
+        ):
+            raise TypeError("decision metadata must be an immutable text-pair tuple")
         if self.quantity < 0:
             raise ValueError("quantity cannot be negative")
         if self.action is DecisionAction.BUY and self.quantity <= 0:
@@ -391,7 +732,30 @@ class TradeDecision:
                 raise ValueError("BUY decisions require a positive holding horizon")
             if not self.order_type.strip():
                 raise ValueError("BUY decisions require an order type")
+            if not self.reference_readiness.strip():
+                raise ValueError("BUY decisions require explicit reference readiness")
+        if type(self.execution_eligible) is not bool:
+            raise TypeError("execution_eligible must be a bool")
+        if self.execution_eligible and self.reference_readiness != "POINT_IN_TIME_VERIFIED":
+            raise ValueError(
+                "only point-in-time-verified decisions can be execution eligible"
+            )
         require_probability(self.target_probability, "decision.target_probability")
         require_probability(self.stop_probability, "decision.stop_probability")
         if self.calibration_sample_size < 0:
             raise ValueError("calibration_sample_size cannot be negative")
+        object.__setattr__(self, "integrity_hash", self._calculated_integrity_hash())
+
+    def _calculated_integrity_hash(self) -> str:
+        return content_id(
+            {
+                item.name: getattr(self, item.name)
+                for item in fields(self)
+                if item.name != "integrity_hash"
+            },
+            length=64,
+        )
+
+    def verify_integrity(self) -> None:
+        if self.integrity_hash != self._calculated_integrity_hash():
+            raise ValueError("trade decision integrity verification failed")

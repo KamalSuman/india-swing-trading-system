@@ -1,13 +1,7 @@
 from __future__ import annotations
 
-import hashlib
-import json
-from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass
-from datetime import date, datetime
+from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR
-from enum import Enum
-from os import PathLike
 from typing import Any
 
 from india_swing.domain.models import (
@@ -20,145 +14,10 @@ from india_swing.domain.models import (
     RiskPolicy,
     TradeDecision,
 )
+from india_swing.identity import content_id
 
 
 ZERO = Decimal("0")
-_SENSITIVE_ATTRIBUTE_PARTS = (
-    "api_key",
-    "apikey",
-    "authorization",
-    "credential",
-    "password",
-    "private_key",
-    "secret",
-    "token",
-)
-
-
-def _type_name(value: object) -> str:
-    value_type = type(value)
-    return f"{value_type.__module__}.{value_type.__qualname__}"
-
-
-def _is_sensitive_attribute(name: str) -> bool:
-    normalized = name.casefold().replace("-", "_")
-    return any(part in normalized for part in _SENSITIVE_ATTRIBUTE_PARTS)
-
-
-def _identity_value(value: object, stack: set[int]) -> object:
-    """Return a JSON-safe, deterministic representation without using repr addresses."""
-
-    if isinstance(value, Enum):
-        return {"$enum": _type_name(value), "value": _identity_value(value.value, stack)}
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    if isinstance(value, Decimal):
-        return {"$decimal": str(value)}
-    if isinstance(value, float):
-        return {"$float": value.hex()}
-    if isinstance(value, datetime):
-        return {"$datetime": value.isoformat(timespec="microseconds")}
-    if isinstance(value, date):
-        return {"$date": value.isoformat()}
-    if isinstance(value, bytes):
-        return {"$bytes_sha256": hashlib.sha256(value).hexdigest(), "length": len(value)}
-    if isinstance(value, PathLike):
-        return {"$path": str(value)}
-    if isinstance(value, type):
-        return {"$type": f"{value.__module__}.{value.__qualname__}"}
-
-    marker = id(value)
-    if marker in stack:
-        return {"$cycle": _type_name(value)}
-    stack.add(marker)
-    try:
-        if is_dataclass(value):
-            return {
-                "$dataclass": _type_name(value),
-                "fields": {
-                    field.name: _identity_value(getattr(value, field.name), stack)
-                    for field in fields(value)
-                },
-            }
-        if isinstance(value, Mapping):
-            pairs = [
-                (_identity_value(key, stack), _identity_value(item, stack))
-                for key, item in value.items()
-            ]
-            pairs.sort(key=lambda pair: _canonical_json(pair[0]))
-            return {"$mapping": [[key, item] for key, item in pairs]}
-        if isinstance(value, tuple):
-            return {"$tuple": [_identity_value(item, stack) for item in value]}
-        if isinstance(value, list):
-            return {"$list": [_identity_value(item, stack) for item in value]}
-        if isinstance(value, (set, frozenset)):
-            items = [_identity_value(item, stack) for item in value]
-            items.sort(key=_canonical_json)
-            return {"$set": items}
-        if callable(value):
-            return {
-                "$callable": f"{getattr(value, '__module__', type(value).__module__)}."
-                f"{getattr(value, '__qualname__', type(value).__qualname__)}"
-            }
-
-        explicit_material = getattr(value, "identity_material", None)
-        if explicit_material is not None:
-            if callable(explicit_material):
-                explicit_material = explicit_material()
-            return {
-                "$object": _type_name(value),
-                "identity_material": _identity_value(explicit_material, stack),
-            }
-
-        try:
-            attributes = vars(value)
-        except TypeError:
-            attributes = {}
-        public_attributes = {
-            name: item
-            for name, item in attributes.items()
-            if not name.startswith("_")
-            and not _is_sensitive_attribute(name)
-            and not callable(item)
-        }
-        return {
-            "$object": _type_name(value),
-            "attributes": _identity_value(public_attributes, stack),
-        }
-    finally:
-        stack.remove(marker)
-
-
-def canonical_identity(value: object) -> object:
-    return _identity_value(value, set())
-
-
-def _canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-
-
-def content_id(material: object, length: int = 20) -> str:
-    payload = _canonical_json(canonical_identity(material)).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()[:length]
-
-
-def component_identity(component: object) -> object:
-    versions: dict[str, object] = {}
-    for name in ("version", "model_version", "model_name", "model_id"):
-        value = getattr(component, name, None)
-        if value is not None and not callable(value):
-            versions[name] = value
-    return {
-        "component_type": _type_name(component),
-        "versions": versions,
-        "configuration": canonical_identity(component),
-    }
 
 
 def floor_units(value: Decimal) -> int:
@@ -186,6 +45,8 @@ class RiskEngine:
         rank: int,
         *,
         identity_context: object | None = None,
+        reference_readiness: str = "UNBOUND",
+        execution_eligible: bool = False,
     ) -> RiskEvaluation:
         setup = candidate.setup
         instrument = candidate.instrument
@@ -285,6 +146,10 @@ class RiskEngine:
             cancel_conditions=setup.cancel_conditions,
             metadata=(
                 ("rank", str(rank)),
+                ("instrument_id", instrument.instrument_id),
+                ("listing_id", instrument.listing_id),
+                ("instrument_fingerprint", instrument.content_fingerprint),
+                ("universe_snapshot_id", instrument.universe_snapshot_id),
                 ("risk_policy", self.policy.policy_version),
                 ("forecast_model", candidate.forecast.model_version),
                 ("research_model", research.model_version),
@@ -297,10 +162,12 @@ class RiskEngine:
             entry_expires_at=setup.entry_expires_at,
             max_holding_sessions=setup.max_holding_sessions,
             order_type="LIMIT",
+            reference_readiness=reference_readiness,
+            execution_eligible=execution_eligible,
         )
         signal_id = content_id(
             {
-                "identity_schema": "trade-signal-v2",
+                "identity_schema": "trade-signal-v3",
                 "pipeline_context": identity_context,
                 "candidate": candidate,
                 "research": research,

@@ -3,8 +3,17 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+.env
+.env.*
+!.env.example
+credentials*.json
+service-account*.json
+*.pem
+*.p12
+*.pfx
 dist/
 build/
 *.egg-info/
 var/audit/*.json
 !var/audit/.gitkeep
+var/market_data/

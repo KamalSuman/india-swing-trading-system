@@ -18,6 +18,19 @@ from india_swing.audit import (
 
 
 class AuditTests(unittest.TestCase):
+    def test_secret_bearing_payload_is_rejected_before_directory_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "audit"
+
+            with self.assertRaisesRegex(AuditIntegrityError, "sensitive mapping key"):
+                AuditWriter().write(
+                    output_dir,
+                    "run-1",
+                    {"api_key": "must-never-be-written"},
+                )
+
+            self.assertFalse(output_dir.exists())
+
     def test_write_read_round_trip_verifies_hash(self) -> None:
         payload = {
             "run_date": date(2026, 7, 15),
