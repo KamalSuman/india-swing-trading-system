@@ -23,7 +23,8 @@ The current vertical slice implements:
   equal-weight benchmark intent generators, with explicit point-in-time
   eligibility, as-of evidence IDs, a decision or veto for every candidate,
   create-once per-role batches, per-fold dispersion, a Holm familywise gate,
-  persisted research promotion, and a deterministic Markdown report;
+  persisted research promotion, create-once deterministic run/report manifests,
+  and a report publication/inspection CLI;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually
@@ -103,6 +104,22 @@ The leakage-safe evaluation split boundary is documented in
 `docs/EVALUATION.md`.
 The effective-dated delivery-cost and conservative fill policy is documented in
 `docs/COSTS_AND_EXECUTION.md`.
+
+Persist or inspect a family evaluation report after its registrations, runs,
+comparisons, and family aggregate have already been sealed:
+
+```powershell
+python -m india_swing.evaluation.cli report publish `
+  --strategy-family-id <registered-family-id>
+
+python -m india_swing.evaluation.cli report show `
+  --aggregate-id <family-aggregate-id>
+
+python -m india_swing.evaluation.cli report list
+```
+
+The CLI reads `INDIA_SWING_TRIAL_REGISTRY_ROOT` and
+`INDIA_SWING_EVALUATION_ROOT`; failures emit only a sanitized error type.
 
 After manually downloading the report named **CM - MII - Security File (.gz)
 (NSE Listed securities)**, import it without extracting it:

@@ -1,4 +1,9 @@
-from .config import TRIAL_REGISTRY_ROOT_ENV, TrialRegistryConfig
+from .config import (
+    EVALUATION_EVIDENCE_ROOT_ENV,
+    TRIAL_REGISTRY_ROOT_ENV,
+    EvaluationEvidenceConfig,
+    TrialRegistryConfig,
+)
 from .baselines import (
     DeterministicBaselineError,
     DeterministicBaselineEvaluationEngine,
@@ -14,6 +19,8 @@ from .baselines import (
     PointInTimeInstrument,
 )
 from .baseline_store import (
+    DeterministicComparisonRunConflict,
+    DeterministicComparisonRunNotFound,
     GENERATED_INTENT_BATCH_STORE_SCHEMA_VERSION,
     GeneratedIntentBatchConflict,
     GeneratedIntentBatchNotFound,
@@ -73,6 +80,12 @@ from .family_report import (
     TrialFamilyEvaluationReport,
     build_trial_family_evaluation_report,
 )
+from .family_report_store import (
+    TRIAL_FAMILY_REPORT_STORE_SCHEMA_VERSION,
+    LocalTrialFamilyReportStore,
+    TrialFamilyReportConflict,
+    TrialFamilyReportNotFound,
+)
 from .lifecycle_store import (
     TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION,
     LocalTrialLifecycleStore,
@@ -120,14 +133,18 @@ __all__ = [
     "DeterministicBaselineError",
     "DeterministicBaselineEvaluationEngine",
     "DeterministicComparisonRun",
+    "DeterministicComparisonRunConflict",
+    "DeterministicComparisonRunNotFound",
     "DeterministicEqualWeightBenchmarkGenerator",
     "DeterministicMomentumIntentGenerator",
     "EVALUATION_SPLIT_SCHEMA_VERSION",
+    "EVALUATION_EVIDENCE_ROOT_ENV",
     "EquityPoint",
     "EvaluatedTrade",
     "EvaluationDataReadiness",
     "EvaluationDataset",
     "EvaluationTradeIntent",
+    "EvaluationEvidenceConfig",
     "EqualWeightBenchmarkConfig",
     "FOLD_SIGN_HOLM_ALPHA",
     "FOLD_SIGN_HOLM_POLICY",
@@ -146,6 +163,7 @@ __all__ = [
     "LocalDeterministicComparisonRunStore",
     "LocalGeneratedIntentBatchStore",
     "LocalTrialFamilyAggregateStore",
+    "LocalTrialFamilyReportStore",
     "LocalTrialEvaluationResultStore",
     "LocalTrialEvaluationComparisonStore",
     "MINIMUM_SWING_LABEL_HORIZON_SESSIONS",
@@ -161,6 +179,7 @@ __all__ = [
     "TRIAL_EVALUATION_COMPARISON_STORE_SCHEMA_VERSION",
     "TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION",
     "TRIAL_FAMILY_AGGREGATE_STORE_SCHEMA_VERSION",
+    "TRIAL_FAMILY_REPORT_STORE_SCHEMA_VERSION",
     "TRIAL_REGISTRY_ROOT_ENV",
     "TRIAL_REGISTRATION_SCHEMA_VERSION",
     "TRIAL_REGISTRY_STORE_SCHEMA_VERSION",
@@ -183,6 +202,8 @@ __all__ = [
     "TrialFamilyEvaluationAggregate",
     "TrialFamilyEvaluationAggregator",
     "TrialFamilyEvaluationReport",
+    "TrialFamilyReportConflict",
+    "TrialFamilyReportNotFound",
     "TrialEvaluationComparisonConflict",
     "TrialEvaluationComparisonNotFound",
     "TrialRegistration",

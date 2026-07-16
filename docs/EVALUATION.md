@@ -198,8 +198,16 @@ persist.
 `build_trial_family_evaluation_report` renders a content-bound Markdown report
 from the aggregate and exact run set. It includes family decisions, Holm
 cutoffs, comparison eligibility, every fold's base/stressed excess, and an
-interpretation boundary. The report is deterministic but is not yet published
-by a dedicated local report store or CLI.
+interpretation boundary. `LocalDeterministicComparisonRunStore` now publishes
+one create-once run manifest per trial, binding both generated batches, the
+comparison, and every fold summary. A second result-derived run for the same
+trial is rejected.
+
+`LocalTrialFamilyReportStore` publishes one create-once report for each family
+aggregate and rechecks the aggregate and run evidence before writing. The
+`india-swing-evaluation` CLI can publish from persisted current-family runs,
+list report IDs, or render stored Markdown. It cannot accept caller-authored
+metrics, Markdown, aggregate decisions, or a selectively supplied trial list.
 
 Synthetic trials require an explicitly synthetic dataset. A non-synthetic
 trial requires `POINT_IN_TIME_VERIFIED`; `COLLECTION_ONLY` data fails before any
