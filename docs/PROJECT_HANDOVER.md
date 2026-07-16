@@ -6,25 +6,28 @@ Snapshot date: 2026-07-16 (Asia/Kolkata)
 
 The repository has a tested, fail-closed foundation for point-in-time Indian
 equity research, plus sealed NSE reference, daily-report, calendar, raw EOD
-price, and cross-vintage identity-candidate archives. It cannot yet issue a real
-trade alert: all real-file artifacts are deliberately `COLLECTION_ONLY` and
-`actionable=false`.
+price, cross-vintage identity-candidate, official identity-evidence, and
+review-decision
+archives. It cannot yet issue a real trade alert: all real-file artifacts are
+deliberately `COLLECTION_ONLY` and `actionable=false`.
 
 ## Repository and checkpoint
 
 - Local repository: `C:\project\india-swing-trading-system`
 - Private remote: `https://github.com/KamalSuman/india-swing-trading-system.git`
-- Working branch: `agent/daily-pipeline-runner`
-- Implementation checkpoint: explicit-predecessor daily collection runner
-- Remote `main`: `c684969` (merged PR #4)
-- PR #5 contains the preceding 16 July reconciliation compatibility checkpoint;
-  the current runner branch has no upstream and is not on GitHub at this snapshot.
+- Working branch: `agent/identity-evidence-archive`
+- Implementation checkpoint: explicit reviewed decisions and partial stable IDs
+- Remote `main`: `ce91ef9` (merged PR #6, explicit-predecessor daily runner)
+- The current branch has no upstream and is not on GitHub at
+  this snapshot.
 - Verified runtime: Python 3.12
 - Last full verification before this data checkpoint: 287 unit tests run, 284
-  passed and 3 skipped. Current focused verification: all 13 affected tests
-  passed (11 reconciliation and 2 daily-pipeline integration tests), touched
-  sources compiled, `git diff --check` passed, and the real 15/16 July chained
-  runs plus `show`/`list` inspection completed successfully.
+  passed and 3 skipped. Current focused verification: all 19 identity-evidence
+  and identity-decision tests passed, touched sources compiled, `git diff --check`
+  passed, the real
+  4,544-case queue reported 14,613 missing candidate/requirement pairs without
+  evidence, and official circular `CML73417.pdf` passed the strict PDF/declaration
+  parser using its real 268,719 bytes.
 
 The handover document may be committed after the implementation checkpoint, so
 use `git log -2 --oneline` to see the exact local tip.
@@ -226,6 +229,19 @@ the original bytes rather than trusting a cached Python object.
 - Additional requirements: 4,439 official continuity confirmations, 888
   listing-status cases, 92 adjacent-vintage observations, 92 validated
   identifiers, 13 official conflict resolutions, and one listing-lifecycle case.
+- The collection-only evidence archive accepts exact official Listing circular
+  PDFs and corporate-action CSVs with candidate/requirement declarations. Empty
+  coverage against this queue reports 14,613 missing pairs. No requirement has
+  been reviewed or satisfied and no stable identity has been assigned.
+- The reviewed-decision layer requires an explicit evidence claim and one
+  accepted/rejected decision per candidate/requirement pair. Duplicate decisions
+  fail instead of selecting the latest. Stable IDs are supported only for
+  fully accepted, validated-ISIN, non-conflicting candidates.
+- Real empty-review snapshot ID:
+  `b73b64db23e50a5efd8a9be61f03193e0031def7600a9c44a2325e765efba689`.
+  It contains 4,544 candidates, zero assigned IDs, 4,544 missing-review blockers,
+  and 105 additional unsupported-shape blockers (conflicted or unresolved).
+  It remains `COLLECTION_ONLY` and `actionable=false`.
 
 ### Chained daily pipeline reports
 
@@ -339,17 +355,48 @@ python -m india_swing.identity_registry.cli adjudication-show `
   --registry-id <sealed-registry-id>
 ```
 
+Archive exact official identity/lifecycle evidence and report queue coverage
+using the strict declaration in `docs/IDENTITY_EVIDENCE.md`:
+
+```powershell
+python -m india_swing.identity_evidence.cli import `
+  --source C:\path\to\official-source.pdf `
+  --declaration C:\path\to\official-source.identity.json
+
+python -m india_swing.identity_evidence.cli coverage `
+  --registry-id <sealed-registry-id> `
+  --evidence-id <evidence-artifact-id>
+```
+
+Import explicit reviews and materialize a partial stable-identity snapshot using
+the declaration contract in `docs/IDENTITY_DECISIONS.md`:
+
+```powershell
+python -m india_swing.identity_decisions.cli review-import `
+  --declaration C:\path\to\review.identity.json
+
+python -m india_swing.identity_decisions.cli materialize `
+  --registry-id <sealed-registry-id> `
+  --evidence-id <explicit-evidence-id> `
+  --review-bundle-id <explicit-review-bundle-id> `
+  --cutoff <ISO-8601-cutoff>
+```
+
 ## What is not implemented
 
 - Authenticated/licensed, automatically acquired point-in-time NSE calendar.
 - Calendar changes after 2026-07-31, including the August closing-auction
   transition and later special-session circulars.
-- More than two consecutive historical security-master vintages and official
-  evidence import/decisions for delistings, suspensions, renames, mergers,
-  demergers, and stable instrument/listing IDs. The candidate registry and
-  complete evidence queue are implemented, but two positive daily observations
-  cannot by themselves establish legal/economic continuity.
-- Official corporate-action ingestion and cutoff-specific adjusted views.
+- More than two consecutive historical security-master vintages and actual
+  reviewed decisions for delistings, suspensions, renames, mergers, and
+  demergers. The candidate registry, queue, evidence archive, review archive,
+  and simple validated-ISIN stable-ID materializer are implemented, but no real
+  evidence decision has been supplied.
+- Cryptographically authenticated reviewer identities, cross-ISIN corporate-
+  action continuity, and legal listing-validity intervals outside observed
+  security-master dates.
+- Corporate-action event normalization and cutoff-specific adjusted views. The
+  current CSV path only archives exact source bytes and candidate-bound claims.
 - Multi-year survivorship-safe price history.
 - A production liquidity/eligibility universe promoted to
   `POINT_IN_TIME_VERIFIED`.
@@ -378,17 +425,17 @@ python -m india_swing.identity_registry.cli adjudication-show `
    acquisition job for the security master and Multiple File Download bundle.
    Add scheduling, immutable object storage, and failure notification without
    introducing implicit latest-file selection.
-5. Feed consecutive masters into the implemented identity registry and its
-   complete adjudication queue. Acquire the official evidence named by every
-   case, then implement evidence import and reviewed decisions for stable
-   effective-dated IDs. This remains the key survivorship-bias boundary before
-   backtesting.
+5. Feed consecutive masters into the implemented identity registry and queue.
+   Use the implemented evidence archive to collect official documents against
+   exact requirements, then import explicit owner-reviewed decisions with the
+   implemented review layer. Independently verify every locator before accepting
+   it. This remains the key survivorship-bias boundary before backtesting.
 6. Build audited promotion/import paths for point-in-time verified calendars,
    daily universes, stable listing identities, explicit nontrading state, and
    effective-dated tick sizes. Feed them to the implemented sealed dataset
    assembler. The current two-session real archive remains ineligible.
-7. Add an official corporate-action source using a real archived fixture;
-   design its schema from the source rather than guessing it.
+7. Extend the archived corporate-action CSV source into normalized, effective-
+   dated adjustment events using real archived rows and explicit amendment rules.
 8. Evaluate the implemented deterministic baseline on point-in-time verified
    history with realistic Indian costs, slippage, liquidity, delistings, and
    registered trials.
@@ -412,6 +459,9 @@ python -m india_swing.identity_registry.cli adjudication-show `
   production.
 - A real official corporate-action export or an authorized source sample before
   that importer is designed.
+- Owner review decisions only after checking each exact archived PDF page or CSV
+  row. The reviewer ID is currently self-declared, so these decisions remain
+  collection-only and must not be treated as production authorization.
 - The next dated NSE CM MII security master and matching daily bundle, beginning
   with 17 July 2026, to extend the real consecutive history.
 - An authorized historical copy of `REG1_IND150726.csv`, if available, to fill
@@ -422,8 +472,8 @@ python -m india_swing.identity_registry.cli adjudication-show `
 
 ## Honest progress assessment
 
-Approximately 84% of a research-and-notification MVP foundation is implemented,
-but only about 53% of the work required for a defensible real-capital pilot.
+Approximately 85% of a research-and-notification MVP foundation is implemented,
+but only about 54% of the work required for a defensible real-capital pilot.
 The system is 0% live-trade-ready because it correctly refuses all real alerts.
 The largest remaining effort is trustworthy historical data and evaluation,
 not connecting an LLM or formatting a notification.
