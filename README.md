@@ -36,6 +36,10 @@ The current vertical slice implements:
 - a point-in-time corporate-action ledger contract that preserves amendments
   and cancellations, supports explicit split/bonus ratios and cash dividends,
   and refuses unsafe automatic factors for complex actions;
+- a replay-verified collection-only tick-size materializer sourced from the NSE
+  security master's paise-denominated `BidIntrvl`, with exact Decimal conversion,
+  reserved-field change detection, create-once storage, CLI, and promotion
+  evidence;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually
@@ -136,6 +140,7 @@ The event-sourced schedule boundary is documented in `docs/CALENDAR_DATA.md`.
 The raw historical-price boundary is documented in `docs/HISTORICAL_PRICES.md`.
 The promotion stages and corporate-action boundary are documented in
 `docs/PROMOTION.md` and `docs/CORPORATE_ACTIONS.md`.
+The security-master tick-size boundary is documented in `docs/TICK_SIZES.md`.
 The cross-vintage identity boundary is documented in
 `docs/IDENTITY_REGISTRY.md`.
 The explicit daily orchestration and predecessor boundary is documented in

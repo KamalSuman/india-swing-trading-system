@@ -145,6 +145,10 @@ packages under `src/india_swing` are:
 - `corporate_actions`: a point-in-time event/snapshot contract for explicit
   split/bonus ratios, INR cash dividends, amendments, and cancellations. It has
   no official NSE row importer or adjusted-price view yet.
+- `tick_sizes`: collection-only observations derived from the security-master
+  `BidIntrvl` paise field, with exact Decimal conversion, reserved `TickSz`
+  change detection, source-replay storage, sanitized CLI, and promotion
+  evidence. Stable-identity effective intervals are not yet available.
 
 See `README.md`, `docs/BIAS_INVARIANTS.md`, `docs/CALENDAR_DATA.md`,
 `docs/DAILY_PIPELINE.md`, `docs/HISTORICAL_PRICES.md`, and
@@ -221,6 +225,17 @@ the original bytes rather than trusting a cached Python object.
 - Price basis: `RAW_UNADJUSTED`
 - Coverage: `TRADED_ROWS_ONLY`
 - Readiness: `COLLECTION_ONLY`; actionable: false
+
+### Collection tick-size snapshots
+
+- 2026-07-15 snapshot:
+  `a7af0ef8ec7d5d6222f7b23224a6fdb909fdbb31723ad280c505871dc178499b`
+- 2026-07-16 snapshot:
+  `c7ea519186419a7145be09ff736e66ac55187ba60b72e664b58d1fc8e2eb8cb8`
+- Each contains 21,133 retained equity observations sourced from `BidIntrvl`.
+- Observed paise values are 1, 5, 10, 25, 50, 100, and 500.
+- Both remain `COLLECTION_ONLY`, non-actionable, and unresolved to stable
+  listing identities.
 
 ### Cross-vintage identity baseline
 
@@ -442,8 +457,10 @@ python -m india_swing.identity_decisions.cli materialize `
    it. This remains the key survivorship-bias boundary before backtesting.
 6. Build audited promotion/import paths for point-in-time verified calendars,
    daily universes, stable listing identities, explicit nontrading state, and
-   effective-dated tick sizes. Feed them to the implemented sealed dataset
-   assembler. The current two-session real archive remains ineligible.
+   effective-dated tick sizes. Collection tick-size snapshots now exist, but
+   still require stable-identity intervals and verified provenance. Feed the
+   promoted artifacts to the implemented sealed dataset assembler. The current
+   two-session real archive remains ineligible.
 7. Connect the implemented corporate-action event/snapshot contract to an
    official NSE CSV importer, then create separately versioned, cutoff-specific
    adjustment views using real archived rows and explicit amendment rules.

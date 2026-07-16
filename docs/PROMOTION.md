@@ -54,8 +54,10 @@ decisions. Invalid arguments and failures expose only an error type.
 
 The daily-run adapter currently produces diagnostics for calendar, stable
 identity, universe, raw prices, liquidity, surveillance, explicit nontrading
-state, and reconciliation. Corporate actions and tick sizes remain explicitly
-missing until their source-backed importers exist. Model validation, risk
+state, and reconciliation. A separately materialized tick-size snapshot can now
+be supplied with `--tick-size-snapshot-id`; it remains collection-only until
+stable listing identity and source provenance are promoted. Corporate actions
+remain explicitly missing until their source-backed importer exists. Model validation, risk
 authorization, and shadow operations remain alert-stage requirements rather
 than being inferred from a collection run.
 

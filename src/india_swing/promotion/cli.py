@@ -8,6 +8,12 @@ from typing import Sequence
 
 from india_swing.daily_pipeline.config import DailyPipelineConfig
 from india_swing.daily_pipeline.store import LocalDailyPipelineRunStore
+from india_swing.reference_data.config import ReferenceDataConfig
+from india_swing.tick_sizes import (
+    LocalTickSizeSnapshotStore,
+    TickSizeConfig,
+    tick_size_promotion_evidence,
+)
 
 from .adapters import promotion_evidence_from_daily_run
 from .config import PromotionConfig
@@ -43,6 +49,7 @@ def parser() -> argparse.ArgumentParser:
     )
     evaluate.add_argument("--run-id", required=True)
     evaluate.add_argument("--history-start", type=_date, required=True)
+    evaluate.add_argument("--tick-size-snapshot-id")
     show = commands.add_parser("show", help="show one promotion decision")
     show.add_argument("--decision-id", required=True)
     commands.add_parser("list", help="list promotion decisions")
@@ -81,11 +88,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             run = LocalDailyPipelineRunStore(
                 DailyPipelineConfig.from_env().data_root
             ).get(args.run_id)
+            evidence = list(promotion_evidence_from_daily_run(run))
+            if args.tick_size_snapshot_id is not None:
+                tick_snapshot = LocalTickSizeSnapshotStore(
+                    TickSizeConfig.from_env().data_root,
+                    ReferenceDataConfig.from_env().data_root,
+                ).get(args.tick_size_snapshot_id)
+                evidence.append(tick_size_promotion_evidence(tick_snapshot))
             decision = evaluate_promotion(
                 market_session=run.market_session,
                 history_start=args.history_start,
                 decision_cutoff=run.cutoff,
-                evidence=promotion_evidence_from_daily_run(run),
+                evidence=tuple(evidence),
             )
             response = {
                 "status": "COMPLETE",
