@@ -8,6 +8,12 @@ from typing import Sequence
 
 from india_swing.daily_pipeline.config import DailyPipelineConfig
 from india_swing.daily_pipeline.store import LocalDailyPipelineRunStore
+from india_swing.historical_prices.config import HistoricalPricesConfig
+from india_swing.liquidity import (
+    LiquidityConfig,
+    LocalLiquiditySnapshotStore,
+    liquidity_promotion_evidence,
+)
 from india_swing.reference_data.config import ReferenceDataConfig
 from india_swing.tick_sizes import (
     LocalTickSizeSnapshotStore,
@@ -19,6 +25,7 @@ from .adapters import promotion_evidence_from_daily_run
 from .config import PromotionConfig
 from .gate import evaluate_promotion
 from .models import PromotionDecision
+from .models import PromotionCapability
 from .store import LocalPromotionDecisionStore
 
 
@@ -50,6 +57,7 @@ def parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--run-id", required=True)
     evaluate.add_argument("--history-start", type=_date, required=True)
     evaluate.add_argument("--tick-size-snapshot-id")
+    evaluate.add_argument("--liquidity-snapshot-id")
     show = commands.add_parser("show", help="show one promotion decision")
     show.add_argument("--decision-id", required=True)
     commands.add_parser("list", help="list promotion decisions")
@@ -89,6 +97,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 DailyPipelineConfig.from_env().data_root
             ).get(args.run_id)
             evidence = list(promotion_evidence_from_daily_run(run))
+            if args.liquidity_snapshot_id is not None:
+                historical_config = HistoricalPricesConfig.from_env()
+                liquidity_snapshot = LocalLiquiditySnapshotStore(
+                    LiquidityConfig.from_env().data_root,
+                    historical_config.data_root,
+                    historical_config.daily_reports_root,
+                ).get(args.liquidity_snapshot_id)
+                evidence = [
+                    value
+                    for value in evidence
+                    if value.capability is not PromotionCapability.LIQUIDITY
+                ]
+                evidence.append(liquidity_promotion_evidence(liquidity_snapshot))
             if args.tick_size_snapshot_id is not None:
                 tick_snapshot = LocalTickSizeSnapshotStore(
                     TickSizeConfig.from_env().data_root,

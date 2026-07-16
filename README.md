@@ -40,6 +40,10 @@ The current vertical slice implements:
   security master's paise-denominated `BidIntrvl`, with exact Decimal conversion,
   reserved-field change detection, create-once storage, CLI, and promotion
   evidence;
+- a replay-verified trailing-liquidity materializer that computes exact median
+  traded value, volume, and available delivery percentage from sealed EOD
+  sessions, while refusing to treat traded-row-only coverage as zero-volume or
+  point-in-time universe evidence;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually
@@ -141,6 +145,7 @@ The raw historical-price boundary is documented in `docs/HISTORICAL_PRICES.md`.
 The promotion stages and corporate-action boundary are documented in
 `docs/PROMOTION.md` and `docs/CORPORATE_ACTIONS.md`.
 The security-master tick-size boundary is documented in `docs/TICK_SIZES.md`.
+The trailing-liquidity collection boundary is documented in `docs/LIQUIDITY.md`.
 The cross-vintage identity boundary is documented in
 `docs/IDENTITY_REGISTRY.md`.
 The explicit daily orchestration and predecessor boundary is documented in

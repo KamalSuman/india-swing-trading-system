@@ -149,6 +149,10 @@ packages under `src/india_swing` are:
   `BidIntrvl` paise field, with exact Decimal conversion, reserved `TickSz`
   change detection, source-replay storage, sanitized CLI, and promotion
   evidence. Stable-identity effective intervals are not yet available.
+- `liquidity`: collection-only trailing medians derived from sealed raw EOD
+  sessions, with exact Decimal arithmetic, source-replay storage, a sanitized
+  CLI, and promotion evidence. Missing traded-only rows are never interpreted
+  as zero volume, and candidate keys are not promoted as stable identities.
 
 See `README.md`, `docs/BIAS_INVARIANTS.md`, `docs/CALENDAR_DATA.md`,
 `docs/DAILY_PIPELINE.md`, `docs/HISTORICAL_PRICES.md`, and
@@ -236,6 +240,18 @@ the original bytes rather than trusting a cached Python object.
 - Observed paise values are 1, 5, 10, 25, 50, 100, and 500.
 - Both remain `COLLECTION_ONLY`, non-actionable, and unresolved to stable
   listing identities.
+
+### Collection liquidity snapshot
+
+- Snapshot ID:
+  `b1b9cf5ca6b9edfda61ee0e0cb0365c8852914ac9de9a85f189da2bde97637ea`
+- Sources: sealed 15 and 16 July raw EOD artifacts, 6,848 total traded rows.
+- Candidate `(validated ISIN, series)` groups: 3,574.
+- Required minimum history: 120 observed sessions; candidates meeting it: zero.
+- Coverage is only `TRADED_ROWS_ONLY`; calendar continuity and stable identity
+  remain unverified, so the snapshot is `COLLECTION_ONLY` and non-actionable.
+- Promotion decision with this snapshot and the 16 July tick snapshot:
+  `b644426b912521a375fae13d30cf3d6d48eee673c4cd4c8745d2b00488a94500`.
 
 ### Cross-vintage identity baseline
 
@@ -458,9 +474,12 @@ python -m india_swing.identity_decisions.cli materialize `
 6. Build audited promotion/import paths for point-in-time verified calendars,
    daily universes, stable listing identities, explicit nontrading state, and
    effective-dated tick sizes. Collection tick-size snapshots now exist, but
-   still require stable-identity intervals and verified provenance. Feed the
-   promoted artifacts to the implemented sealed dataset assembler. The current
-   two-session real archive remains ineligible.
+   still require stable-identity intervals and verified provenance. The
+   trailing-liquidity materializer also exists, but requires at least 120
+   verified sessions, complete calendar/nontrading coverage, and stable listing
+   identity before promotion. Feed the promoted artifacts to the implemented
+   sealed dataset assembler. The current two-session real archive remains
+   ineligible.
 7. Connect the implemented corporate-action event/snapshot contract to an
    official NSE CSV importer, then create separately versioned, cutoff-specific
    adjustment views using real archived rows and explicit amendment rules.

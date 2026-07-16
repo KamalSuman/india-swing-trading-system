@@ -43,7 +43,9 @@ history start:
 ```powershell
 python -m india_swing.promotion.cli evaluate-daily-run `
   --run-id <sealed-daily-run-id> `
-  --history-start 2020-01-01
+  --history-start 2020-01-01 `
+  --tick-size-snapshot-id <optional-tick-size-snapshot-id> `
+  --liquidity-snapshot-id <optional-liquidity-snapshot-id>
 ```
 
 The command loads the run from `INDIA_SWING_DAILY_PIPELINE_ROOT`, derives only
@@ -56,12 +58,23 @@ The daily-run adapter currently produces diagnostics for calendar, stable
 identity, universe, raw prices, liquidity, surveillance, explicit nontrading
 state, and reconciliation. A separately materialized tick-size snapshot can now
 be supplied with `--tick-size-snapshot-id`; it remains collection-only until
-stable listing identity and source provenance are promoted. Corporate actions
-remain explicitly missing until their source-backed importer exists. Model validation, risk
-authorization, and shadow operations remain alert-stage requirements rather
-than being inferred from a collection run.
+stable listing identity and source provenance are promoted. A trailing-liquidity
+snapshot can similarly replace the generic liquidity placeholder through
+`--liquidity-snapshot-id`. The adapter preserves all snapshot reason codes and
+does not infer zero volume from absent traded-only Bhavcopy rows. Corporate
+actions remain explicitly missing until their source-backed importer exists.
+Model validation, risk authorization, and shadow operations remain alert-stage
+requirements rather than being inferred from a collection run.
 
 The current real archive remains `COLLECTION_ONLY`: it has only two EOD
 sessions, zero promoted stable identities, unresolved surveillance state, and
 no verified corporate-action coverage. The gate is expected to report these
 conditions rather than issue a real trade.
+
+The current two-session liquidity diagnostic is
+`b1b9cf5ca6b9edfda61ee0e0cb0365c8852914ac9de9a85f189da2bde97637ea`.
+It contains 3,574 `(validated ISIN, series)` candidates and zero candidates with
+the required 120 observed sessions. Promotion decision
+`b644426b912521a375fae13d30cf3d6d48eee673c4cd4c8745d2b00488a94500`
+binds this diagnostic and the 16 July tick-size snapshot to the sealed 16 July
+daily run; it correctly remains `COLLECTION_ONLY`.
