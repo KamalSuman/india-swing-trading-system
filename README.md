@@ -18,6 +18,17 @@ The current vertical slice implements:
   lineage in every typed pipeline result, including result-only audit writes;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
+- a strict, collection-only importer and immutable raw archive for manually
+  downloaded NSE CM MII security masters;
+- a strict NSE multiple-report bundle importer that cross-reconciles UDiFF and
+  delivery Bhavcopies, preserves REG1/band/series date semantics, and quarantines
+  interoperability security masters;
+- collection-only positive traded-date evidence plus an all-row reconciliation
+  diagnostic that preserves nontraded securities and unresolved calendar state;
+- a sealed manual NSE calendar-circular archive and explicit event-graph
+  materializer that supports amendment chains without inventing data finality;
+- a replay-verified raw, unadjusted NSE EOD price store derived from paired
+  final UDiFF/full Bhavcopies;
 - content-addressed calendar/universe contracts with stable listing lineage;
 - effective-dated eligibility lineage and split-session trading windows;
 - stable instrument/listing/universe/data identity plus exact content
@@ -28,14 +39,18 @@ The current vertical slice implements:
 - a synthetic demo and standard-library unit tests.
 
 It has not yet used real account credentials or collected a live snapshot. It
-also does **not** yet use real Kronos weights, an LLM, a complete official NSE
-security master, or automatic execution. The demo symbols are fictional and
-cannot generate a real trade.
+also does **not** yet use real Kronos weights, an LLM, a point-in-time history of
+official NSE security masters, or automatic execution. The supplied current-day
+master remains a manually acquired collection-only artifact. The demo symbols
+are fictional and cannot generate a real trade.
 
 The code currently refuses to construct `POINT_IN_TIME_VERIFIED` calendar or
-universe artifacts. That is a deliberate release lock until official raw-file
-importers and completeness checks exist; only synthetic decisions can pass the
-end-to-end demo today. Every such decision carries `execution_eligible=false`.
+universe artifacts. The security-master importer preserves and validates one
+official input, but it deliberately remains `COLLECTION_ONLY`; authenticated
+calendar provenance, identity, liquidity, corporate actions, and cross-vintage
+completeness are still missing.
+Only synthetic decisions can pass the end-to-end demo today. Every such decision
+carries `execution_eligible=false`.
 
 The default risk policy rejects provisional or unvalidated probability estimates.
 The fictional demo opts out explicitly so the plumbing can be exercised; its
@@ -57,6 +72,43 @@ The optional Kite collector is documented in `docs/MARKET_DATA.md`. It requires
 the pinned `kiteconnect` extra and a runtime API key plus daily access token.
 The official NSE source boundary and manual/authorized ingestion rationale are
 documented in `docs/REFERENCE_DATA.md`.
+The selected daily-report families and their date roles are documented in
+`docs/DAILY_REPORTS.md`.
+The positive-date and all-row diagnostic boundary is documented in
+`docs/EVIDENCE_RECONCILIATION.md`.
+The event-sourced schedule boundary is documented in `docs/CALENDAR_DATA.md`.
+The raw historical-price boundary is documented in `docs/HISTORICAL_PRICES.md`.
+
+After manually downloading the report named **CM - MII - Security File (.gz)
+(NSE Listed securities)**, import it without extracting it:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m india_swing.reference_data.cli security-master import `
+  --file C:\path\to\NSE_CM_security_DDMMYYYY.csv.gz
+```
+
+The command never connects to NSE. It timestamps the local first-seen and
+validation events itself, rejects unknown schemas or incomplete rows, and stores
+the original gzip bytes plus a deterministic normalized representation under
+`var/reference_data`. Because local bytes alone do not prove their origin or
+business date, the manifest records `UNVERIFIED_MANUAL_FILE`, treats the filename
+date as a claim, and keeps the artifact collection-only. Import success is not
+permission to generate an alert.
+
+Import an NSE **Multiple file Download** ZIP without extracting it:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m india_swing.daily_reports.cli bundle import `
+  --file C:\path\to\Reports-Daily-Multiple.zip
+```
+
+The bundle importer accepts only pinned report families, preserves all outer
+entries in the raw ZIP, validates every selected row, and stores ignored and
+quarantined dispositions explicitly. It does not infer next-session effective
+dates without a verified trading calendar, merge overlapping band files, or
+turn any report into an executable signal.
 
 The demo creates one create-once audit file in `var/audit`. Running the exact same
 snapshot again intentionally refuses to overwrite that file. The local record is
@@ -76,7 +128,7 @@ synthetic session arithmetic, split-session windows, next-session entry, a
 same-session EOD finality contract, stable listing/universe lineage, main-board
 eligibility, deterministic
 risk gates, provider-output identity binding, explicit lineage, and local audit
-integrity. A dated official NSE calendar, parsed historical security master and
+integrity. An authenticated point-in-time NSE calendar, parsed historical security master and
 delistings, corporate-action
 vintages, complete Indian charge schedule, purged walk-forward evaluation, trial
 registry, immutable cloud storage, and live adapters remain required before any

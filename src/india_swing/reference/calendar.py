@@ -10,7 +10,7 @@ from .models import ExternalRecordRef, ReferenceReadiness
 
 
 INDIA_STANDARD_TIME = timezone(timedelta(hours=5, minutes=30))
-CALENDAR_SCHEMA_VERSION = "reference-calendar/v3"
+CALENDAR_SCHEMA_VERSION = "reference-calendar/v4"
 
 
 class CalendarIntegrityError(ValueError):
@@ -102,6 +102,12 @@ class CalendarDay:
     kind: CalendarDayKind
     reference: ExternalRecordRef
     session_windows: tuple[SessionWindow, ...] = ()
+    # Exchange schedule evidence and provider/report finality are different
+    # facts.  Official holiday and session circulars can establish the former
+    # without establishing when a particular EOD dataset became final.  The
+    # optional value remains for synthetic decision fixtures and a future,
+    # separately sourced finality overlay; calendar materializers must not
+    # invent it from a session close.
     data_ready_at: datetime | None = None
 
     def __post_init__(self) -> None:
@@ -124,15 +130,14 @@ class CalendarDay:
                 )
 
         if self.is_session:
-            if not self.session_windows or self.data_ready_at is None:
+            if not self.session_windows:
                 raise CalendarIntegrityError(
-                    "trading sessions require at least one window and a data-ready time"
+                    "trading sessions require at least one window"
                 )
             if not any(window.is_executable for window in self.session_windows):
                 raise CalendarIntegrityError(
                     "trading sessions require an executable live-continuous window"
                 )
-            assert self.data_ready_at is not None
             previous: SessionWindow | None = None
             for window in self.session_windows:
                 _require_ist_session_time(
@@ -150,15 +155,16 @@ class CalendarDay:
                         "session windows must be sorted and non-overlapping"
                     )
                 previous = window
-            _require_ist_session_time(
-                self.data_ready_at,
-                self.day,
-                "calendar_day.data_ready_at",
-            )
-            if self.session_windows[-1].closes_at >= self.data_ready_at:
-                raise CalendarIntegrityError(
-                    "data-ready time must be after the final session-window close"
+            if self.data_ready_at is not None:
+                _require_ist_session_time(
+                    self.data_ready_at,
+                    self.day,
+                    "calendar_day.data_ready_at",
                 )
+                if self.session_windows[-1].closes_at >= self.data_ready_at:
+                    raise CalendarIntegrityError(
+                        "data-ready time must be after the final session-window close"
+                    )
         elif self.session_windows or self.data_ready_at is not None:
             raise CalendarIntegrityError(
                 "closed calendar dates cannot carry session windows or a data-ready time"
@@ -260,6 +266,7 @@ class CalendarSnapshot:
         if self.segment != self.segment.strip().upper():
             raise ValueError("calendar segment must be normalized uppercase text")
         _require_aware(self.cutoff, "calendar.cutoff")
+        object.__setattr__(self, "cutoff", self.cutoff.astimezone(timezone.utc))
         _require_date(self.coverage_start, "calendar.coverage_start")
         _require_date(self.coverage_end, "calendar.coverage_end")
         if self.coverage_end < self.coverage_start:
@@ -370,6 +377,18 @@ class CalendarSnapshot:
             if calendar_day.is_session:
                 return calendar_day
         raise CalendarCoverageError("no next trading session exists within calendar coverage")
+
+    def previous_session(self, before: date) -> CalendarDay:
+        """Return the preceding declared session without inferring missing dates."""
+
+        self.day(before)
+        offset = (before - self.coverage_start).days
+        for calendar_day in reversed(self.days[:offset]):
+            if calendar_day.is_session:
+                return calendar_day
+        raise CalendarCoverageError(
+            "no previous trading session exists within calendar coverage"
+        )
 
     def advance_sessions(self, start: date, sessions: int) -> CalendarDay:
         if type(sessions) is not int or sessions < 0:

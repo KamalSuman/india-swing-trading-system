@@ -101,7 +101,10 @@ def validate_reference_context(
         raise ReferenceContextError(
             "decision market_session is not an eligible calendar session"
         ) from exc
-    assert signal_session.data_ready_at is not None
+    if signal_session.data_ready_at is None:
+        raise ReferenceContextError(
+            "decision calendar lacks a separately sourced data-finality policy"
+        )
     if snapshot.session_finalized_at < signal_session.data_ready_at:
         raise ReferenceContextError(
             "decision finality precedes the calendar session data-ready time"
