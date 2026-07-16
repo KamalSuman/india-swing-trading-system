@@ -23,6 +23,7 @@ india-swing-calendar-data = "india_swing.calendar_data.cli:main"
 india-swing-history = "india_swing.historical_prices.cli:main"
 india-swing-identity = "india_swing.identity_registry.cli:main"
 india-swing-evaluation = "india_swing.evaluation.cli:main"
+india-swing-daily-pipeline = "india_swing.daily_pipeline.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
