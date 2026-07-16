@@ -93,6 +93,8 @@ The cross-vintage identity boundary is documented in
 `docs/IDENTITY_REGISTRY.md`.
 The leakage-safe evaluation split boundary is documented in
 `docs/EVALUATION.md`.
+The effective-dated delivery-cost and conservative fill policy is documented in
+`docs/COSTS_AND_EXECUTION.md`.
 
 After manually downloading the report named **CM - MII - Security File (.gz)
 (NSE Listed securities)**, import it without extracting it:
@@ -159,7 +161,7 @@ eligibility, deterministic
 risk gates, provider-output identity binding, explicit lineage, and local audit
 integrity. An authenticated point-in-time NSE calendar, historical security-master
 and lifecycle vintages, corporate-action
-vintages, complete Indian charge schedule, purged walk-forward evaluation, trial
+vintages, historical Indian charge schedules, engine-generated evaluation metrics, trial
 registry, immutable cloud storage, and live adapters remain required before any
 real alert.
 
