@@ -14,14 +14,14 @@ trade alert: all real-file artifacts are deliberately `COLLECTION_ONLY` and
 
 - Local repository: `C:\project\india-swing-trading-system`
 - Private remote: `https://github.com/KamalSuman/india-swing-trading-system.git`
-- Working branch: `agent/evaluation-dataset-assembly`
-- Implementation checkpoint: current branch tip (`Seal evaluation dataset inputs`)
+- Working branch: `agent/identity-adjudication-queue`
+- Implementation checkpoint: current branch tip (`Enumerate identity adjudication evidence`)
 - Remote `main`: `7212c30`
 - The working branch has no upstream and is not on GitHub at this snapshot.
 - Verified runtime: Python 3.12
 - Last full verification: 287 unit tests run: 284 passed and 3 skipped. The
-  current cost/execution/evaluation integration has 116 focused tests run:
-  115 passed and 1 skipped;
+  current affected integration set has 138 focused tests run: 137 passed and
+  1 skipped;
   touched-source `compileall` and `git diff --check` passed.
 
 The handover document may be committed after the implementation checkpoint, so
@@ -92,7 +92,10 @@ packages under `src/india_swing` are:
   paired final UDiFF/full Bhavcopies, with row-level lineage.
 - `identity_registry`: replay-verified positive observations, ISIN-level
   continuity candidates, unambiguous adjacent-vintage listing transitions, and
-  explicit identifier/series conflicts. It assigns no stable tradable IDs.
+  explicit identifier/series conflicts. A create-once adjudication queue covers
+  every candidate and derives required provenance, date, adjacent-vintage,
+  identifier, lifecycle, listing-status, continuity, and conflict evidence. It
+  assigns no stable tradable IDs.
 - `evaluation`: immutable expanding purged walk-forward folds over a versioned
   trading-session tuple, plus create-once content-addressed trial
   preregistrations with same-family parent lineage and append-only lifecycle
@@ -196,10 +199,17 @@ the original bytes rather than trusting a cached Python object.
 - Cross-vintage transitions: zero, because only one dated source exists
 - Stable identities assigned: zero
 - Readiness: `COLLECTION_ONLY`; actionable: false
+- Adjudication queue ID: `1c34e426f1ebe831458f091e9535064ff35ed0865881a6ea94478744f23167e4`
+- Adjudication cases: 4,498; stable identities assigned: zero
+- Required for all 4,498 cases: authorized provenance and report-date verification
+- Additional blockers: 4,498 adjacent-vintage, 4,461 official listing-status,
+  46 validated-identifier, and 13 official conflict-resolution cases
 
 The 18 conflicts are mostly simultaneous old/new ticker rows, often with one
 `DelFlg=Y` row. Their meaning has not been inferred from the flag alone; they
-remain quarantined pending official lifecycle evidence.
+remain quarantined pending official lifecycle evidence. Thirteen candidate
+cases touch those conflict records; conflicts and candidate cases are different
+units and therefore do not need equal counts.
 
 ## Essential local commands
 
@@ -271,15 +281,26 @@ python -m india_swing.identity_registry.cli materialize `
   --cutoff <ISO-8601-cutoff>
 ```
 
+Materialize and inspect the complete official-evidence work queue:
+
+```powershell
+python -m india_swing.identity_registry.cli adjudication-materialize `
+  --registry-id <sealed-registry-id>
+
+python -m india_swing.identity_registry.cli adjudication-show `
+  --registry-id <sealed-registry-id>
+```
+
 ## What is not implemented
 
 - Authenticated/licensed, automatically acquired point-in-time NSE calendar.
 - Calendar changes after 2026-07-31, including the August closing-auction
   transition and later special-session circulars.
 - Multiple consecutive historical security-master vintages and official
-  adjudication of delistings, suspensions, renames, mergers, demergers, and
-  stable instrument/listing IDs. The candidate registry is implemented, but a
-  single real vintage cannot establish cross-date continuity.
+  evidence import/decisions for delistings, suspensions, renames, mergers,
+  demergers, and stable instrument/listing IDs. The candidate registry and
+  complete evidence queue are implemented, but a single real vintage cannot
+  establish cross-date continuity.
 - Official corporate-action ingestion and cutoff-specific adjusted views.
 - Multi-year survivorship-safe price history.
 - A production liquidity/eligibility universe promoted to
@@ -306,10 +327,11 @@ python -m india_swing.identity_registry.cli materialize `
    calendar coverage beyond July 31.
 4. Establish a recurring authorized collection job for the daily security
    master and Multiple File Download bundle. Materialize each raw EOD session.
-5. Feed consecutive masters into the implemented identity registry, review its
-   candidate transitions/conflicts, and add official listing-status evidence to
-   adjudicate stable effective-dated IDs. This remains the key survivorship-bias
-   boundary before backtesting.
+5. Feed consecutive masters into the implemented identity registry and its
+   complete adjudication queue. Acquire the official evidence named by every
+   case, then implement evidence import and reviewed decisions for stable
+   effective-dated IDs. This remains the key survivorship-bias boundary before
+   backtesting.
 6. Build audited promotion/import paths for point-in-time verified calendars,
    daily universes, stable listing identities, explicit nontrading state, and
    effective-dated tick sizes. Feed them to the implemented sealed dataset
@@ -347,7 +369,7 @@ python -m india_swing.identity_registry.cli materialize `
 
 ## Honest progress assessment
 
-Approximately 81% of a research-and-notification MVP foundation is implemented,
+Approximately 82% of a research-and-notification MVP foundation is implemented,
 but only about 51% of the work required for a defensible real-capital pilot.
 The system is 0% live-trade-ready because it correctly refuses all real alerts.
 The largest remaining effort is trustworthy historical data and evaluation,

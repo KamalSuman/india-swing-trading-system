@@ -6,12 +6,15 @@ import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from india_swing.identity_registry import (
+    IdentityAdjudicationRequirement,
+    IdentityAdjudicationStoreConflict,
     POSITIVE_OBSERVATIONS_ONLY,
     CrossVintageIdentityRegistry,
     IdentityCandidateStatus,
@@ -19,6 +22,8 @@ from india_swing.identity_registry import (
     IdentityRegistryConfig,
     IdentityRegistryIntegrityError,
     LocalIdentityRegistryStore,
+    LocalIdentityAdjudicationQueueStore,
+    build_identity_adjudication_queue,
     encode_identity_registry,
     materialize_cross_vintage_identity_registry,
 )
@@ -161,6 +166,113 @@ class IdentityRegistryTests(unittest.TestCase):
         self.assertTrue(transition.financial_instrument_id_changed)
         self.assertFalse(transition.series_changed)
         self.assertFalse(registry.actionable)
+
+    def test_adjudication_queue_covers_rename_and_requires_official_evidence(self) -> None:
+        registry = self.registry(
+            [security_row()],
+            [security_row(TckrSymb="INFYNEW", FinInstrmId="2000")],
+        )
+
+        queue = build_identity_adjudication_queue(registry)
+
+        self.assertEqual(len(queue.cases), len(registry.candidates))
+        case = queue.cases[0]
+        self.assertEqual(case.candidate_id, registry.candidates[0].candidate_id)
+        self.assertEqual(
+            set(case.requirements),
+            {
+                IdentityAdjudicationRequirement.AUTHORIZED_SOURCE_PROVENANCE,
+                IdentityAdjudicationRequirement.REPORT_DATE_VERIFICATION,
+                IdentityAdjudicationRequirement.OFFICIAL_CONTINUITY_CONFIRMATION,
+                IdentityAdjudicationRequirement.OFFICIAL_LISTING_LIFECYCLE,
+            },
+        )
+        self.assertFalse(queue.actionable)
+        self.assertFalse(queue.stable_identity_assigned)
+        queue.verify_content_identity()
+
+    def test_adjudication_queue_preserves_single_vintage_and_unvalidated_blockers(self) -> None:
+        registry = self.registry(
+            [security_row(), tcs_row(), security_row(ISIN="UNVALIDATED1", FinInstrmId="3000", TckrSymb="RAWONE")],
+            [security_row(), security_row(ISIN="UNVALIDATED1", FinInstrmId="3000", TckrSymb="RAWONE")],
+        )
+
+        queue = build_identity_adjudication_queue(registry)
+        cases_by_status: dict[IdentityCandidateStatus, list[object]] = {}
+        for case in queue.cases:
+            cases_by_status.setdefault(case.candidate_status, []).append(case)
+
+        single = cases_by_status[IdentityCandidateStatus.SINGLE_VINTAGE][0]
+        self.assertIn(
+            IdentityAdjudicationRequirement.ADJACENT_VINTAGE_OBSERVATION,
+            single.requirements,
+        )
+        self.assertIn(
+            IdentityAdjudicationRequirement.OFFICIAL_LISTING_STATUS,
+            single.requirements,
+        )
+        unresolved = cases_by_status[IdentityCandidateStatus.UNRESOLVED_IDENTIFIER]
+        self.assertEqual(len(unresolved), 2)
+        self.assertTrue(
+            all(
+                IdentityAdjudicationRequirement.VALIDATED_IDENTIFIER
+                in case.requirements
+                for case in unresolved
+            )
+        )
+
+    def test_adjudication_conflicts_require_official_resolution(self) -> None:
+        registry = self.registry(
+            [security_row()],
+            [security_row(ISIN="INE001A01036")],
+        )
+
+        queue = build_identity_adjudication_queue(registry)
+
+        self.assertTrue(queue.cases)
+        self.assertTrue(all(case.conflict_ids for case in queue.cases))
+        self.assertTrue(
+            all(
+                IdentityAdjudicationRequirement.OFFICIAL_CONFLICT_RESOLUTION
+                in case.requirements
+                for case in queue.cases
+            )
+        )
+        self.assertTrue(
+            all(
+                IdentityAdjudicationRequirement.ADJACENT_VINTAGE_OBSERVATION
+                in case.requirements
+                for case in queue.cases
+            )
+        )
+
+    def test_adjudication_store_replays_registry_and_rejects_tampering(self) -> None:
+        registry = self.registry(
+            [security_row()],
+            [security_row(TckrSymb="INFYNEW", FinInstrmId="2000")],
+        )
+        registry_store = LocalIdentityRegistryStore(
+            self.identity_root,
+            self.reference_root,
+        )
+        registry_store.put(registry)
+        store = LocalIdentityAdjudicationQueueStore(
+            self.identity_root,
+            registry_store,
+        )
+        queue = build_identity_adjudication_queue(registry)
+
+        stored = store.publish(queue, registry_id=registry.registry_id)
+        self.assertEqual(stored, queue)
+        self.assertEqual(store.get(registry.registry_id), queue)
+        self.assertEqual(store.list_queues(), (queue,))
+
+        path = store.path_for(registry.registry_id)
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["queue"]["stable_identity_assigned"] = True
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaises(IdentityAdjudicationStoreConflict):
+            store.get(registry.registry_id)
 
     def test_source_padded_instrument_name_is_preserved(self) -> None:
         registry = self.registry(
@@ -376,6 +488,60 @@ class IdentityRegistryTests(unittest.TestCase):
         self.assertEqual(len(manifests), 1)
         value = json.loads(manifests[0].read_text(encoding="utf-8"))
         self.assertEqual(value["observation_count"], 2)
+
+    def test_cli_materializes_shows_and_lists_adjudication_queue(self) -> None:
+        sources = self.import_sources(
+            [security_row()],
+            [security_row(TckrSymb="INFYNEW", FinInstrmId="2000")],
+        )
+        environment = {
+            "INDIA_SWING_REFERENCE_DATA_ROOT": str(self.reference_root),
+            "INDIA_SWING_IDENTITY_REGISTRY_ROOT": str(self.identity_root),
+        }
+        with patch.dict("os.environ", environment, clear=False):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    identity_registry_main(
+                        [
+                            "materialize",
+                            "--security-master-id",
+                            sources[0].manifest.artifact_id,
+                            "--security-master-id",
+                            sources[1].manifest.artifact_id,
+                            "--cutoff",
+                            CUTOFF.isoformat(),
+                        ]
+                    ),
+                    0,
+                )
+            registry_id = json.loads(output.getvalue())["registry_id"]
+
+            for command in (
+                "adjudication-materialize",
+                "adjudication-show",
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(
+                        identity_registry_main(
+                            [command, "--registry-id", registry_id]
+                        ),
+                        0,
+                    )
+                value = json.loads(output.getvalue())
+                self.assertEqual(value["registry_id"], registry_id)
+                self.assertFalse(value["stable_identity_assigned"])
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    identity_registry_main(["adjudication-list"]),
+                    0,
+                )
+            queues = json.loads(output.getvalue())["queues"]
+            self.assertEqual(len(queues), 1)
+            self.assertEqual(queues[0]["registry_id"], registry_id)
 
 
 if __name__ == "__main__":

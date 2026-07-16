@@ -44,7 +44,8 @@ The current vertical slice implements:
   final UDiFF/full Bhavcopies;
 - a sealed, positive-observation-only cross-vintage identity registry that
   detects rename candidates and identifier reuse without inventing delistings
-  or assigning tradable stable IDs;
+  or assigning tradable stable IDs, plus a create-once complete adjudication
+  queue that derives the official evidence required for every candidate;
 - immutable expanding purged walk-forward plans that use explicit trading
   sessions, ten-session minimum label/embargo boundaries, and nonrepeating test
   windows;

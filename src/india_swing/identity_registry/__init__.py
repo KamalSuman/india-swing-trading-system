@@ -6,6 +6,24 @@ from .artifact_store import (
     LocalIdentityRegistryStore,
     StoredIdentityRegistry,
 )
+from .adjudication import (
+    IDENTITY_ADJUDICATION_POLICY_VERSION,
+    IDENTITY_ADJUDICATION_SCHEMA_VERSION,
+    IdentityAdjudicationCase,
+    IdentityAdjudicationError,
+    IdentityAdjudicationQueue,
+    IdentityAdjudicationRequirement,
+    IdentityAdjudicationState,
+    build_identity_adjudication_queue,
+)
+from .adjudication_store import (
+    IDENTITY_ADJUDICATION_STORE_SCHEMA_VERSION,
+    IdentityAdjudicationQueueNotFound,
+    IdentityAdjudicationStoreConflict,
+    LocalIdentityAdjudicationQueueStore,
+    decode_identity_adjudication_queue,
+    encode_identity_adjudication_queue,
+)
 from .codec import encode_identity_registry
 from .config import IdentityRegistryConfig
 from .materialize import materialize_cross_vintage_identity_registry
@@ -29,6 +47,9 @@ from .models import (
 )
 
 __all__ = [
+    "IDENTITY_ADJUDICATION_POLICY_VERSION",
+    "IDENTITY_ADJUDICATION_SCHEMA_VERSION",
+    "IDENTITY_ADJUDICATION_STORE_SCHEMA_VERSION",
     "IDENTITY_REGISTRY_CODEC_VERSION",
     "IDENTITY_REGISTRY_DATASET",
     "IDENTITY_REGISTRY_POLICY_VERSION",
@@ -37,6 +58,13 @@ __all__ = [
     "POSITIVE_OBSERVATIONS_ONLY",
     "UNVERIFIED_REPORT_DATE_CLAIMS",
     "CrossVintageIdentityRegistry",
+    "IdentityAdjudicationCase",
+    "IdentityAdjudicationError",
+    "IdentityAdjudicationQueue",
+    "IdentityAdjudicationQueueNotFound",
+    "IdentityAdjudicationRequirement",
+    "IdentityAdjudicationState",
+    "IdentityAdjudicationStoreConflict",
     "IdentityCandidateBasis",
     "IdentityCandidateStatus",
     "IdentityCandidateTransition",
@@ -51,8 +79,11 @@ __all__ = [
     "IdentityRegistryStoreConflict",
     "IdentityRegistryStoreManifest",
     "LocalIdentityRegistryStore",
+    "LocalIdentityAdjudicationQueueStore",
     "StoredIdentityRegistry",
     "encode_identity_registry",
+    "decode_identity_adjudication_queue",
+    "encode_identity_adjudication_queue",
+    "build_identity_adjudication_queue",
     "materialize_cross_vintage_identity_registry",
 ]
-
