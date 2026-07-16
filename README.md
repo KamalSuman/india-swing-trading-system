@@ -18,7 +18,7 @@ The current vertical slice implements:
   lineage in every typed pipeline result, including result-only audit writes;
 - purged-fold-bound evaluation that generates conservative fills, itemized
   cash-equity costs, mark-to-market equity, fixed metrics, threshold outcomes,
-  and create-once full-result evidence;
+  base/stressed benchmark comparisons, and create-once full-result evidence;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually

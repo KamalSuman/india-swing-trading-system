@@ -1,4 +1,10 @@
 from .config import TRIAL_REGISTRY_ROOT_ENV, TrialRegistryConfig
+from .comparison_store import (
+    TRIAL_EVALUATION_COMPARISON_STORE_SCHEMA_VERSION,
+    LocalTrialEvaluationComparisonStore,
+    TrialEvaluationComparisonConflict,
+    TrialEvaluationComparisonNotFound,
+)
 from .engine import (
     SUPPORTED_METRICS,
     DailyExecutionPolicy,
@@ -8,6 +14,8 @@ from .engine import (
     EvaluationDataset,
     EvaluationTradeIntent,
     TrialEvaluationEngine,
+    TrialEvaluationComparisonEngine,
+    TrialEvaluationComparisonResult,
     TrialEvaluationError,
     TrialEvaluationResult,
 )
@@ -75,6 +83,7 @@ __all__ = [
     "HOLDOUT_EVENT_TYPES",
     "LocalTrialLifecycleStore",
     "LocalTrialEvaluationResultStore",
+    "LocalTrialEvaluationComparisonStore",
     "MINIMUM_SWING_LABEL_HORIZON_SESSIONS",
     "EvaluationPlanError",
     "EvaluationPlanIntegrityError",
@@ -83,6 +92,7 @@ __all__ = [
     "TERMINAL_OUTCOME_EVENT_TYPES",
     "TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION",
     "TRIAL_EVALUATION_RESULT_STORE_SCHEMA_VERSION",
+    "TRIAL_EVALUATION_COMPARISON_STORE_SCHEMA_VERSION",
     "TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION",
     "TRIAL_REGISTRY_ROOT_ENV",
     "TRIAL_REGISTRATION_SCHEMA_VERSION",
@@ -94,10 +104,14 @@ __all__ = [
     "TrialLifecycleEventType",
     "TrialLifecycleIntegrityError",
     "TrialEvaluationEngine",
+    "TrialEvaluationComparisonEngine",
+    "TrialEvaluationComparisonResult",
     "TrialEvaluationError",
     "TrialEvaluationResult",
     "TrialEvaluationResultConflict",
     "TrialEvaluationResultNotFound",
+    "TrialEvaluationComparisonConflict",
+    "TrialEvaluationComparisonNotFound",
     "TrialRegistration",
     "TrialRegistrationError",
     "TrialRegistrationIntegrityError",

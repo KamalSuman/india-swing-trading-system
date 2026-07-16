@@ -11,12 +11,14 @@ from india_swing.evaluation import (
     EquityPoint,
     LocalTrialLifecycleStore,
     LocalTrialEvaluationResultStore,
+    LocalTrialEvaluationComparisonStore,
     LocalTrialRegistry,
     TrialLifecycleConflict,
     TrialLifecycleEventType,
     TrialLifecycleIntegrityError,
     TrialNotRegistered,
     TrialEvaluationResult,
+    TrialEvaluationComparisonResult,
     TrialStage,
     decode_trial_lifecycle_event,
     encode_trial_lifecycle_event,
@@ -30,10 +32,13 @@ class TrialLifecycleTests(unittest.TestCase):
         self.root = Path(self.temp.name) / "trials"
         self.registry = LocalTrialRegistry(self.root)
         self.result_store = LocalTrialEvaluationResultStore(self.root, self.registry)
+        self.comparison_store = LocalTrialEvaluationComparisonStore(
+            self.root, self.registry, self.result_store
+        )
         self.store = LocalTrialLifecycleStore(
             self.root,
             self.registry,
-            self.result_store,
+            self.comparison_store,
         )
         self.registration = registration()
         self.registry.register(self.registration)
@@ -97,14 +102,26 @@ class TrialLifecycleTests(unittest.TestCase):
             pass_thresholds=self.registration.pass_thresholds,
             passed=False,
         )
-        self.result_store.publish(generated)
+        comparison = TrialEvaluationComparisonResult(
+            trial_id=self.registration.trial_id,
+            strategy_id=self.registration.model_bundle_id,
+            benchmark_id=self.registration.benchmark_id,
+            primary_metric=self.registration.primary_metric,
+            base_slippage_bps=self.registration.base_slippage_bps,
+            stressed_slippage_bps=self.registration.stressed_slippage_bps,
+            strategy_base=generated,
+            benchmark_base=generated,
+            strategy_stressed=generated,
+            benchmark_stressed=generated,
+        )
+        self.comparison_store.publish(comparison)
         return self.store.append(
             trial_id=self.registration.trial_id,
             event_type=TrialLifecycleEventType.TRIAL_COMPLETED,
             occurred_at=self.registration.registered_at + timedelta(seconds=seconds),
             actor_id="evaluation-runner",
             reason="Persist the preregistered terminal metrics.",
-            evaluation_result=generated,
+            evaluation_comparison=comparison,
         )
 
     def access_results(self, *, seconds: int = 3):

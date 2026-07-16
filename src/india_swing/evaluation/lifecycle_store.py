@@ -17,7 +17,8 @@ from india_swing._filesystem import (
     advisory_file_lock,
     read_stable_regular_file,
 )
-from .engine import TrialEvaluationError, TrialEvaluationResult
+from .comparison_store import LocalTrialEvaluationComparisonStore
+from .engine import TrialEvaluationComparisonResult, TrialEvaluationError
 
 from .lifecycle import (
     HOLDOUT_ACCESS_EVENT_TYPES,
@@ -29,7 +30,6 @@ from .lifecycle import (
     TrialLifecycleEventType,
     TrialLifecycleIntegrityError,
 )
-from .result_store import LocalTrialEvaluationResultStore
 from .trial_store import LocalTrialRegistry, TrialNotRegistered
 from .trials import TrialRegistration, TrialStage
 
@@ -259,15 +259,15 @@ class LocalTrialLifecycleStore:
         self,
         root: Path,
         registry: LocalTrialRegistry,
-        result_store: LocalTrialEvaluationResultStore,
+        comparison_store: LocalTrialEvaluationComparisonStore,
     ) -> None:
         self.root = Path(root)
         if type(registry) is not LocalTrialRegistry:
             raise TypeError("registry must be an exact LocalTrialRegistry")
-        if type(result_store) is not LocalTrialEvaluationResultStore:
-            raise TypeError("result_store must be an exact LocalTrialEvaluationResultStore")
+        if type(comparison_store) is not LocalTrialEvaluationComparisonStore:
+            raise TypeError("comparison_store must be exact")
         self.registry = registry
-        self.result_store = result_store
+        self.comparison_store = comparison_store
 
     @property
     def events_root(self) -> Path:
@@ -324,43 +324,50 @@ class LocalTrialLifecycleStore:
         holdout_id: str | None = None,
         metrics: tuple[tuple[str, Decimal], ...] = (),
         passed: bool | None = None,
-        evaluation_result: TrialEvaluationResult | None = None,
+        evaluation_comparison: TrialEvaluationComparisonResult | None = None,
     ) -> TrialLifecycleEvent:
         registration = self.registry.require_registered(trial_id)
         evaluation_result_id: str | None = None
         if event_type is TrialLifecycleEventType.TRIAL_COMPLETED:
-            if type(evaluation_result) is not TrialEvaluationResult:
+            if type(evaluation_comparison) is not TrialEvaluationComparisonResult:
                 raise TrialLifecycleConflict(
-                    "trial completion requires an engine-generated evaluation result"
+                    "trial completion requires an engine-generated comparison"
                 )
             if metrics or passed is not None:
                 raise TrialLifecycleConflict(
                     "caller-provided completion metrics are forbidden"
                 )
-            evaluation_result.verify_content_identity()
+            evaluation_comparison.verify_content_identity()
             try:
-                self.result_store.require_persisted(evaluation_result)
+                self.comparison_store.require_persisted(evaluation_comparison)
             except TrialEvaluationError as exc:
                 raise TrialLifecycleConflict(
                     "trial completion requires a persisted evaluation result"
                 ) from exc
-            if evaluation_result.trial_id != registration.trial_id:
-                raise TrialLifecycleConflict("evaluation result belongs to another trial")
+            if evaluation_comparison.trial_id != registration.trial_id:
+                raise TrialLifecycleConflict("evaluation comparison belongs to another trial")
             if (
-                evaluation_result.split_plan_id != registration.split_plan_id
-                or evaluation_result.execution_policy_id
+                evaluation_comparison.strategy_base.split_plan_id
+                != registration.split_plan_id
+                or evaluation_comparison.strategy_base.execution_policy_id
                 != registration.execution_policy_hash
-                or evaluation_result.cost_schedule_id
+                or evaluation_comparison.strategy_base.cost_schedule_id
                 != registration.cost_schedule_hash
-                or evaluation_result.pass_thresholds != registration.pass_thresholds
+                or evaluation_comparison.strategy_base.pass_thresholds
+                != registration.pass_thresholds
             ):
                 raise TrialLifecycleConflict(
                     "evaluation result does not match registered policies or thresholds"
                 )
-            metrics = evaluation_result.metrics
-            passed = evaluation_result.passed
-            evaluation_result_id = evaluation_result.result_id
-        elif evaluation_result is not None:
+            metrics = tuple(
+                sorted(
+                    evaluation_comparison.strategy_base.metrics
+                    + evaluation_comparison.comparison_metrics
+                )
+            )
+            passed = evaluation_comparison.passed
+            evaluation_result_id = evaluation_comparison.comparison_id
+        elif evaluation_comparison is not None:
             raise TrialLifecycleConflict(
                 "only trial completion can carry an evaluation result"
             )

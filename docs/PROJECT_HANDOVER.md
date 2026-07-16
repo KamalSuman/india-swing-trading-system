@@ -15,12 +15,12 @@ trade alert: all real-file artifacts are deliberately `COLLECTION_ONLY` and
 - Local repository: `C:\project\india-swing-trading-system`
 - Private remote: `https://github.com/KamalSuman/india-swing-trading-system.git`
 - Working branch: `agent/cross-vintage-identity`
-- Implementation checkpoint: current branch tip (`Persist results and price intraday exits`)
+- Implementation checkpoint: current branch tip (`Compare stressed strategy and benchmark evidence`)
 - Remote `main`: `a21333b`
 - The working branch has no upstream and is not on GitHub at this snapshot.
 - Verified runtime: Python 3.12
 - Last full verification: 287 unit tests run: 284 passed and 3 skipped. The
-  current cost/execution/evaluation integration has 72 focused tests passing;
+  current cost/execution/evaluation integration has 76 focused tests passing;
   touched-source `compileall` and `git diff --check` passed.
 
 The handover document may be committed after the implementation checkpoint, so
@@ -98,7 +98,9 @@ packages under `src/india_swing` are:
   chains for holdout access and outcomes. Its engine generates fills, itemized
   costs, mark-to-market equity, fixed metrics, and threshold results while
   rejecting training/validation signals and collection-only data. Full results
-  are now create-once artifacts that must exist before lifecycle completion.
+  are create-once artifacts. Strategy and benchmark now run through identical
+  base/stressed paths, and their persisted comparison is required before
+  lifecycle completion.
 - `execution`: a content-bound Zerodha/NSE delivery plus fully-netted intraday
   tariff effective from 2026-03-01 and a pessimistic daily-bar simulator for
   next-session entries, gaps, stops/targets, tick rounding, participation
@@ -273,8 +275,8 @@ python -m india_swing.identity_registry.cli materialize `
   account/product/exchange tariffs or dealer/auto-square-off surcharges.
 - A fitted strategy, Kronos weights, calibrated probabilities, news feed,
   real-data purged walk-forward backtest, shadow/paper alerts, or performance report.
-- Engine-generated stressed-slippage metrics for confirmatory reporting and
-  identical benchmark evaluation through the same fill/cost path.
+- A real deterministic baseline strategy and benchmark intent generator,
+  multiple-testing aggregation, and a report over actual historical folds.
 - Cloud Storage immutability, Cloud Run scheduling, Secret Manager wiring,
   monitoring, notifications, or live Zerodha execution.
 
@@ -293,9 +295,9 @@ python -m india_swing.identity_registry.cli materialize `
    candidate transitions/conflicts, and add official listing-status evidence to
    adjudicate stable effective-dated IDs. This remains the key survivorship-bias
    boundary before backtesting.
-6. Add engine-generated stressed-slippage scenarios and run the preregistered
-   benchmark through the identical fill/cost path. The one-session real archive
-   remains ineligible.
+6. Implement the deterministic non-LLM baseline and benchmark intent generators,
+   then aggregate their generated comparisons across registered folds. The
+   one-session real archive remains ineligible.
 7. Add an official corporate-action source using a real archived fixture;
    design its schema from the source rather than guessing it.
 8. Implement a deterministic non-LLM baseline strategy and evaluate it with
@@ -329,8 +331,8 @@ python -m india_swing.identity_registry.cli materialize `
 
 ## Honest progress assessment
 
-Approximately 68% of a research-and-notification MVP foundation is implemented,
-but only about 40% of the work required for a defensible real-capital pilot.
+Approximately 71% of a research-and-notification MVP foundation is implemented,
+but only about 43% of the work required for a defensible real-capital pilot.
 The system is 0% live-trade-ready because it correctly refuses all real alerts.
 The largest remaining effort is trustworthy historical data and evaluation,
 not connecting an LLM or formatting a notification.

@@ -37,8 +37,8 @@ supplied:
 - historical cost schedules for every evaluated date and a stressed slippage case;
 - complete suspension, partial-fill, missing-quote, delisting, and partially
   netted-order allocation rules;
-- identical fills/costs for the strategy and simple benchmark;
-- a generated stressed-slippage scenario for confirmatory reporting.
+- a real preregistered deterministic strategy and benchmark implementation;
+- multiple-testing correction over actual trial families and repetitions.
 
 ## Trial preregistration
 
@@ -69,10 +69,11 @@ invalidated states.
 Holdout access fails before an unseal event or when its ID disagrees with the
 sealed registration. A completed confirmatory trial requires audited holdout
 results access and every registered metric. Completion no longer accepts
-caller-provided metric tuples: it requires a `TrialEvaluationResult`, verifies
-its trial/split/execution/cost/threshold bindings, requires the full artifact to
-already exist in `LocalTrialEvaluationResultStore`, and records the generated
-result ID. `passed=false` is a first-class
+caller-provided metric tuples: it requires a
+`TrialEvaluationComparisonResult`, verifies its
+trial/split/execution/cost/threshold/benchmark bindings, requires the comparison
+and every referenced full scenario artifact to already exist, and records the
+comparison ID. `passed=false` is a first-class
 terminal result and remains queryable. A later audit can append invalidation but
 cannot replace the original result. After a parent's holdout is unsealed, a
 confirmatory successor cannot reuse that holdout; it needs a new sealed holdout
@@ -112,6 +113,20 @@ legs, mark-to-market equity curve, metrics, thresholds, and identities as one
 create-once JSON artifact. Reads reconstruct every nested typed value and
 recompute fill, trade, charge, metric, pass/fail, and result identities. A
 lifecycle completion cannot reference an in-memory-only result.
+
+`TrialEvaluationComparisonEngine` runs strategy and benchmark intents through
+the exact same dataset, split plan, capital, execution policy, and cost schedule.
+The execution-policy identity freezes both base and optional stressed slippage.
+If stress is registered, the engine generates four evidence results: strategy
+base/stressed and benchmark base/stressed. The comparison passes only when the
+strategy clears its preregistered thresholds and its primary metric is at least
+the benchmark value in every required scenario.
+
+`LocalTrialEvaluationComparisonStore` first publishes every referenced full
+result, then writes a create-once comparison artifact containing their IDs,
+registered strategy/benchmark/slippage bindings, excess-primary metrics, and
+the recomputed pass result. Lifecycle completion consumes this persisted
+comparison, not a selectively chosen scenario.
 
 Synthetic trials require an explicitly synthetic dataset. A non-synthetic
 trial requires `POINT_IN_TIME_VERIFIED`; `COLLECTION_ONLY` data fails before any

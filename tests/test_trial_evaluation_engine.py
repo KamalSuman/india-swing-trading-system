@@ -10,6 +10,7 @@ from india_swing.evaluation import (
     EvaluationDataset,
     EvaluationTradeIntent,
     TrialEvaluationEngine,
+    TrialEvaluationComparisonEngine,
     TrialEvaluationError,
     TrialRegistration,
     TrialStage,
@@ -46,10 +47,11 @@ def simulation_bar(session: date, **overrides: object) -> SimulationBar:
     return SimulationBar(**values)
 
 
-def policy() -> DailyExecutionPolicy:
+def policy(*, stressed_slippage_bps: Decimal | None = None) -> DailyExecutionPolicy:
     return DailyExecutionPolicy(
         slippage_bps=D("10"),
         maximum_participation=D("0.0025"),
+        stressed_slippage_bps=stressed_slippage_bps,
     )
 
 
@@ -440,6 +442,96 @@ class TrialEvaluationEngineTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TrialEvaluationError, "dataset content identity"):
             self.evaluate(dataset=value)
+
+    def test_strategy_and_benchmark_use_base_and_stressed_execution_paths(self) -> None:
+        execution = policy(stressed_slippage_bps=D("25"))
+        registered = registration(
+            execution_policy_hash=execution.policy_id,
+            stressed_slippage_bps=D("25"),
+        )
+        no_fill_benchmark = intent(
+            signal_id="c" * 64,
+            entry_order=LimitEntryOrder(
+                symbol="RELIANCE",
+                signal_session=SESSIONS[SIGNAL_INDEX],
+                first_eligible_session=SESSIONS[SIGNAL_INDEX + 1],
+                expiry_session=SESSIONS[SIGNAL_INDEX + 1],
+                quantity=100,
+                limit_price=D("97"),
+                tick_size=D("0.05"),
+                maximum_participation=D("0.0025"),
+            ),
+            stop_price=D("92"),
+            target_price=D("107"),
+        )
+
+        comparison = TrialEvaluationComparisonEngine().evaluate(
+            registration=registered,
+            split_plan=split_plan(),
+            dataset=dataset(),
+            strategy_intents=(intent(),),
+            benchmark_intents=(no_fill_benchmark,),
+            execution_policy=execution,
+            cost_schedule=zerodha_nse_delivery_schedule_2026(),
+            initial_capital=D("100000"),
+        )
+
+        self.assertIsNotNone(comparison.strategy_stressed)
+        self.assertIsNotNone(comparison.benchmark_stressed)
+        assert comparison.strategy_stressed is not None
+        self.assertEqual(
+            comparison.strategy_base.trades[0].entry_fill.fill_price,
+            D("99.10"),
+        )
+        self.assertEqual(
+            comparison.strategy_stressed.trades[0].entry_fill.fill_price,
+            D("99.25"),
+        )
+        self.assertGreater(
+            dict(comparison.comparison_metrics)["base_primary_excess"],
+            D("0"),
+        )
+        self.assertTrue(comparison.passed)
+        self.assertEqual(len(comparison.comparison_id), 64)
+
+    def test_comparison_fails_when_strategy_does_not_clear_its_threshold(self) -> None:
+        execution = policy(stressed_slippage_bps=D("25"))
+        registered = registration(
+            execution_policy_hash=execution.policy_id,
+            stressed_slippage_bps=D("25"),
+        )
+        no_fill_strategy = intent(
+            signal_id="d" * 64,
+            entry_order=LimitEntryOrder(
+                symbol="RELIANCE",
+                signal_session=SESSIONS[SIGNAL_INDEX],
+                first_eligible_session=SESSIONS[SIGNAL_INDEX + 1],
+                expiry_session=SESSIONS[SIGNAL_INDEX + 1],
+                quantity=100,
+                limit_price=D("97"),
+                tick_size=D("0.05"),
+                maximum_participation=D("0.0025"),
+            ),
+            stop_price=D("92"),
+            target_price=D("107"),
+        )
+
+        comparison = TrialEvaluationComparisonEngine().evaluate(
+            registration=registered,
+            split_plan=split_plan(),
+            dataset=dataset(),
+            strategy_intents=(no_fill_strategy,),
+            benchmark_intents=(intent(),),
+            execution_policy=execution,
+            cost_schedule=zerodha_nse_delivery_schedule_2026(),
+            initial_capital=D("100000"),
+        )
+
+        self.assertFalse(comparison.passed)
+        self.assertLess(
+            dict(comparison.comparison_metrics)["base_primary_excess"],
+            D("0"),
+        )
 
 
 if __name__ == "__main__":

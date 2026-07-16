@@ -8,9 +8,11 @@ from pathlib import Path
 
 from india_swing.evaluation import (
     LocalTrialEvaluationResultStore,
+    LocalTrialEvaluationComparisonStore,
     LocalTrialLifecycleStore,
     LocalTrialRegistry,
     TrialEvaluationEngine,
+    TrialEvaluationComparisonResult,
     TrialEvaluationError,
     TrialEvaluationResultNotFound,
     TrialLifecycleConflict,
@@ -36,6 +38,9 @@ class TrialEvaluationResultStoreTests(unittest.TestCase):
         self.registration = registration()
         self.registry.register(self.registration)
         self.store = LocalTrialEvaluationResultStore(self.root, self.registry)
+        self.comparison_store = LocalTrialEvaluationComparisonStore(
+            self.root, self.registry, self.store
+        )
         self.result = TrialEvaluationEngine().evaluate(
             registration=self.registration,
             split_plan=split_plan(),
@@ -98,7 +103,21 @@ class TrialEvaluationResultStoreTests(unittest.TestCase):
             self.store.get(self.registration.trial_id, "f" * 64)
 
     def test_lifecycle_completion_requires_result_to_be_persisted_first(self) -> None:
-        lifecycle = LocalTrialLifecycleStore(self.root, self.registry, self.store)
+        lifecycle = LocalTrialLifecycleStore(
+            self.root, self.registry, self.comparison_store
+        )
+        comparison = TrialEvaluationComparisonResult(
+            trial_id=self.registration.trial_id,
+            strategy_id=self.registration.model_bundle_id,
+            benchmark_id=self.registration.benchmark_id,
+            primary_metric=self.registration.primary_metric,
+            base_slippage_bps=self.registration.base_slippage_bps,
+            stressed_slippage_bps=None,
+            strategy_base=self.result,
+            benchmark_base=self.result,
+            strategy_stressed=None,
+            benchmark_stressed=None,
+        )
         lifecycle.append(
             trial_id=self.registration.trial_id,
             event_type=TrialLifecycleEventType.TRIAL_STARTED,
@@ -114,8 +133,59 @@ class TrialEvaluationResultStoreTests(unittest.TestCase):
                 occurred_at=self.registration.registered_at,
                 actor_id="evaluation-runner",
                 reason="Attempt completion before publishing evidence.",
-                evaluation_result=self.result,
+                evaluation_comparison=comparison,
             )
+
+    def test_comparison_store_persists_references_to_full_results(self) -> None:
+        comparison = TrialEvaluationComparisonResult(
+            trial_id=self.registration.trial_id,
+            strategy_id=self.registration.model_bundle_id,
+            benchmark_id=self.registration.benchmark_id,
+            primary_metric=self.registration.primary_metric,
+            base_slippage_bps=self.registration.base_slippage_bps,
+            stressed_slippage_bps=None,
+            strategy_base=self.result,
+            benchmark_base=self.result,
+            strategy_stressed=None,
+            benchmark_stressed=None,
+        )
+
+        published = self.comparison_store.publish(comparison)
+
+        self.assertEqual(published, comparison)
+        self.assertEqual(
+            self.comparison_store.get(
+                comparison.trial_id, comparison.comparison_id
+            ),
+            comparison,
+        )
+
+    def test_tampered_comparison_pass_flag_is_rejected(self) -> None:
+        comparison = TrialEvaluationComparisonResult(
+            trial_id=self.registration.trial_id,
+            strategy_id=self.registration.model_bundle_id,
+            benchmark_id=self.registration.benchmark_id,
+            primary_metric=self.registration.primary_metric,
+            base_slippage_bps=self.registration.base_slippage_bps,
+            stressed_slippage_bps=None,
+            strategy_base=self.result,
+            benchmark_base=self.result,
+            strategy_stressed=None,
+            benchmark_stressed=None,
+        )
+        self.comparison_store.publish(comparison)
+        path = (
+            self.root
+            / "comparisons"
+            / comparison.trial_id
+            / f"{comparison.comparison_id}.json"
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["comparison"]["passed"] = not comparison.passed
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaisesRegex(TrialEvaluationError, "does not match"):
+            self.comparison_store.get(comparison.trial_id, comparison.comparison_id)
 
 
 if __name__ == "__main__":

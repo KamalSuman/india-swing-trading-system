@@ -78,12 +78,23 @@ def _id_tuple(values: tuple[str, ...], name: str) -> None:
 class DailyExecutionPolicy:
     slippage_bps: Decimal
     maximum_participation: Decimal
+    stressed_slippage_bps: Decimal | None = None
     version: str = "daily-ohlcv-pessimistic/v1"
     policy_id: str = field(init=False)
 
     def __post_init__(self) -> None:
         _decimal(self.slippage_bps, "slippage_bps")
         _decimal(self.maximum_participation, "maximum_participation", positive=True)
+        if self.stressed_slippage_bps is not None:
+            _decimal(
+                self.stressed_slippage_bps,
+                "stressed_slippage_bps",
+                positive=True,
+            )
+            if self.stressed_slippage_bps <= self.slippage_bps:
+                raise TrialEvaluationError(
+                    "stressed slippage must exceed base slippage"
+                )
         if self.maximum_participation > ONE:
             raise TrialEvaluationError("maximum_participation cannot exceed one")
         if not isinstance(self.version, str) or not self.version:
@@ -100,6 +111,7 @@ class DailyExecutionPolicy:
                 "schema": "daily-execution-policy/v1",
                 "slippage_bps": self.slippage_bps,
                 "maximum_participation": self.maximum_participation,
+                "stressed_slippage_bps": self.stressed_slippage_bps,
                 "version": self.version,
                 "entry_timing": "STRICTLY_AFTER_SIGNAL_SESSION",
                 "same_bar": "STOP_ASSUMED_TARGET_NOT_ASSUMED",
@@ -402,6 +414,130 @@ class TrialEvaluationResult:
             raise TrialEvaluationError("evaluation result content identity failed")
 
 
+@dataclass(frozen=True, slots=True)
+class TrialEvaluationComparisonResult:
+    trial_id: str
+    strategy_id: str
+    benchmark_id: str
+    primary_metric: str
+    base_slippage_bps: Decimal
+    stressed_slippage_bps: Decimal | None
+    strategy_base: TrialEvaluationResult
+    benchmark_base: TrialEvaluationResult
+    strategy_stressed: TrialEvaluationResult | None
+    benchmark_stressed: TrialEvaluationResult | None
+    comparison_metrics: tuple[tuple[str, Decimal], ...] = field(init=False)
+    passed: bool = field(init=False)
+    comparison_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        _sha(self.trial_id, "trial_id")
+        for value, name in (
+            (self.strategy_id, "strategy_id"),
+            (self.benchmark_id, "benchmark_id"),
+            (self.primary_metric, "primary_metric"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise TrialEvaluationError(f"{name} is required")
+        if self.primary_metric not in SUPPORTED_METRICS - {"turnover"}:
+            raise TrialEvaluationError("comparison primary metric is unsupported")
+        _decimal(self.base_slippage_bps, "base_slippage_bps")
+        if self.stressed_slippage_bps is not None:
+            _decimal(self.stressed_slippage_bps, "stressed_slippage_bps", positive=True)
+            if self.stressed_slippage_bps <= self.base_slippage_bps:
+                raise TrialEvaluationError("stressed slippage must exceed base slippage")
+        base_results = (self.strategy_base, self.benchmark_base)
+        if any(type(value) is not TrialEvaluationResult for value in base_results):
+            raise TrialEvaluationError("comparison requires exact base results")
+        stressed_results = (self.strategy_stressed, self.benchmark_stressed)
+        if self.stressed_slippage_bps is None:
+            if stressed_results != (None, None):
+                raise TrialEvaluationError("unstressed comparison cannot carry stress results")
+        elif any(type(value) is not TrialEvaluationResult for value in stressed_results):
+            raise TrialEvaluationError("stressed comparison requires both stress results")
+        all_results = base_results + tuple(
+            value for value in stressed_results if value is not None
+        )
+        first = self.strategy_base
+        for result in all_results:
+            result.verify_content_identity()
+            if (
+                result.trial_id != self.trial_id
+                or result.split_plan_id != first.split_plan_id
+                or result.dataset_id != first.dataset_id
+                or result.execution_policy_id != first.execution_policy_id
+                or result.cost_schedule_id != first.cost_schedule_id
+                or result.initial_capital != first.initial_capital
+            ):
+                raise TrialEvaluationError("comparison result bindings differ")
+        for result in base_results:
+            if any(
+                fill.slippage_bps != self.base_slippage_bps
+                for trade in result.trades
+                for fill in (trade.entry_fill, trade.exit_fill)
+            ):
+                raise TrialEvaluationError("base result used the wrong slippage scenario")
+        if self.stressed_slippage_bps is not None:
+            for result in stressed_results:
+                assert result is not None
+                if any(
+                    fill.slippage_bps != self.stressed_slippage_bps
+                    for trade in result.trades
+                    for fill in (trade.entry_fill, trade.exit_fill)
+                ):
+                    raise TrialEvaluationError(
+                        "stressed result used the wrong slippage scenario"
+                    )
+        base_excess = (
+            dict(self.strategy_base.metrics)[self.primary_metric]
+            - dict(self.benchmark_base.metrics)[self.primary_metric]
+        )
+        metrics = [("base_primary_excess", base_excess)]
+        passed = self.strategy_base.passed and base_excess >= ZERO
+        if self.strategy_stressed is not None and self.benchmark_stressed is not None:
+            stressed_excess = (
+                dict(self.strategy_stressed.metrics)[self.primary_metric]
+                - dict(self.benchmark_stressed.metrics)[self.primary_metric]
+            )
+            metrics.append(("stressed_primary_excess", stressed_excess))
+            passed = passed and self.strategy_stressed.passed and stressed_excess >= ZERO
+        object.__setattr__(self, "comparison_metrics", tuple(metrics))
+        object.__setattr__(self, "passed", passed)
+        object.__setattr__(self, "comparison_id", self._calculated_id())
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                "schema": "trial-evaluation-comparison/v1",
+                "trial_id": self.trial_id,
+                "strategy_id": self.strategy_id,
+                "benchmark_id": self.benchmark_id,
+                "primary_metric": self.primary_metric,
+                "base_slippage_bps": self.base_slippage_bps,
+                "stressed_slippage_bps": self.stressed_slippage_bps,
+                "strategy_base": self.strategy_base.result_id,
+                "benchmark_base": self.benchmark_base.result_id,
+                "strategy_stressed": (
+                    None
+                    if self.strategy_stressed is None
+                    else self.strategy_stressed.result_id
+                ),
+                "benchmark_stressed": (
+                    None
+                    if self.benchmark_stressed is None
+                    else self.benchmark_stressed.result_id
+                ),
+                "comparison_metrics": self.comparison_metrics,
+                "passed": self.passed,
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        if self.comparison_id != self._calculated_id():
+            raise TrialEvaluationError("evaluation comparison content identity failed")
+
+
 def _metric_values(
     initial_capital: Decimal,
     trades: tuple[EvaluatedTrade, ...],
@@ -450,6 +586,7 @@ class TrialEvaluationEngine:
         execution_policy: DailyExecutionPolicy,
         cost_schedule: NseDeliveryCostSchedule,
         initial_capital: Decimal,
+        use_stressed_slippage: bool = False,
     ) -> TrialEvaluationResult:
         if type(registration) is not TrialRegistration:
             raise TypeError("registration must be exact")
@@ -473,6 +610,14 @@ class TrialEvaluationEngine:
             execution_policy,
             cost_schedule,
         )
+        if type(use_stressed_slippage) is not bool:
+            raise TypeError("use_stressed_slippage must be bool")
+        if use_stressed_slippage:
+            if execution_policy.stressed_slippage_bps is None:
+                raise TrialEvaluationError("registered execution policy has no stress case")
+            selected_slippage = execution_policy.stressed_slippage_bps
+        else:
+            selected_slippage = execution_policy.slippage_bps
         if (
             type(intents) is not tuple
             or any(type(value) is not EvaluationTradeIntent for value in intents)
@@ -534,6 +679,7 @@ class TrialEvaluationEngine:
                 bars_by_symbol.get(intent.entry_order.symbol, ()),
                 dataset.sessions,
                 execution_policy,
+                selected_slippage,
             )
             if trade is not None:
                 if (
@@ -648,6 +794,8 @@ class TrialEvaluationEngine:
             raise TrialEvaluationError("execution policy content binding failed")
         if registration.base_slippage_bps != execution_policy.slippage_bps:
             raise TrialEvaluationError("registered base slippage binding failed")
+        if registration.stressed_slippage_bps != execution_policy.stressed_slippage_bps:
+            raise TrialEvaluationError("registered stressed slippage binding failed")
         if registration.cost_schedule_version != cost_schedule.policy_version:
             raise TrialEvaluationError("cost schedule version binding failed")
         if registration.cost_schedule_hash != cost_schedule.schedule_id:
@@ -683,6 +831,7 @@ class TrialEvaluationEngine:
         bars: tuple[SimulationBar, ...],
         sessions: tuple[date, ...],
         policy: DailyExecutionPolicy,
+        selected_slippage: Decimal,
     ) -> EvaluatedTrade | None:
         by_session = {bar.session: bar for bar in bars}
         entry_fill: SimulatedFill | None = None
@@ -697,7 +846,7 @@ class TrialEvaluationEngine:
             entry_fill = simulate_limit_entry(
                 intent.entry_order,
                 bar,
-                slippage_bps=policy.slippage_bps,
+                slippage_bps=selected_slippage,
             )
             if entry_fill is not None:
                 break
@@ -726,7 +875,7 @@ class TrialEvaluationEngine:
             exit_fill = simulate_protective_exit(
                 exit_order,
                 bar,
-                slippage_bps=policy.slippage_bps,
+                slippage_bps=selected_slippage,
             )
             if exit_fill is not None:
                 break
@@ -734,7 +883,7 @@ class TrialEvaluationEngine:
                 exit_fill = simulate_time_exit(
                     exit_order,
                     bar,
-                    slippage_bps=policy.slippage_bps,
+                    slippage_bps=selected_slippage,
                 )
         if exit_fill is None:
             raise TrialEvaluationError("position could not be liquidated by its horizon")
@@ -801,3 +950,54 @@ class TrialEvaluationEngine:
         if positions:
             raise TrialEvaluationError("evaluation ended with open positions")
         return tuple(points)
+
+
+class TrialEvaluationComparisonEngine:
+    def evaluate(
+        self,
+        *,
+        registration: TrialRegistration,
+        split_plan: PurgedWalkForwardPlan,
+        dataset: EvaluationDataset,
+        strategy_intents: tuple[EvaluationTradeIntent, ...],
+        benchmark_intents: tuple[EvaluationTradeIntent, ...],
+        execution_policy: DailyExecutionPolicy,
+        cost_schedule: NseDeliveryCostSchedule,
+        initial_capital: Decimal,
+    ) -> TrialEvaluationComparisonResult:
+        engine = TrialEvaluationEngine()
+        common = dict(
+            registration=registration,
+            split_plan=split_plan,
+            dataset=dataset,
+            execution_policy=execution_policy,
+            cost_schedule=cost_schedule,
+            initial_capital=initial_capital,
+        )
+        strategy_base = engine.evaluate(intents=strategy_intents, **common)
+        benchmark_base = engine.evaluate(intents=benchmark_intents, **common)
+        strategy_stressed = None
+        benchmark_stressed = None
+        if execution_policy.stressed_slippage_bps is not None:
+            strategy_stressed = engine.evaluate(
+                intents=strategy_intents,
+                use_stressed_slippage=True,
+                **common,
+            )
+            benchmark_stressed = engine.evaluate(
+                intents=benchmark_intents,
+                use_stressed_slippage=True,
+                **common,
+            )
+        return TrialEvaluationComparisonResult(
+            trial_id=registration.trial_id,
+            strategy_id=registration.model_bundle_id,
+            benchmark_id=registration.benchmark_id,
+            primary_metric=registration.primary_metric,
+            base_slippage_bps=registration.base_slippage_bps,
+            stressed_slippage_bps=registration.stressed_slippage_bps,
+            strategy_base=strategy_base,
+            benchmark_base=benchmark_base,
+            strategy_stressed=strategy_stressed,
+            benchmark_stressed=benchmark_stressed,
+        )
