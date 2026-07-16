@@ -14,15 +14,15 @@ trade alert: all real-file artifacts are deliberately `COLLECTION_ONLY` and
 
 - Local repository: `C:\project\india-swing-trading-system`
 - Private remote: `https://github.com/KamalSuman/india-swing-trading-system.git`
-- Working branch: `agent/identity-adjudication-queue`
-- Implementation checkpoint: current branch tip (`Enumerate identity adjudication evidence`)
-- Remote `main`: `7212c30`
+- Working branch: `agent/import-2026-07-16`
+- Implementation checkpoint: 16 July import, replay, and reconciliation compatibility
+- Remote `main`: `c684969` (merged PR #4)
 - The working branch has no upstream and is not on GitHub at this snapshot.
 - Verified runtime: Python 3.12
-- Last full verification: 287 unit tests run: 284 passed and 3 skipped. The
-  current affected integration set has 138 focused tests run: 137 passed and
-  1 skipped;
-  touched-source `compileall` and `git diff --check` passed.
+- Last full verification before this data checkpoint: 287 unit tests run, 284
+  passed and 3 skipped. Current focused verification: all 11 reconciliation
+  tests passed; touched-source `compileall`, real 16 July replay, and
+  `git diff --check` passed.
 
 The handover document may be committed after the implementation checkpoint, so
 use `git log -2 --oneline` to see the exact local tip.
@@ -136,23 +136,31 @@ promotion or decision logic.
 All paths below are local sealed stores under `var/`. Reads re-open and reparse
 the original bytes rather than trusting a cached Python object.
 
-### NSE security master
+### NSE security masters
 
-- Source file: `NSE_CM_security_15072026.csv.gz`
-- Artifact ID: `726f6c1ff4588cee1c072d6769035ed9035c5310f98321409df5ab6e3cd1efc4`
-- Manifest ID: `466d74e5c1062f680518c3651726ee2bb7a56d885db129b83eca851c3827b4c0`
+- 2026-07-15: artifact `726f6c1ff4588cee1c072d6769035ed9035c5310f98321409df5ab6e3cd1efc4`,
+  manifest `466d74e5c1062f680518c3651726ee2bb7a56d885db129b83eca851c3827b4c0`.
+- 2026-07-16: artifact `9ea03e4108c8811204a810644462e6cd378de241ed4c1915733ff835c334b1e6`,
+  manifest `e87670d62a14a5ac67c500b35221b0f7a13a3d622879cf7ce12eed9698ccbcdf`.
+- Each master contains 36,062 parsed rows and 21,133 retained unverified
+  equity rows.
 
-### NSE daily bundle
+### NSE daily bundles
 
-- Source file: `Reports-Daily-Multiple.zip`
-- Artifact ID: `44e2079041e3b05a43703bc63e030d4ebce44b2cb05d4209177adc7431844b6b`
-- Validated at: `2026-07-15T14:37:15.502701+00:00`
-- Selected rows: 24,609
+- 15 July artifact: `44e2079041e3b05a43703bc63e030d4ebce44b2cb05d4209177adc7431844b6b`;
+  24,609 selected rows spanning the 14 and 15 July final reports.
+- 16 July artifact: `02d0426628ac268c29bec7bba334ff839d819cbe1773322770009235e27152eb`;
+  manifest `6ccbfe5dac70d2697a26778bebfdee4f6f7b510f4b8256071e5dd0aa8c08efc5`;
+  13,551 selected rows across all seven required report families.
+- The browser-renamed 16 July source `(1).zip` was imported through an exact
+  temporary `Reports-Daily-Multiple.zip` basename; its bytes were not modified.
 
 ### Positive traded-date evidence
 
-- Artifact ID: `92cdc918f207226eb0137bd59f83cc1ce9cb72b71b16de060fa7fd64033e05c1`
-- Observed dates: 2026-07-14 and 2026-07-15
+- Artifact `92cdc918f207226eb0137bd59f83cc1ce9cb72b71b16de060fa7fd64033e05c1`:
+  observed dates 2026-07-14 and 2026-07-15.
+- Artifact `41f6dd965da951f8e53948e8088f8dad4a07f4fe7ed83e960ff9e6a2bcb7f4ba`:
+  observed date 2026-07-16.
 
 ### NSE CM calendar sources and materialization
 
@@ -167,49 +175,51 @@ the original bytes rather than trusting a cached Python object.
 
 ### Calendar-backed reconciliation diagnostic
 
-- Snapshot ID: `df53480a2c5c30a9a1a1e28842e00fa77e34fefdd2fdd98997148232fb8ebbd9`
+- Latest snapshot ID: `745772b03c971bfb97da7b2772516e45dbd0e862b5c9b2a8fcc3cfd93c1129a6`
+- Target session: 2026-07-16, using the exact 15 and 16 July bundles.
 - Retained master rows: 21,133
 - Broad EQ scope: 3,510, including small caps
 - SM watch-only scope: 772
 - Other explicitly unsupported series: 16,851
-- Same-session retained rows with trade evidence: 2,834
-- Daily-report orphan keys retained as orphans: 2,686
-- Supported rows unresolved after calendar resolution: 1,852
+- Same-session retained rows with trade evidence: 2,855
+- Daily-report orphan keys retained as orphans: 4,031
+- Supported rows unresolved after calendar resolution: 4,282
+- The 15 July bundle contains `REG1_IND140726.csv`, not the missing 15 July
+  REG1 publication needed for 16 July effective state. The snapshot therefore
+  retains `EFFECTIVE_REG1_STATE_MISSING` rather than backfilling from 14 or 16 July.
+- One official descriptive-name difference is retained as evidence for
+  `OBCL:EQ`; instrument ID, ISIN, listing key, and board lot agree.
 - Actionable rows: zero
 
-### Raw EOD historical-price session
+### Raw EOD historical-price sessions
 
-- Market session: 2026-07-15
-- Artifact ID: `ebc8a722e47fb9bc52b0c118550b85daf8f714f224d3feadb7a8f64a9e194c7f`
-- Manifest ID: `5cbcf5e581533188edf478c52d8d1614ab9ad6bb461c3a080b215d38c343b277`
-- Bars/UDiFF rows: 3,409
-- Delivery rows: 3,256
+- 2026-07-15: artifact `ebc8a722e47fb9bc52b0c118550b85daf8f714f224d3feadb7a8f64a9e194c7f`,
+  manifest `5cbcf5e581533188edf478c52d8d1614ab9ad6bb461c3a080b215d38c343b277`,
+  3,409 bars and 3,256 delivery rows.
+- 2026-07-16: artifact `43f7f2f262e09d98e5f124b173e08cfc60fe57d3f1d5c995b69e706dcb988831`,
+  manifest `f1db2d5ae49f3d708d5de167aaae4452142e97e193633c4c3ab6bc1dbdb3f6a6`,
+  3,439 bars and 3,275 delivery rows.
 - Price basis: `RAW_UNADJUSTED`
 - Coverage: `TRADED_ROWS_ONLY`
 - Readiness: `COLLECTION_ONLY`; actionable: false
 
 ### Cross-vintage identity baseline
 
-- Source vintages: one, claimed 2026-07-15
-- Registry ID: `cfb7a107d192a539f429c535cc220d677ea770a989530ec00ed9414280c3b27b`
-- Manifest ID: `1bb2e0f8b3711b3c7205c01b1659fa73a857b30951b6ead44076dfb2dd3fd697`
-- Positive observations: 21,133
-- ISIN/unvalidated identifier candidates: 4,498
-- Quarantined same-ISIN/same-series ambiguities: 18
-- Cross-vintage transitions: zero, because only one dated source exists
+- Source vintages: two consecutive masters, claimed 2026-07-15 and 2026-07-16.
+- Registry ID: `b94046a0e7deca6504875793262faab2411c61843d8f480efef3652dbde6c724`
+- Manifest ID: `242344904187399b822db71a8497dbe2ed86adfa8b263040ced41ae93f4bd8c2`
+- Positive observations: 42,266
+- ISIN/unvalidated identifier candidates: 4,544
+- Quarantined conflicts: 36
+- Adjacent-vintage transitions: 20,998
 - Stable identities assigned: zero
 - Readiness: `COLLECTION_ONLY`; actionable: false
-- Adjudication queue ID: `1c34e426f1ebe831458f091e9535064ff35ed0865881a6ea94478744f23167e4`
-- Adjudication cases: 4,498; stable identities assigned: zero
-- Required for all 4,498 cases: authorized provenance and report-date verification
-- Additional blockers: 4,498 adjacent-vintage, 4,461 official listing-status,
-  46 validated-identifier, and 13 official conflict-resolution cases
-
-The 18 conflicts are mostly simultaneous old/new ticker rows, often with one
-`DelFlg=Y` row. Their meaning has not been inferred from the flag alone; they
-remain quarantined pending official lifecycle evidence. Thirteen candidate
-cases touch those conflict records; conflicts and candidate cases are different
-units and therefore do not need equal counts.
+- Adjudication queue ID: `8325fac32053b4e9f34142eb46d00b40e2f41a56bdbeb73d55d0f2deccc0efe9`
+- Adjudication cases: 4,544; stable identities assigned: zero.
+- Required for all cases: authorized provenance and report-date verification.
+- Additional requirements: 4,439 official continuity confirmations, 888
+  listing-status cases, 92 adjacent-vintage observations, 92 validated
+  identifiers, 13 official conflict resolutions, and one listing-lifecycle case.
 
 ## Essential local commands
 
@@ -296,11 +306,11 @@ python -m india_swing.identity_registry.cli adjudication-show `
 - Authenticated/licensed, automatically acquired point-in-time NSE calendar.
 - Calendar changes after 2026-07-31, including the August closing-auction
   transition and later special-session circulars.
-- Multiple consecutive historical security-master vintages and official
+- More than two consecutive historical security-master vintages and official
   evidence import/decisions for delistings, suspensions, renames, mergers,
   demergers, and stable instrument/listing IDs. The candidate registry and
-  complete evidence queue are implemented, but a single real vintage cannot
-  establish cross-date continuity.
+  complete evidence queue are implemented, but two positive daily observations
+  cannot by themselves establish legal/economic continuity.
 - Official corporate-action ingestion and cutoff-specific adjusted views.
 - Multi-year survivorship-safe price history.
 - A production liquidity/eligibility universe promoted to
@@ -335,7 +345,7 @@ python -m india_swing.identity_registry.cli adjudication-show `
 6. Build audited promotion/import paths for point-in-time verified calendars,
    daily universes, stable listing identities, explicit nontrading state, and
    effective-dated tick sizes. Feed them to the implemented sealed dataset
-   assembler. The current one-session real archive remains ineligible.
+   assembler. The current two-session real archive remains ineligible.
 7. Add an official corporate-action source using a real archived fixture;
    design its schema from the source rather than guessing it.
 8. Evaluate the implemented deterministic baseline on point-in-time verified
@@ -361,16 +371,18 @@ python -m india_swing.identity_registry.cli adjudication-show `
   production.
 - A real official corporate-action export or an authorized source sample before
   that importer is designed.
-- The next dated NSE CM MII security master, beginning with
-  `NSE_CM_security_16072026.csv.gz`, to exercise real cross-vintage transitions.
+- The next dated NSE CM MII security master and matching daily bundle, beginning
+  with 17 July 2026, to extend the real consecutive history.
+- An authorized historical copy of `REG1_IND150726.csv`, if available, to fill
+  the explicitly missing surveillance state for the 16 July session.
 - Zerodha/Kite credentials only when live snapshot collection is reached. Put
   them in environment variables or GCP Secret Manager; never paste secrets into
   chat, source code, fixtures, commits, or handover files.
 
 ## Honest progress assessment
 
-Approximately 82% of a research-and-notification MVP foundation is implemented,
-but only about 51% of the work required for a defensible real-capital pilot.
+Approximately 83% of a research-and-notification MVP foundation is implemented,
+but only about 52% of the work required for a defensible real-capital pilot.
 The system is 0% live-trade-ready because it correctly refuses all real alerts.
 The largest remaining effort is trustworthy historical data and evaluation,
 not connecting an LLM or formatting a notification.

@@ -52,8 +52,10 @@ The pure reconciler:
   complete manifest and normalized output; a substituted parsed tree,
   recomputed availability timestamp, or forged counter is rejected;
 - joins only the same-vintage `(symbol, series)` key, checks reverse instrument
-  ID/unique-ISIN mappings, and rejects contradictory instrument ID, ISIN,
-  instrument name, or board-lot fields in UDiFF;
+  ID/unique-ISIN mappings, and rejects contradictory instrument ID, ISIN, or
+  board-lot fields in UDiFF; descriptive-name differences are preserved as the
+  row-level `UDIFF_MASTER_INSTRUMENT_NAME_MISMATCH` reason because NSE's master
+  and UDiFF name fields can legitimately use different representations;
 - embeds the exact master and daily-bundle manifests as paired lineage, and
   requires the entry count to equal the master's retained-row count;
 - assigns exactly one diagnostic disposition to every retained master row and
