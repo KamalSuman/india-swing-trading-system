@@ -158,26 +158,33 @@ class NseDeliveryCostSchedule:
         object.__setattr__(
             self,
             "schedule_id",
-            content_id(
-                {
-                    "schema": "nse-delivery-cost-schedule/v1",
-                    "effective_from": self.effective_from,
-                    "effective_to": self.effective_to,
-                    "dp_tariff": self.dp_tariff,
-                    "brokerage_bps": self.brokerage_bps,
-                    "stt_buy_bps": self.stt_buy_bps,
-                    "stt_sell_bps": self.stt_sell_bps,
-                    "exchange_and_ipft_bps": self.exchange_and_ipft_bps,
-                    "sebi_bps": self.sebi_bps,
-                    "stamp_buy_bps": self.stamp_buy_bps,
-                    "gst_rate": self.gst_rate,
-                    "dp_base_per_scrip": self.dp_base_per_scrip,
-                    "source_urls": self.source_urls,
-                    "policy_version": self.policy_version,
-                },
-                length=64,
-            ),
+            self._calculated_id(),
         )
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                "schema": "nse-delivery-cost-schedule/v1",
+                "effective_from": self.effective_from,
+                "effective_to": self.effective_to,
+                "dp_tariff": self.dp_tariff,
+                "brokerage_bps": self.brokerage_bps,
+                "stt_buy_bps": self.stt_buy_bps,
+                "stt_sell_bps": self.stt_sell_bps,
+                "exchange_and_ipft_bps": self.exchange_and_ipft_bps,
+                "sebi_bps": self.sebi_bps,
+                "stamp_buy_bps": self.stamp_buy_bps,
+                "gst_rate": self.gst_rate,
+                "dp_base_per_scrip": self.dp_base_per_scrip,
+                "source_urls": self.source_urls,
+                "policy_version": self.policy_version,
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        if self.schedule_id != self._calculated_id():
+            raise CostScheduleError("cost schedule content identity failed")
 
     def applies_on(self, trade_date: date) -> bool:
         return self.effective_from <= trade_date and (
@@ -291,6 +298,7 @@ def calculate_delivery_charges(
         raise ValueError("fills must be a non-empty tuple")
     if type(schedule) is not NseDeliveryCostSchedule:
         raise TypeError("schedule must be an exact NseDeliveryCostSchedule")
+    schedule.verify_content_identity()
     if len({fill.fill_id for fill in fills}) != len(fills):
         raise CostScheduleError("duplicate fills are not allowed")
 

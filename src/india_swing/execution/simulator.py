@@ -16,6 +16,7 @@ TEN_THOUSAND = Decimal("10000")
 class ExitReason(str, Enum):
     STOP = "STOP"
     TARGET = "TARGET"
+    TIME = "TIME"
 
 
 def _price(value: Decimal, name: str) -> None:
@@ -333,4 +334,52 @@ def simulate_protective_exit(
         fill_price=fill_price,
         slippage_bps=slippage_bps,
         exit_reason=reason,
+    )
+
+
+def simulate_time_exit(
+    order: ProtectiveExitOrder,
+    bar: SimulationBar,
+    *,
+    slippage_bps: Decimal,
+) -> SimulatedFill | None:
+    """Conservatively liquidate at a tradable closing price after the horizon."""
+
+    _validate_slippage(slippage_bps)
+    if order.symbol != bar.symbol:
+        raise ValueError("order and bar symbols differ")
+    if bar.session < order.entry_session:
+        return None
+    if (
+        not bar.tradable
+        or bar.lower_circuit_sell_locked
+        or order.quantity > int(Decimal(bar.volume) * order.maximum_participation)
+    ):
+        return None
+    order_id = content_id(
+        {
+            "schema": "daily-time-exit-order/v1",
+            "symbol": order.symbol,
+            "quantity": order.quantity,
+            "entry_session": order.entry_session,
+            "entry_price": order.entry_price,
+            "stop_price": order.stop_price,
+            "target_price": order.target_price,
+            "tick_size": order.tick_size,
+            "maximum_participation": order.maximum_participation,
+            "exit_session": bar.session,
+        },
+        length=64,
+    )
+    return SimulatedFill(
+        order_id=order_id,
+        bar_id=bar.bar_id,
+        session=bar.session,
+        symbol=bar.symbol,
+        side=FillSide.SELL,
+        quantity=order.quantity,
+        trigger_price=bar.close,
+        fill_price=_adverse_sell(bar.close, slippage_bps, order.tick_size),
+        slippage_bps=slippage_bps,
+        exit_reason=ExitReason.TIME,
     )

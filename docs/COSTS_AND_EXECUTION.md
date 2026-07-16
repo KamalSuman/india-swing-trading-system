@@ -86,7 +86,9 @@ Implemented now: itemized costs, source/effective-date identity, fill identity,
 next-session limit entry, gaps, adverse tick rounding, participation limits,
 same-bar ambiguity, and lower-circuit non-fill.
 
-Still required: historical schedules before 2026-03-01, point-in-time tick-size
-materialization, partial-fill/order-book models, corporate-action adjusted
-evaluation views, engine-generated trial metrics, and contract-note
-reconciliation from shadow trading.
+Still required: historical schedules before 2026-03-01, an intraday schedule
+for same-session stop-outs, point-in-time tick-size materialization,
+partial-fill/order-book models, corporate-action adjusted evaluation views, a
+create-once full-result evidence store, and contract-note reconciliation from
+shadow trading. The evaluation engine now generates trial metrics but correctly
+refuses a same-day round trip that this delivery-only schedule cannot price.

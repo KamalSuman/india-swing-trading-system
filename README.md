@@ -16,6 +16,8 @@ The current vertical slice implements:
   secret-rejection checks;
 - explicit trial, model, universe, calendar, data, source, execution, and cost
   lineage in every typed pipeline result, including result-only audit writes;
+- purged-fold-bound evaluation that generates conservative fills, itemized
+  delivery costs, mark-to-market equity, fixed metrics, and threshold outcomes;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually

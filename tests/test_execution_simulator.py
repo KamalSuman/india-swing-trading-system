@@ -12,6 +12,7 @@ from india_swing.execution.simulator import (
     SimulationBar,
     simulate_limit_entry,
     simulate_protective_exit,
+    simulate_time_exit,
 )
 
 
@@ -202,6 +203,39 @@ class ExecutionSimulatorTests(unittest.TestCase):
             simulate_protective_exit(
                 exit_order(), thin_bar, slippage_bps=D("10")
             )
+        )
+
+    def test_time_exit_uses_close_and_adverse_tick_rounding(self) -> None:
+        result = simulate_time_exit(
+            exit_order(tick_size=D("0.05")),
+            bar(
+                date(2026, 7, 18),
+                open=D("102.00"),
+                high=D("104.00"),
+                low=D("101.00"),
+                close=D("103.05"),
+            ),
+            slippage_bps=D("10"),
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertIs(result.exit_reason, ExitReason.TIME)
+        self.assertEqual(result.trigger_price, D("103.05"))
+        self.assertEqual(result.fill_price, D("102.90"))
+
+    def test_time_exit_does_not_invent_fill_during_sell_lock(self) -> None:
+        locked = bar(
+            date(2026, 7, 18),
+            open=D("90"),
+            high=D("90"),
+            low=D("90"),
+            close=D("90"),
+            lower_circuit_sell_locked=True,
+        )
+
+        self.assertIsNone(
+            simulate_time_exit(exit_order(), locked, slippage_bps=D("10"))
         )
 
 

@@ -8,12 +8,14 @@ from decimal import Decimal
 from pathlib import Path
 
 from india_swing.evaluation import (
+    EquityPoint,
     LocalTrialLifecycleStore,
     LocalTrialRegistry,
     TrialLifecycleConflict,
     TrialLifecycleEventType,
     TrialLifecycleIntegrityError,
     TrialNotRegistered,
+    TrialEvaluationResult,
     TrialStage,
     decode_trial_lifecycle_event,
     encode_trial_lifecycle_event,
@@ -55,18 +57,47 @@ class TrialLifecycleTests(unittest.TestCase):
         )
 
     def complete(self, *, passed: bool, seconds: int = 4):
+        self.assertFalse(passed)
+        initial = Decimal("100000")
+        generated = TrialEvaluationResult(
+            trial_id=self.registration.trial_id,
+            split_plan_id=self.registration.split_plan_id,
+            dataset_id=digest("f"),
+            execution_policy_id=self.registration.execution_policy_hash,
+            cost_schedule_id=self.registration.cost_schedule_hash,
+            initial_capital=initial,
+            trades=(),
+            charges=None,
+            equity_curve=(
+                EquityPoint(
+                    session=self.registration.evaluation_start,
+                    equity=initial,
+                    drawdown=Decimal("0"),
+                ),
+                EquityPoint(
+                    session=self.registration.evaluation_end,
+                    equity=initial,
+                    drawdown=Decimal("0"),
+                ),
+            ),
+            metrics=(
+                ("max_drawdown", Decimal("0")),
+                ("net_cagr", Decimal("0")),
+                ("net_profit", Decimal("0")),
+                ("net_return", Decimal("0")),
+                ("trade_count", Decimal("0")),
+                ("turnover", Decimal("0")),
+            ),
+            pass_thresholds=self.registration.pass_thresholds,
+            passed=False,
+        )
         return self.store.append(
             trial_id=self.registration.trial_id,
             event_type=TrialLifecycleEventType.TRIAL_COMPLETED,
             occurred_at=self.registration.registered_at + timedelta(seconds=seconds),
             actor_id="evaluation-runner",
             reason="Persist the preregistered terminal metrics.",
-            metrics=(
-                ("max_drawdown", Decimal("-0.25")),
-                ("net_cagr", Decimal("0.04")),
-                ("turnover", Decimal("2.50")),
-            ),
-            passed=passed,
+            evaluation_result=generated,
         )
 
     def access_results(self, *, seconds: int = 3):
@@ -127,6 +158,23 @@ class TrialLifecycleTests(unittest.TestCase):
 
         self.assertFalse(outcome.passed)
         self.assertEqual(self.store.outcomes(self.registration.trial_id), (outcome,))
+        self.assertIsNotNone(outcome.evaluation_result_id)
+
+    def test_caller_cannot_assert_completion_metrics_directly(self) -> None:
+        self.start()
+        self.unseal()
+        self.access_results()
+
+        with self.assertRaisesRegex(TrialLifecycleConflict, "engine-generated"):
+            self.store.append(
+                trial_id=self.registration.trial_id,
+                event_type=TrialLifecycleEventType.TRIAL_COMPLETED,
+                occurred_at=self.registration.registered_at + timedelta(seconds=4),
+                actor_id="evaluation-runner",
+                reason="Attempt to assert performance without evaluation evidence.",
+                metrics=(("net_cagr", Decimal("0.50")),),
+                passed=True,
+            )
 
     def test_failed_and_aborted_trials_remain_visible(self) -> None:
         results = []
@@ -162,19 +210,7 @@ class TrialLifecycleTests(unittest.TestCase):
         self.complete(passed=False)
 
         with self.assertRaisesRegex(TrialLifecycleConflict, "only invalidation"):
-            self.store.append(
-                trial_id=self.registration.trial_id,
-                event_type=TrialLifecycleEventType.TRIAL_COMPLETED,
-                occurred_at=self.registration.registered_at + timedelta(seconds=5),
-                actor_id="evaluation-runner",
-                reason="Attempt to rewrite the terminal outcome.",
-                metrics=(
-                    ("max_drawdown", Decimal("-0.01")),
-                    ("net_cagr", Decimal("0.50")),
-                    ("turnover", Decimal("1.00")),
-                ),
-                passed=True,
-            )
+            self.complete(passed=False, seconds=5)
 
     def test_completed_trial_can_be_append_only_invalidated(self) -> None:
         self.start()

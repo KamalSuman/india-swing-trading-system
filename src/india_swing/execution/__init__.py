@@ -18,6 +18,7 @@ from .simulator import (
     SimulationBar,
     simulate_limit_entry,
     simulate_protective_exit,
+    simulate_time_exit,
 )
 
 __all__ = [
@@ -35,5 +36,6 @@ __all__ = [
     "calculate_delivery_charges",
     "simulate_limit_entry",
     "simulate_protective_exit",
+    "simulate_time_exit",
     "zerodha_nse_delivery_schedule_2026",
 ]

@@ -1,4 +1,16 @@
 from .config import TRIAL_REGISTRY_ROOT_ENV, TrialRegistryConfig
+from .engine import (
+    SUPPORTED_METRICS,
+    DailyExecutionPolicy,
+    EquityPoint,
+    EvaluatedTrade,
+    EvaluationDataReadiness,
+    EvaluationDataset,
+    EvaluationTradeIntent,
+    TrialEvaluationEngine,
+    TrialEvaluationError,
+    TrialEvaluationResult,
+)
 from .lifecycle import (
     HOLDOUT_ACCESS_EVENT_TYPES,
     HOLDOUT_EVENT_TYPES,
@@ -43,7 +55,14 @@ from .trials import (
 )
 
 __all__ = [
+    "SUPPORTED_METRICS",
+    "DailyExecutionPolicy",
     "EVALUATION_SPLIT_SCHEMA_VERSION",
+    "EquityPoint",
+    "EvaluatedTrade",
+    "EvaluationDataReadiness",
+    "EvaluationDataset",
+    "EvaluationTradeIntent",
     "HOLDOUT_ACCESS_EVENT_TYPES",
     "HOLDOUT_EVENT_TYPES",
     "LocalTrialLifecycleStore",
@@ -64,6 +83,9 @@ __all__ = [
     "TrialLifecycleEvent",
     "TrialLifecycleEventType",
     "TrialLifecycleIntegrityError",
+    "TrialEvaluationEngine",
+    "TrialEvaluationError",
+    "TrialEvaluationResult",
     "TrialRegistration",
     "TrialRegistrationError",
     "TrialRegistrationIntegrityError",

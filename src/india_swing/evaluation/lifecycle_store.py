@@ -17,6 +17,7 @@ from india_swing._filesystem import (
     advisory_file_lock,
     read_stable_regular_file,
 )
+from .engine import TrialEvaluationResult
 
 from .lifecycle import (
     HOLDOUT_ACCESS_EVENT_TYPES,
@@ -32,7 +33,7 @@ from .trial_store import LocalTrialRegistry, TrialNotRegistered
 from .trials import TrialRegistration, TrialStage
 
 
-TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION = "local-trial-lifecycle-store/v1"
+TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION = "local-trial-lifecycle-store/v2"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _EVENT_FILENAME = re.compile(r"([0-9]{20})-([0-9a-f]{64})\.json\Z")
 _MAX_EVENT_BYTES = 4 * 1024 * 1024
@@ -142,6 +143,7 @@ def decode_trial_lifecycle_event(payload: bytes) -> TrialLifecycleEvent:
                 (name, Decimal(metric_value)) for name, metric_value in raw["metrics"]
             ),
             passed=raw["passed"],
+            evaluation_result_id=raw["evaluation_result_id"],
             schema_version=raw["schema_version"],
         )
         if event.event_id != stored_event_id:
@@ -313,8 +315,40 @@ class LocalTrialLifecycleStore:
         holdout_id: str | None = None,
         metrics: tuple[tuple[str, Decimal], ...] = (),
         passed: bool | None = None,
+        evaluation_result: TrialEvaluationResult | None = None,
     ) -> TrialLifecycleEvent:
         registration = self.registry.require_registered(trial_id)
+        evaluation_result_id: str | None = None
+        if event_type is TrialLifecycleEventType.TRIAL_COMPLETED:
+            if type(evaluation_result) is not TrialEvaluationResult:
+                raise TrialLifecycleConflict(
+                    "trial completion requires an engine-generated evaluation result"
+                )
+            if metrics or passed is not None:
+                raise TrialLifecycleConflict(
+                    "caller-provided completion metrics are forbidden"
+                )
+            evaluation_result.verify_content_identity()
+            if evaluation_result.trial_id != registration.trial_id:
+                raise TrialLifecycleConflict("evaluation result belongs to another trial")
+            if (
+                evaluation_result.split_plan_id != registration.split_plan_id
+                or evaluation_result.execution_policy_id
+                != registration.execution_policy_hash
+                or evaluation_result.cost_schedule_id
+                != registration.cost_schedule_hash
+                or evaluation_result.pass_thresholds != registration.pass_thresholds
+            ):
+                raise TrialLifecycleConflict(
+                    "evaluation result does not match registered policies or thresholds"
+                )
+            metrics = evaluation_result.metrics
+            passed = evaluation_result.passed
+            evaluation_result_id = evaluation_result.result_id
+        elif evaluation_result is not None:
+            raise TrialLifecycleConflict(
+                "only trial completion can carry an evaluation result"
+            )
         self.events_root.mkdir(parents=True, exist_ok=True)
         if _is_link_like(self.events_root):
             raise TrialLifecycleIntegrityError("trial-events root cannot be a link")
@@ -339,6 +373,7 @@ class LocalTrialLifecycleStore:
                     holdout_id=holdout_id,
                     metrics=metrics,
                     passed=passed,
+                    evaluation_result_id=evaluation_result_id,
                 )
                 proposed = existing + (event,)
                 _validate_history(registration, proposed)

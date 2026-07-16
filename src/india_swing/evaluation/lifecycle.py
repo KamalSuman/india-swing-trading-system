@@ -9,7 +9,7 @@ from enum import Enum
 from india_swing.identity import content_id
 
 
-TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION = "research-trial-lifecycle-event/v1"
+TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION = "research-trial-lifecycle-event/v2"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -80,6 +80,7 @@ class TrialLifecycleEvent:
     holdout_id: str | None = None
     metrics: tuple[tuple[str, Decimal], ...] = ()
     passed: bool | None = None
+    evaluation_result_id: str | None = None
     schema_version: str = TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION
     event_id: str = field(init=False)
 
@@ -124,13 +125,18 @@ class TrialLifecycleEvent:
             if type(value) is not Decimal or not value.is_finite():
                 raise TrialLifecycleError("metric values must be finite Decimals")
         if self.event_type is TrialLifecycleEventType.TRIAL_COMPLETED:
-            if not self.metrics or type(self.passed) is not bool:
+            if (
+                not self.metrics
+                or type(self.passed) is not bool
+                or self.evaluation_result_id is None
+            ):
                 raise TrialLifecycleError(
-                    "completed trial requires metrics and an explicit pass result"
+                    "completed trial requires a generated result, metrics, and pass result"
                 )
-        elif self.metrics or self.passed is not None:
+            _sha(self.evaluation_result_id, "evaluation_result_id")
+        elif self.metrics or self.passed is not None or self.evaluation_result_id is not None:
             raise TrialLifecycleError(
-                "only a completed trial can carry metrics or a pass result"
+                "only a completed trial can carry a generated evaluation result"
             )
         if self.schema_version != TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION:
             raise TrialLifecycleError("unsupported trial-lifecycle schema")
@@ -150,6 +156,7 @@ class TrialLifecycleEvent:
                 "holdout_id": self.holdout_id,
                 "metrics": self.metrics,
                 "passed": self.passed,
+                "evaluation_result_id": self.evaluation_result_id,
             },
             length=64,
         )
