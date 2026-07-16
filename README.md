@@ -32,6 +32,9 @@ The current vertical slice implements:
 - a sealed, positive-observation-only cross-vintage identity registry that
   detects rename candidates and identifier reuse without inventing delistings
   or assigning tradable stable IDs;
+- immutable expanding purged walk-forward plans that use explicit trading
+  sessions, ten-session minimum label/embargo boundaries, and nonrepeating test
+  windows;
 - content-addressed calendar/universe contracts with stable listing lineage;
 - effective-dated eligibility lineage and split-session trading windows;
 - stable instrument/listing/universe/data identity plus exact content
@@ -83,6 +86,8 @@ The event-sourced schedule boundary is documented in `docs/CALENDAR_DATA.md`.
 The raw historical-price boundary is documented in `docs/HISTORICAL_PRICES.md`.
 The cross-vintage identity boundary is documented in
 `docs/IDENTITY_REGISTRY.md`.
+The leakage-safe evaluation split boundary is documented in
+`docs/EVALUATION.md`.
 
 After manually downloading the report named **CM - MII - Security File (.gz)
 (NSE Listed securities)**, import it without extracting it:

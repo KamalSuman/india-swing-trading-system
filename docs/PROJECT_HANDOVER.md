@@ -15,11 +15,11 @@ trade alert: all real-file artifacts are deliberately `COLLECTION_ONLY` and
 - Local repository: `C:\project\india-swing-trading-system`
 - Private remote: `https://github.com/KamalSuman/india-swing-trading-system.git`
 - Working branch: `agent/cross-vintage-identity`
-- Implementation checkpoint: current branch tip (`Build cross-vintage identity registry`)
+- Implementation checkpoint: current branch tip (`Add purged walk-forward evaluation plans`)
 - Remote `main`: `a21333b`
 - The working branch has no upstream and is not on GitHub at this snapshot.
 - Verified runtime: Python 3.12
-- Verification: 279 unit tests run: 276 passed and 3 skipped; `compileall`
+- Verification: 287 unit tests run: 284 passed and 3 skipped; `compileall`
   passed; `git diff --check` passed.
 
 The handover document may be committed after the implementation checkpoint, so
@@ -91,6 +91,9 @@ packages under `src/india_swing` are:
 - `identity_registry`: replay-verified positive observations, ISIN-level
   continuity candidates, unambiguous adjacent-vintage listing transitions, and
   explicit identifier/series conflicts. It assigns no stable tradable IDs.
+- `evaluation`: immutable expanding purged walk-forward folds over a versioned
+  trading-session tuple, with a ten-session minimum label horizon/embargo and
+  nonrepeating test windows. It does not yet calculate performance.
 - Synthetic demo adapters for Kronos, signals, and TradingAgents. These prove
   contracts only; they are not real models or performance evidence.
 
@@ -274,18 +277,21 @@ python -m india_swing.identity_registry.cli materialize `
    candidate transitions/conflicts, and add official listing-status evidence to
    adjudicate stable effective-dated IDs. This remains the key survivorship-bias
    boundary before backtesting.
-6. Add an official corporate-action source using a real archived fixture;
+6. Add an append-only preregistered trial store, dated Indian cost schedule,
+   and conservative execution simulator on top of the implemented purged folds.
+   Do not generate metrics from the one-session real archive.
+7. Add an official corporate-action source using a real archived fixture;
    design its schema from the source rather than guessing it.
-7. Implement a deterministic non-LLM baseline strategy and evaluate it with
+8. Implement a deterministic non-LLM baseline strategy and evaluate it with
    purged walk-forward splits, realistic Indian costs, slippage, liquidity,
    delistings, and registered trials. Compare against simple benchmarks.
-8. Add Kronos and/or TradingAgents only if they improve out-of-sample ranking.
+9. Add Kronos and/or TradingAgents only if they improve out-of-sample ranking.
    Add point-in-time news with publication/revision timestamps. Calibrate any
    confidence score; an uncalibrated 80% label is not an 80% probability.
-9. Run shadow alerts and paper trading first. Produce the full trade thesis and
+10. Run shadow alerts and paper trading first. Produce the full trade thesis and
    identical post-trade attribution for wins and losses. Only then consider a
    small, explicitly capped capital pilot.
-10. Move the deterministic service to GCP using Cloud Run/Jobs, Cloud Scheduler,
+11. Move the deterministic service to GCP using Cloud Run/Jobs, Cloud Scheduler,
     immutable/versioned Cloud Storage, Secret Manager, and alert monitoring.
 
 ## Inputs required from the owner
