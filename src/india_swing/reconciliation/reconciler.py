@@ -405,7 +405,8 @@ def reconcile_collection_only(
         if calendar.cutoff > cutoff:
             raise ReconciliationIntegrityError("calendar vintage follows the requested cutoff")
         calendar_snapshot_id = calendar.snapshot_id
-        blockers.add("CALENDAR_NOT_POINT_IN_TIME_VERIFIED")
+        if calendar.readiness is not ReferenceReadiness.POINT_IN_TIME_VERIFIED:
+            blockers.add("CALENDAR_NOT_POINT_IN_TIME_VERIFIED")
 
     if security_master.parsed.claimed_report_date != market_session:
         raise ReconciliationIntegrityError(

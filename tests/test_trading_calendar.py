@@ -95,6 +95,24 @@ def snapshot(
 
 
 class TradingCalendarTests(unittest.TestCase):
+    def test_exchange_schedule_does_not_imply_data_finality(self) -> None:
+        day = COVERAGE_START
+        schedule_only = CalendarDay(
+            day=day,
+            kind=CalendarDayKind.REGULAR,
+            reference=reference(day),
+            session_windows=(
+                SessionWindow(
+                    datetime.combine(day, time(9, 15), tzinfo=IST),
+                    datetime.combine(day, time(15, 30), tzinfo=IST),
+                    SessionWindowPhase.LIVE_CONTINUOUS,
+                ),
+            ),
+        )
+
+        self.assertTrue(schedule_only.is_session)
+        self.assertIsNone(schedule_only.data_ready_at)
+
     def test_verified_label_is_locked_until_an_official_importer_exists(self) -> None:
         with self.assertRaisesRegex(CalendarIntegrityError, "importer"):
             snapshot(readiness=ReferenceReadiness.POINT_IN_TIME_VERIFIED)
@@ -394,6 +412,14 @@ class TradingCalendarTests(unittest.TestCase):
         changed = snapshot(readiness=ReferenceReadiness.COLLECTION_ONLY)
         self.assertNotEqual(first.snapshot_id, changed.snapshot_id)
         self.assertNotEqual(first.version, changed.version)
+
+    def test_equivalent_cutoff_offsets_have_one_content_identity(self) -> None:
+        ist_snapshot = snapshot(cutoff=CUTOFF)
+        utc_snapshot = snapshot(cutoff=CUTOFF.astimezone(UTC))
+
+        self.assertEqual(ist_snapshot.cutoff, CUTOFF.astimezone(UTC))
+        self.assertEqual(ist_snapshot.snapshot_id, utc_snapshot.snapshot_id)
+        self.assertEqual(ist_snapshot.version, utc_snapshot.version)
 
 
 if __name__ == "__main__":

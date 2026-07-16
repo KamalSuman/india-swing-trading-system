@@ -7,6 +7,10 @@ from datetime import date, datetime
 from typing import Sequence
 
 from india_swing.calendar_evidence import build_observed_market_date_artifact
+from india_swing.calendar_data.config import CalendarDataConfig
+from india_swing.calendar_data.materialization_store import (
+    LocalCalendarMaterializationStore,
+)
 from india_swing.daily_reports.artifact_store import LocalDailyBundleArtifactStore
 from india_swing.daily_reports.config import DailyReportsConfig
 from india_swing.reference_data.artifact_store import LocalReferenceArtifactStore
@@ -67,6 +71,7 @@ def parser() -> argparse.ArgumentParser:
     )
     reconcile.add_argument("--market-session", type=_date, required=True)
     reconcile.add_argument("--cutoff", type=_aware_datetime, required=True)
+    reconcile.add_argument("--calendar-id")
     return root
 
 
@@ -102,11 +107,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 daily_store.get(artifact_id)
                 for artifact_id in args.daily_bundle_ids
             )
+            calendar = None
+            if args.calendar_id is not None:
+                calendar = LocalCalendarMaterializationStore(
+                    CalendarDataConfig.from_env().data_root,
+                    DailyReportsConfig.from_env().data_root,
+                ).get(args.calendar_id).materialization.calendar_snapshot
             snapshot = reconcile_collection_only(
                 security_master=master,
                 daily_bundles=bundles,
                 market_session=args.market_session,
                 cutoff=args.cutoff,
+                calendar=calendar,
             )
             response = {
                 "status": "COMPLETE",
@@ -122,6 +134,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "traded_row_count": snapshot.traded_row_count,
                 "orphan_report_key_count": len(snapshot.orphan_report_keys),
                 "report_binding_count": len(snapshot.report_bindings),
+                "calendar_snapshot_id": snapshot.calendar_snapshot_id,
                 "global_reason_codes": list(snapshot.global_reason_codes),
                 "readiness": snapshot.readiness.value,
                 "actionable": snapshot.actionable,

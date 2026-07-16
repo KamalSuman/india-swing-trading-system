@@ -19,6 +19,8 @@ india-swing-market-data = "india_swing.market_data.cli:main"
 india-swing-reference-data = "india_swing.reference_data.cli:main"
 india-swing-daily-reports = "india_swing.daily_reports.cli:main"
 india-swing-evidence = "india_swing.reconciliation.cli:main"
+india-swing-calendar-data = "india_swing.calendar_data.cli:main"
+india-swing-history = "india_swing.historical_prices.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

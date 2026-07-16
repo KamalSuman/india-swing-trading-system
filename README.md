@@ -25,6 +25,10 @@ The current vertical slice implements:
   interoperability security masters;
 - collection-only positive traded-date evidence plus an all-row reconciliation
   diagnostic that preserves nontraded securities and unresolved calendar state;
+- a sealed manual NSE calendar-circular archive and explicit event-graph
+  materializer that supports amendment chains without inventing data finality;
+- a replay-verified raw, unadjusted NSE EOD price store derived from paired
+  final UDiFF/full Bhavcopies;
 - content-addressed calendar/universe contracts with stable listing lineage;
 - effective-dated eligibility lineage and split-session trading windows;
 - stable instrument/listing/universe/data identity plus exact content
@@ -42,8 +46,9 @@ are fictional and cannot generate a real trade.
 
 The code currently refuses to construct `POINT_IN_TIME_VERIFIED` calendar or
 universe artifacts. The security-master importer preserves and validates one
-official input, but it deliberately remains `COLLECTION_ONLY`; surveillance,
-calendar, identity, liquidity, and cross-vintage completeness are still missing.
+official input, but it deliberately remains `COLLECTION_ONLY`; authenticated
+calendar provenance, identity, liquidity, corporate actions, and cross-vintage
+completeness are still missing.
 Only synthetic decisions can pass the end-to-end demo today. Every such decision
 carries `execution_eligible=false`.
 
@@ -71,6 +76,8 @@ The selected daily-report families and their date roles are documented in
 `docs/DAILY_REPORTS.md`.
 The positive-date and all-row diagnostic boundary is documented in
 `docs/EVIDENCE_RECONCILIATION.md`.
+The event-sourced schedule boundary is documented in `docs/CALENDAR_DATA.md`.
+The raw historical-price boundary is documented in `docs/HISTORICAL_PRICES.md`.
 
 After manually downloading the report named **CM - MII - Security File (.gz)
 (NSE Listed securities)**, import it without extracting it:
@@ -121,7 +128,7 @@ synthetic session arithmetic, split-session windows, next-session entry, a
 same-session EOD finality contract, stable listing/universe lineage, main-board
 eligibility, deterministic
 risk gates, provider-output identity binding, explicit lineage, and local audit
-integrity. A dated official NSE calendar, parsed historical security master and
+integrity. An authenticated point-in-time NSE calendar, parsed historical security master and
 delistings, corporate-action
 vintages, complete Indian charge schedule, purged walk-forward evaluation, trial
 registry, immutable cloud storage, and live adapters remain required before any
