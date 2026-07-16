@@ -35,6 +35,9 @@ The current vertical slice implements:
 - immutable expanding purged walk-forward plans that use explicit trading
   sessions, ten-session minimum label/embargo boundaries, and nonrepeating test
   windows;
+- create-once, content-addressed trial preregistrations that freeze strategy
+  families, hypotheses, inputs, hashes, metrics, thresholds, cost/execution
+  bindings, multiple-testing policy, and sealed-holdout identity before a run;
 - content-addressed calendar/universe contracts with stable listing lineage;
 - effective-dated eligibility lineage and split-session trading windows;
 - stable instrument/listing/universe/data identity plus exact content
