@@ -70,6 +70,8 @@ class PointInTimeInstrument:
     universe_snapshot_id: str
     eligible_sessions: tuple[date, ...]
     tick_size: Decimal
+    stable_instrument_id: str | None = None
+    eligibility_bindings: tuple[tuple[date, str], ...] = ()
     instrument_id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -96,6 +98,35 @@ class PointInTimeInstrument:
                 "eligible_sessions must be a sorted unique non-empty tuple"
             )
         _positive_decimal(self.tick_size, "tick_size")
+        if self.stable_instrument_id is not None and (
+            not isinstance(self.stable_instrument_id, str)
+            or not self.stable_instrument_id.strip()
+        ):
+            raise DeterministicBaselineError(
+                "stable_instrument_id must be non-empty text when supplied"
+            )
+        if type(self.eligibility_bindings) is not tuple:
+            raise DeterministicBaselineError(
+                "eligibility_bindings must be an immutable tuple"
+            )
+        if self.eligibility_bindings:
+            if (
+                tuple(session for session, _ in self.eligibility_bindings)
+                != self.eligible_sessions
+            ):
+                raise DeterministicBaselineError(
+                    "eligibility bindings must cover every eligible session exactly once"
+                )
+            for session, snapshot_id in self.eligibility_bindings:
+                if type(session) is not date:
+                    raise DeterministicBaselineError(
+                        "eligibility binding sessions must be dates"
+                    )
+                _sha(snapshot_id, "eligibility binding universe_snapshot_id")
+            if self.universe_snapshot_id != self.eligibility_bindings[0][1]:
+                raise DeterministicBaselineError(
+                    "primary universe snapshot must equal the first eligibility binding"
+                )
         object.__setattr__(self, "instrument_id", self._calculated_id())
 
     def _calculated_id(self) -> str:
@@ -107,6 +138,8 @@ class PointInTimeInstrument:
                 "universe_snapshot_id": self.universe_snapshot_id,
                 "eligible_sessions": self.eligible_sessions,
                 "tick_size": self.tick_size,
+                "stable_instrument_id": self.stable_instrument_id,
+                "eligibility_bindings": self.eligibility_bindings,
             },
             length=64,
         )
@@ -624,6 +657,13 @@ def _validate_inputs(
         isins.add(instrument.isin)
         if instrument.universe_snapshot_id not in dataset.universe_snapshot_ids:
             raise DeterministicBaselineError("instrument universe is absent from dataset")
+        if any(
+            snapshot_id not in dataset.universe_snapshot_ids
+            for _, snapshot_id in instrument.eligibility_bindings
+        ):
+            raise DeterministicBaselineError(
+                "instrument eligibility binding is absent from dataset"
+            )
         if any(session not in dataset.sessions for session in instrument.eligible_sessions):
             raise DeterministicBaselineError("instrument eligibility exceeds dataset calendar")
     for fold in split_plan.folds:

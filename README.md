@@ -25,6 +25,10 @@ The current vertical slice implements:
   create-once per-role batches, per-fold dispersion, a Holm familywise gate,
   persisted research promotion, create-once deterministic run/report manifests,
   and a report publication/inspection CLI;
+- a content-addressed evaluation-dataset assembler and create-once local store
+  that require gap-free versioned sessions, one universe snapshot per session,
+  adjudicated stable listing/ISIN identity, exact missing-row evidence, and
+  effective-dated tick sizes before producing baseline inputs;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually
@@ -71,6 +75,13 @@ calendar provenance, adjudicated stable identity, liquidity, corporate actions,
 and multi-vintage completeness are still missing.
 Only synthetic decisions can pass the end-to-end demo today. Every such decision
 carries `execution_eligible=false`.
+
+The evaluation-dataset assembler is implemented, but it does not upgrade any
+manual NSE file. It normalizes the existing raw EOD artifact without changing
+its `COLLECTION_ONLY` status, then refuses it. A real dataset can be assembled
+only after the upstream calendar, daily universes, identities, price finality,
+explicit nontrading rows, and tick-size evidence are independently promoted to
+point-in-time verified artifacts.
 
 The default risk policy rejects provisional or unvalidated probability estimates.
 The fictional demo opts out explicitly so the plumbing can be exercised; its
