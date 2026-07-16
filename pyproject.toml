@@ -26,6 +26,7 @@ india-swing-identity-evidence = "india_swing.identity_evidence.cli:main"
 india-swing-identity-decisions = "india_swing.identity_decisions.cli:main"
 india-swing-evaluation = "india_swing.evaluation.cli:main"
 india-swing-daily-pipeline = "india_swing.daily_pipeline.cli:main"
+india-swing-promotion = "india_swing.promotion.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

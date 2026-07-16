@@ -29,6 +29,13 @@ The current vertical slice implements:
   that require gap-free versioned sessions, one universe snapshot per session,
   adjudicated stable listing/ISIN identity, exact missing-row evidence, and
   effective-dated tick sizes before producing baseline inputs;
+- a content-bound promotion gate that independently reports research, backtest,
+  and alert blockers for missing, partial, synthetic, future-known, or
+  collection-only evidence instead of laundering ingestion into readiness,
+  plus create-once storage and a sanitized CLI for daily-run diagnostics;
+- a point-in-time corporate-action ledger contract that preserves amendments
+  and cancellations, supports explicit split/bonus ratios and cash dividends,
+  and refuses unsafe automatic factors for complex actions;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually
@@ -127,6 +134,8 @@ The positive-date and all-row diagnostic boundary is documented in
 `docs/EVIDENCE_RECONCILIATION.md`.
 The event-sourced schedule boundary is documented in `docs/CALENDAR_DATA.md`.
 The raw historical-price boundary is documented in `docs/HISTORICAL_PRICES.md`.
+The promotion stages and corporate-action boundary are documented in
+`docs/PROMOTION.md` and `docs/CORPORATE_ACTIONS.md`.
 The cross-vintage identity boundary is documented in
 `docs/IDENTITY_REGISTRY.md`.
 The explicit daily orchestration and predecessor boundary is documented in
@@ -232,7 +241,7 @@ same-session EOD finality contract, stable listing/universe lineage, main-board
 eligibility, deterministic
 risk gates, provider-output identity binding, explicit lineage, and local audit
 integrity. An authenticated point-in-time NSE calendar, historical security-master
-and lifecycle vintages, corporate-action
+and lifecycle vintages, an official corporate-action importer and verified
 vintages, historical Indian charge schedules, engine-generated evaluation metrics, trial
 registry, immutable cloud storage, and live adapters remain required before any
 real alert.

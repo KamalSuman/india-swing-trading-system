@@ -1,0 +1,65 @@
+# Point-in-time promotion gate
+
+Status: the deterministic decision contract, typed daily-run adapter,
+create-once local store, and sanitized inspection CLI are implemented. No real
+artifact is upgraded by this component.
+
+The gate separates four stages:
+
+1. `COLLECTION_ONLY` means bytes and derived diagnostics may be archived, but
+   the evidence cannot enter research.
+2. `RESEARCH_ELIGIBLE` requires verified calendar, stable identity, universe,
+   and raw-price coverage.
+3. `BACKTEST_ELIGIBLE` additionally requires corporate actions, liquidity,
+   surveillance, tick sizes, explicit nontrading state, and reconciliation.
+4. `ALERT_ELIGIBLE` additionally requires completed model validation, a sealed
+   risk policy, and successful shadow operations.
+
+Every capability is represented by immutable evidence containing its exact
+source snapshot IDs, knowledge cutoff, coverage interval, readiness,
+completeness, actionability, and machine-readable reason codes. A promotion
+decision records independent blocker sets for all three eligible stages and is
+content addressed.
+
+Missing evidence fails closed. The gate also blocks:
+
+- `COLLECTION_ONLY` evidence;
+- synthetic fixtures in a real promotion decision;
+- evidence known after the requested decision cutoff;
+- coverage that starts after the requested history or ends before the market
+  session;
+- incomplete or non-actionable evidence; and
+- every source-specific reason code, namespaced by capability.
+
+Passing the gate does not prove profitability. It only establishes that the
+declared evidence satisfies the data and operational admission contract. The
+existing evaluation-dataset assembler still independently verifies exact daily
+calendar, universe, raw-price, stable-identity, nontrading, and tick-size
+bindings before producing baseline inputs.
+
+Evaluate one already sealed daily collection run against an explicit requested
+history start:
+
+```powershell
+python -m india_swing.promotion.cli evaluate-daily-run `
+  --run-id <sealed-daily-run-id> `
+  --history-start 2020-01-01
+```
+
+The command loads the run from `INDIA_SWING_DAILY_PIPELINE_ROOT`, derives only
+the collection evidence represented by that typed run, and stores the
+content-addressed result under `INDIA_SWING_PROMOTION_ROOT` (default
+`var/promotion`). `show --decision-id <id>` and `list` re-open and verify stored
+decisions. Invalid arguments and failures expose only an error type.
+
+The daily-run adapter currently produces diagnostics for calendar, stable
+identity, universe, raw prices, liquidity, surveillance, explicit nontrading
+state, and reconciliation. Corporate actions and tick sizes remain explicitly
+missing until their source-backed importers exist. Model validation, risk
+authorization, and shadow operations remain alert-stage requirements rather
+than being inferred from a collection run.
+
+The current real archive remains `COLLECTION_ONLY`: it has only two EOD
+sessions, zero promoted stable identities, unresolved surveillance state, and
+no verified corporate-action coverage. The gate is expected to report these
+conditions rather than issue a real trade.

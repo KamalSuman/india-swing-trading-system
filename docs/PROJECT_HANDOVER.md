@@ -135,6 +135,16 @@ packages under `src/india_swing` are:
   synthetic/verified-data trial performance.
 - Synthetic demo adapters for Kronos, signals, and TradingAgents. These prove
   contracts only; they are not real models or performance evidence.
+- `promotion`: a content-bound, fail-closed gate that reports independent
+  research, backtest, and alert blockers across calendar, stable identity,
+  universe, prices, corporate actions, liquidity, surveillance, tick sizes,
+  explicit nontrading state, reconciliation, validation, risk, and shadow
+  operations. It never upgrades collection-only evidence. A typed adapter now
+  evaluates sealed daily runs, and create-once storage plus a sanitized CLI
+  persist and inspect those diagnostic decisions.
+- `corporate_actions`: a point-in-time event/snapshot contract for explicit
+  split/bonus ratios, INR cash dividends, amendments, and cancellations. It has
+  no official NSE row importer or adjusted-price view yet.
 
 See `README.md`, `docs/BIAS_INVARIANTS.md`, `docs/CALENDAR_DATA.md`,
 `docs/DAILY_PIPELINE.md`, `docs/HISTORICAL_PRICES.md`, and
@@ -434,8 +444,9 @@ python -m india_swing.identity_decisions.cli materialize `
    daily universes, stable listing identities, explicit nontrading state, and
    effective-dated tick sizes. Feed them to the implemented sealed dataset
    assembler. The current two-session real archive remains ineligible.
-7. Extend the archived corporate-action CSV source into normalized, effective-
-   dated adjustment events using real archived rows and explicit amendment rules.
+7. Connect the implemented corporate-action event/snapshot contract to an
+   official NSE CSV importer, then create separately versioned, cutoff-specific
+   adjustment views using real archived rows and explicit amendment rules.
 8. Evaluate the implemented deterministic baseline on point-in-time verified
    history with realistic Indian costs, slippage, liquidity, delistings, and
    registered trials.
