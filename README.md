@@ -46,6 +46,10 @@ The current vertical slice implements:
   detects rename candidates and identifier reuse without inventing delistings
   or assigning tradable stable IDs, plus a create-once complete adjudication
   queue that derives the official evidence required for every candidate;
+- an explicit-predecessor daily collection runner that imports one session,
+  derives prices and reconciliation, rebuilds the identity registry/queue, and
+  persists one content-addressed completeness report without any implicit
+  latest-file selection;
 - immutable expanding purged walk-forward plans that use explicit trading
   sessions, ten-session minimum label/embargo boundaries, and nonrepeating test
   windows;
@@ -64,14 +68,15 @@ The current vertical slice implements:
 - a synthetic demo and standard-library unit tests.
 
 It has not yet used real account credentials or collected a live snapshot. It
-also does **not** yet use real Kronos weights, an LLM, a point-in-time history of
-official NSE security masters, or automatic execution. The supplied current-day
-master remains a manually acquired collection-only artifact. The demo symbols
-are fictional and cannot generate a real trade.
+also does **not** yet use real Kronos weights, an LLM, a sufficiently long and
+verified point-in-time history of official NSE security masters, or automatic
+execution. The two currently archived consecutive masters remain manually
+acquired collection-only artifacts. The demo symbols are fictional and cannot
+generate a real trade.
 
 The code currently refuses to construct `POINT_IN_TIME_VERIFIED` calendar or
-universe artifacts. The security-master importer preserves and validates one
-official input, but it deliberately remains `COLLECTION_ONLY`; authenticated
+universe artifacts. The security-master importer preserves and validates each
+official input, but they deliberately remain `COLLECTION_ONLY`; authenticated
 calendar provenance, adjudicated stable identity, liquidity, corporate actions,
 and multi-vintage completeness are still missing.
 Only synthetic decisions can pass the end-to-end demo today. Every such decision
@@ -112,6 +117,8 @@ The event-sourced schedule boundary is documented in `docs/CALENDAR_DATA.md`.
 The raw historical-price boundary is documented in `docs/HISTORICAL_PRICES.md`.
 The cross-vintage identity boundary is documented in
 `docs/IDENTITY_REGISTRY.md`.
+The explicit daily orchestration and predecessor boundary is documented in
+`docs/DAILY_PIPELINE.md`.
 The leakage-safe evaluation split boundary is documented in
 `docs/EVALUATION.md`.
 The effective-dated delivery-cost and conservative fill policy is documented in
@@ -177,6 +184,22 @@ python -m india_swing.identity_registry.cli materialize `
 A single vintage is accepted to establish the first observation baseline, but
 it cannot provide cross-vintage evidence. The result remains
 `COLLECTION_ONLY`, `actionable=false`, and assigns no stable instrument ID.
+
+After the raw inputs and calendar have been collected, run one complete daily
+derivation with an explicit predecessor:
+
+```powershell
+python -m india_swing.daily_pipeline.cli run `
+  --session <YYYY-MM-DD> `
+  --cutoff <ISO-8601-cutoff-with-timezone> `
+  --calendar-id <sealed-calendar-materialization-id> `
+  --security-master-file C:\path\to\NSE_CM_security_DDMMYYYY.csv.gz `
+  --daily-bundle-file C:\path\to\Reports-Daily-Multiple.zip `
+  --previous-run-id <immediately-preceding-session-run-id>
+```
+
+Omit `--previous-run-id` only for an explicit bootstrap. Such a run records
+`NO_PREVIOUS_DAILY_RUN` and remains a collection diagnostic.
 
 The demo creates one create-once audit file in `var/audit`. Running the exact same
 snapshot again intentionally refuses to overwrite that file. The local record is

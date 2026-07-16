@@ -22,6 +22,7 @@ var/daily_reports/
 var/calendar_data/
 var/historical_prices/
 var/identity_registry/
+var/daily_pipeline/
 var/trial_registry/
 input_drop/
 tmp/

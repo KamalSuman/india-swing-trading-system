@@ -14,15 +14,17 @@ trade alert: all real-file artifacts are deliberately `COLLECTION_ONLY` and
 
 - Local repository: `C:\project\india-swing-trading-system`
 - Private remote: `https://github.com/KamalSuman/india-swing-trading-system.git`
-- Working branch: `agent/import-2026-07-16`
-- Implementation checkpoint: 16 July import, replay, and reconciliation compatibility
+- Working branch: `agent/daily-pipeline-runner`
+- Implementation checkpoint: explicit-predecessor daily collection runner
 - Remote `main`: `c684969` (merged PR #4)
-- The working branch has no upstream and is not on GitHub at this snapshot.
+- PR #5 contains the preceding 16 July reconciliation compatibility checkpoint;
+  the current runner branch has no upstream and is not on GitHub at this snapshot.
 - Verified runtime: Python 3.12
 - Last full verification before this data checkpoint: 287 unit tests run, 284
-  passed and 3 skipped. Current focused verification: all 11 reconciliation
-  tests passed; touched-source `compileall`, real 16 July replay, and
-  `git diff --check` passed.
+  passed and 3 skipped. Current focused verification: all 13 affected tests
+  passed (11 reconciliation and 2 daily-pipeline integration tests), touched
+  sources compiled, `git diff --check` passed, and the real 15/16 July chained
+  runs plus `show`/`list` inspection completed successfully.
 
 The handover document may be committed after the implementation checkpoint, so
 use `git log -2 --oneline` to see the exact local tip.
@@ -96,6 +98,10 @@ packages under `src/india_swing` are:
   every candidate and derives required provenance, date, adjacent-vintage,
   identifier, lifecycle, listing-status, continuity, and conflict evidence. It
   assigns no stable tradable IDs.
+- `daily_pipeline`: one explicit-predecessor command that chains exact sealed
+  masters and bundles, derives the current EOD/reconciliation/identity outputs,
+  and publishes a create-once completeness report. It never selects an implicit
+  latest artifact and never upgrades collection-only readiness.
 - `evaluation`: immutable expanding purged walk-forward folds over a versioned
   trading-session tuple, plus create-once content-addressed trial
   preregistrations with same-family parent lineage and append-only lifecycle
@@ -128,8 +134,8 @@ packages under `src/india_swing` are:
   contracts only; they are not real models or performance evidence.
 
 See `README.md`, `docs/BIAS_INVARIANTS.md`, `docs/CALENDAR_DATA.md`,
-`docs/HISTORICAL_PRICES.md`, and `docs/TRADINGAGENTS_ADAPTER.md` before changing
-promotion or decision logic.
+`docs/DAILY_PIPELINE.md`, `docs/HISTORICAL_PRICES.md`, and
+`docs/TRADINGAGENTS_ADAPTER.md` before changing promotion or decision logic.
 
 ## Real artifacts already validated
 
@@ -221,6 +227,24 @@ the original bytes rather than trusting a cached Python object.
   listing-status cases, 92 adjacent-vintage observations, 92 validated
   identifiers, 13 official conflict resolutions, and one listing-lifecycle case.
 
+### Chained daily pipeline reports
+
+- 15 July delayed bootstrap run:
+  `2488e00469cc175306b84b8c341e59fc2f62357a87c60ae6bc18419c2857006f`.
+  Its cutoff is 16 July 15:45 IST because the sealed calendar was first known
+  on 16 July; it explicitly records `NO_PREVIOUS_DAILY_RUN`.
+- 16 July successor run:
+  `22c36c49e22db46cf87acff2d004779e42f157c84bcc87ed2021dfcf6f9f0bfa`.
+  It binds the exact bootstrap predecessor, two-master/two-bundle chains, 3,439
+  bars, reconciliation `745772b0...`, identity registry `b94046a0...`, and
+  adjudication queue `8325fac3...`.
+- The successor's completeness report explicitly retains
+  `EFFECTIVE_REG1_STATE_MISSING`, calendar/manual-acquisition blockers,
+  `IDENTITY_ADJUDICATION_REQUIRED`, and `STABLE_IDENTITY_UNAVAILABLE`.
+- Both reports are `COLLECTION_ONLY`, `actionable=false`, and assign no stable
+  identity. The real successor took about 6.8 minutes with independent replay
+  verification on this machine.
+
 ## Essential local commands
 
 Run from `C:\project\india-swing-trading-system`:
@@ -230,6 +254,20 @@ $env:PYTHONPATH = "src"
 python -m unittest discover -s tests -v
 python -m india_swing.demo --output-dir var/audit
 ```
+
+Run one explicit daily chain successor after the files and calendar exist:
+
+```powershell
+python -m india_swing.daily_pipeline.cli run `
+  --session <YYYY-MM-DD> `
+  --cutoff <ISO-8601-cutoff> `
+  --calendar-id <calendar-materialization-id> `
+  --security-master-file C:\path\to\NSE_CM_security_DDMMYYYY.csv.gz `
+  --daily-bundle-file C:\path\to\Reports-Daily-Multiple.zip `
+  --previous-run-id <immediately-preceding-session-run-id>
+```
+
+See `docs/DAILY_PIPELINE.md` for bootstrap semantics and inspection commands.
 
 Import sealed sources:
 
@@ -328,15 +366,18 @@ python -m india_swing.identity_registry.cli adjudication-show `
 
 ## Recommended next milestones, in order
 
-1. Review the latest local branch, push it, and open a PR. Do not merge merely because
-   tests pass; review the promotion boundaries and raw-data replay cost.
+1. Review and merge PR #5, then review and publish the local daily-runner branch.
+   Do not merge merely because tests pass; review the promotion boundaries and
+   the current multi-minute raw-data replay cost.
 2. Independently review the three local calendar declarations against PDF pages
    45-47, pages 1-2, and page 1 respectively. Calendar schedule resolution stays
    diagnostic until acquisition provenance and provider finality are verified.
 3. Collect and model the August 2026 closing-auction transition before extending
    calendar coverage beyond July 31.
-4. Establish a recurring authorized collection job for the daily security
-   master and Multiple File Download bundle. Materialize each raw EOD session.
+4. Connect the implemented local daily runner to a recurring authorized
+   acquisition job for the security master and Multiple File Download bundle.
+   Add scheduling, immutable object storage, and failure notification without
+   introducing implicit latest-file selection.
 5. Feed consecutive masters into the implemented identity registry and its
    complete adjudication queue. Acquire the official evidence named by every
    case, then implement evidence import and reviewed decisions for stable
@@ -381,8 +422,8 @@ python -m india_swing.identity_registry.cli adjudication-show `
 
 ## Honest progress assessment
 
-Approximately 83% of a research-and-notification MVP foundation is implemented,
-but only about 52% of the work required for a defensible real-capital pilot.
+Approximately 84% of a research-and-notification MVP foundation is implemented,
+but only about 53% of the work required for a defensible real-capital pilot.
 The system is 0% live-trade-ready because it correctly refuses all real alerts.
 The largest remaining effort is trustworthy historical data and evaluation,
 not connecting an LLM or formatting a notification.
