@@ -5,20 +5,23 @@ Snapshot date: 2026-07-16 (Asia/Kolkata)
 ## One-line status
 
 The repository has a tested, fail-closed foundation for point-in-time Indian
-equity research, plus sealed NSE reference, daily-report, calendar, and raw EOD
-price archives. It cannot yet issue a real trade alert: all real-file artifacts
-are deliberately `COLLECTION_ONLY` and `actionable=false`.
+equity research, plus sealed NSE reference, daily-report, calendar, raw EOD
+price, and cross-vintage identity-candidate archives. It cannot yet issue a real
+trade alert: all real-file artifacts are deliberately `COLLECTION_ONLY` and
+`actionable=false`.
 
 ## Repository and checkpoint
 
 - Local repository: `C:\project\india-swing-trading-system`
 - Private remote: `https://github.com/KamalSuman/india-swing-trading-system.git`
-- Working branch: `agent/event-sourced-calendar`
-- Implementation checkpoint: `6aee3a8` (`Add point-in-time calendar and raw price archives`)
-- Remote `main`: `d5d4fda`
+- Working branch: `agent/cross-vintage-identity`
+- Implementation checkpoint: current branch tip (`Persist family promotion evidence`)
+- Remote `main`: `a21333b`
 - The working branch has no upstream and is not on GitHub at this snapshot.
 - Verified runtime: Python 3.12
-- Verification: 262 unit tests passed, 3 skipped; `compileall` passed; `git diff --check` passed.
+- Last full verification: 287 unit tests run: 284 passed and 3 skipped. The
+  current cost/execution/evaluation integration has 91 focused tests passing;
+  touched-source `compileall` and `git diff --check` passed.
 
 The handover document may be committed after the implementation checkpoint, so
 use `git log -2 --oneline` to see the exact local tip.
@@ -86,6 +89,31 @@ packages under `src/india_swing` are:
   competing branches, uncovered dates, and implicit latest-wins logic.
 - `historical_prices`: replay-verified raw NSE EOD session bars derived from the
   paired final UDiFF/full Bhavcopies, with row-level lineage.
+- `identity_registry`: replay-verified positive observations, ISIN-level
+  continuity candidates, unambiguous adjacent-vintage listing transitions, and
+  explicit identifier/series conflicts. It assigns no stable tradable IDs.
+- `evaluation`: immutable expanding purged walk-forward folds over a versioned
+  trading-session tuple, plus create-once content-addressed trial
+  preregistrations with same-family parent lineage and append-only lifecycle
+  chains for holdout access and outcomes. Its engine generates fills, itemized
+  costs, mark-to-market equity, fixed metrics, and threshold results while
+  rejecting training/validation signals and collection-only data. Full results
+  are create-once artifacts. Strategy and benchmark now run through identical
+  base/stressed paths, and their persisted comparison is required before
+  lifecycle completion. Content-bound close-momentum strategy and liquid
+  equal-weight benchmark generators create next-session intents across every
+  registered test fold, with explicit as-of evidence and candidate vetoes.
+  Each trial role has one create-once batch, fold metrics are recomputed from
+  its equity evidence, and a frozen fold-sign/Holm gate covers complete trial
+  families without accepting caller-supplied probabilities. Exact family
+  snapshots are create-once artifacts; eligible trials can receive a separate
+  post-completion research-promotion event only when it matches the completed
+  comparison. A content-bound Markdown family/fold report is generated.
+- `execution`: a content-bound Zerodha/NSE delivery plus fully-netted intraday
+  tariff effective from 2026-03-01 and a pessimistic daily-bar simulator for
+  next-session entries, gaps, stops/targets, tick rounding, participation
+  limits, and circuit locks. It is wired to engine-generated
+  synthetic/verified-data trial performance.
 - Synthetic demo adapters for Kronos, signals, and TradingAgents. These prove
   contracts only; they are not real models or performance evidence.
 
@@ -150,6 +178,22 @@ the original bytes rather than trusting a cached Python object.
 - Coverage: `TRADED_ROWS_ONLY`
 - Readiness: `COLLECTION_ONLY`; actionable: false
 
+### Cross-vintage identity baseline
+
+- Source vintages: one, claimed 2026-07-15
+- Registry ID: `cfb7a107d192a539f429c535cc220d677ea770a989530ec00ed9414280c3b27b`
+- Manifest ID: `1bb2e0f8b3711b3c7205c01b1659fa73a857b30951b6ead44076dfb2dd3fd697`
+- Positive observations: 21,133
+- ISIN/unvalidated identifier candidates: 4,498
+- Quarantined same-ISIN/same-series ambiguities: 18
+- Cross-vintage transitions: zero, because only one dated source exists
+- Stable identities assigned: zero
+- Readiness: `COLLECTION_ONLY`; actionable: false
+
+The 18 conflicts are mostly simultaneous old/new ticker rows, often with one
+`DelFlg=Y` row. Their meaning has not been inferred from the flag alone; they
+remain quarantined pending official lifecycle evidence.
+
 ## Essential local commands
 
 Run from `C:\project\india-swing-trading-system`:
@@ -211,19 +255,36 @@ python -m india_swing.historical_prices.cli materialize `
   --cutoff <ISO-8601-cutoff>
 ```
 
+Materialize identity candidates from one baseline or multiple dated masters:
+
+```powershell
+python -m india_swing.identity_registry.cli materialize `
+  --security-master-id <older-master-artifact-id> `
+  --security-master-id <newer-master-artifact-id> `
+  --cutoff <ISO-8601-cutoff>
+```
+
 ## What is not implemented
 
 - Authenticated/licensed, automatically acquired point-in-time NSE calendar.
 - Calendar changes after 2026-07-31, including the August closing-auction
   transition and later special-session circulars.
-- Historical daily security-master vintages, delistings, renames, mergers, and
-  a stable cross-vintage instrument/company identity registry.
+- Multiple consecutive historical security-master vintages and official
+  adjudication of delistings, suspensions, renames, mergers, demergers, and
+  stable instrument/listing IDs. The candidate registry is implemented, but a
+  single real vintage cannot establish cross-date continuity.
 - Official corporate-action ingestion and cutoff-specific adjusted views.
 - Multi-year survivorship-safe price history.
 - A production liquidity/eligibility universe promoted to
   `POINT_IN_TIME_VERIFIED`.
+- Historical cost schedules before 2026-03-01, point-in-time tick-size views,
+  partial same-day allocation evidence, and shadow contract-note reconciliation.
+  The current Zerodha resident-retail NSE cash schedule does not cover other
+  account/product/exchange tariffs or dealer/auto-square-off surcharges.
 - A fitted strategy, Kronos weights, calibrated probabilities, news feed,
-  purged walk-forward backtest, shadow/paper alerts, or performance report.
+  real-data purged walk-forward backtest, shadow/paper alerts, or performance report.
+- A create-once report store/CLI and a report over actual point-in-time
+  verified historical folds.
 - Cloud Storage immutability, Cloud Run scheduling, Secret Manager wiring,
   monitoring, notifications, or live Zerodha execution.
 
@@ -238,20 +299,24 @@ python -m india_swing.historical_prices.cli materialize `
    calendar coverage beyond July 31.
 4. Establish a recurring authorized collection job for the daily security
    master and Multiple File Download bundle. Materialize each raw EOD session.
-5. Build cross-vintage identity and listing-status history. This is the key
-   survivorship-bias boundary before backtesting.
-6. Add an official corporate-action source using a real archived fixture;
+5. Feed consecutive masters into the implemented identity registry, review its
+   candidate transitions/conflicts, and add official listing-status evidence to
+   adjudicate stable effective-dated IDs. This remains the key survivorship-bias
+   boundary before backtesting.
+6. Add a create-once report store and CLI around the implemented deterministic
+   family report. The one-session real archive remains ineligible.
+7. Add an official corporate-action source using a real archived fixture;
    design its schema from the source rather than guessing it.
-7. Implement a deterministic non-LLM baseline strategy and evaluate it with
-   purged walk-forward splits, realistic Indian costs, slippage, liquidity,
-   delistings, and registered trials. Compare against simple benchmarks.
-8. Add Kronos and/or TradingAgents only if they improve out-of-sample ranking.
+8. Evaluate the implemented deterministic baseline on point-in-time verified
+   history with realistic Indian costs, slippage, liquidity, delistings, and
+   registered trials.
+9. Add Kronos and/or TradingAgents only if they improve out-of-sample ranking.
    Add point-in-time news with publication/revision timestamps. Calibrate any
    confidence score; an uncalibrated 80% label is not an 80% probability.
-9. Run shadow alerts and paper trading first. Produce the full trade thesis and
+10. Run shadow alerts and paper trading first. Produce the full trade thesis and
    identical post-trade attribution for wins and losses. Only then consider a
    small, explicitly capped capital pilot.
-10. Move the deterministic service to GCP using Cloud Run/Jobs, Cloud Scheduler,
+11. Move the deterministic service to GCP using Cloud Run/Jobs, Cloud Scheduler,
     immutable/versioned Cloud Storage, Secret Manager, and alert monitoring.
 
 ## Inputs required from the owner
@@ -265,14 +330,16 @@ python -m india_swing.historical_prices.cli materialize `
   production.
 - A real official corporate-action export or an authorized source sample before
   that importer is designed.
+- The next dated NSE CM MII security master, beginning with
+  `NSE_CM_security_16072026.csv.gz`, to exercise real cross-vintage transitions.
 - Zerodha/Kite credentials only when live snapshot collection is reached. Put
   them in environment variables or GCP Secret Manager; never paste secrets into
   chat, source code, fixtures, commits, or handover files.
 
 ## Honest progress assessment
 
-Approximately 55% of a research-and-notification MVP foundation is implemented,
-but only about 30% of the work required for a defensible real-capital pilot.
+Approximately 77% of a research-and-notification MVP foundation is implemented,
+but only about 49% of the work required for a defensible real-capital pilot.
 The system is 0% live-trade-ready because it correctly refuses all real alerts.
 The largest remaining effort is trustworthy historical data and evaluation,
 not connecting an LLM or formatting a notification.

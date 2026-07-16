@@ -9,13 +9,21 @@ The current vertical slice implements:
 - strict point-in-time evidence validation;
 - NSE main-board eligibility without a market-cap cutoff;
 - explicit Kronos, signal, and TradingAgents adapter contracts;
-- deterministic ranking, sizing, cost, liquidity, and portfolio-risk gates;
+- deterministic ranking, sizing, delivery/intraday cost, liquidity, and portfolio-risk gates;
 - `BUY` or `NO_TRADE` output only;
 - typed failed-run output for data/model/research outages, always with `NO_TRADE`;
 - create-once typed pipeline audit records with run-ID, nested-integrity, and
   secret-rejection checks;
 - explicit trial, model, universe, calendar, data, source, execution, and cost
   lineage in every typed pipeline result, including result-only audit writes;
+- purged-fold-bound evaluation that generates conservative fills, itemized
+  cash-equity costs, mark-to-market equity, fixed metrics, threshold outcomes,
+  base/stressed benchmark comparisons, and create-once full-result evidence;
+- preregistration-bound deterministic close-momentum strategy and liquid
+  equal-weight benchmark intent generators, with explicit point-in-time
+  eligibility, as-of evidence IDs, a decision or veto for every candidate,
+  create-once per-role batches, per-fold dispersion, a Holm familywise gate,
+  persisted research promotion, and a deterministic Markdown report;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually
@@ -29,6 +37,17 @@ The current vertical slice implements:
   materializer that supports amendment chains without inventing data finality;
 - a replay-verified raw, unadjusted NSE EOD price store derived from paired
   final UDiFF/full Bhavcopies;
+- a sealed, positive-observation-only cross-vintage identity registry that
+  detects rename candidates and identifier reuse without inventing delistings
+  or assigning tradable stable IDs;
+- immutable expanding purged walk-forward plans that use explicit trading
+  sessions, ten-session minimum label/embargo boundaries, and nonrepeating test
+  windows;
+- create-once, content-addressed trial preregistrations that freeze strategy
+  families, hypotheses, inputs, hashes, metrics, thresholds, cost/execution
+  bindings, multiple-testing policy, and sealed-holdout identity before a run;
+- append-only per-trial lifecycle chains for audited holdout unsealing/access,
+  completed-negative results, failures, aborts, and later invalidations;
 - content-addressed calendar/universe contracts with stable listing lineage;
 - effective-dated eligibility lineage and split-session trading windows;
 - stable instrument/listing/universe/data identity plus exact content
@@ -47,8 +66,8 @@ are fictional and cannot generate a real trade.
 The code currently refuses to construct `POINT_IN_TIME_VERIFIED` calendar or
 universe artifacts. The security-master importer preserves and validates one
 official input, but it deliberately remains `COLLECTION_ONLY`; authenticated
-calendar provenance, identity, liquidity, corporate actions, and cross-vintage
-completeness are still missing.
+calendar provenance, adjudicated stable identity, liquidity, corporate actions,
+and multi-vintage completeness are still missing.
 Only synthetic decisions can pass the end-to-end demo today. Every such decision
 carries `execution_eligible=false`.
 
@@ -78,6 +97,12 @@ The positive-date and all-row diagnostic boundary is documented in
 `docs/EVIDENCE_RECONCILIATION.md`.
 The event-sourced schedule boundary is documented in `docs/CALENDAR_DATA.md`.
 The raw historical-price boundary is documented in `docs/HISTORICAL_PRICES.md`.
+The cross-vintage identity boundary is documented in
+`docs/IDENTITY_REGISTRY.md`.
+The leakage-safe evaluation split boundary is documented in
+`docs/EVALUATION.md`.
+The effective-dated delivery-cost and conservative fill policy is documented in
+`docs/COSTS_AND_EXECUTION.md`.
 
 After manually downloading the report named **CM - MII - Security File (.gz)
 (NSE Listed securities)**, import it without extracting it:
@@ -110,6 +135,20 @@ quarantined dispositions explicitly. It does not infer next-session effective
 dates without a verified trading calendar, merge overlapping band files, or
 turn any report into an executable signal.
 
+After importing two or more dated security-master vintages, build sealed
+continuity candidates with an explicit knowledge cutoff:
+
+```powershell
+python -m india_swing.identity_registry.cli materialize `
+  --security-master-id <older-master-artifact-id> `
+  --security-master-id <newer-master-artifact-id> `
+  --cutoff <ISO-8601-cutoff-with-timezone>
+```
+
+A single vintage is accepted to establish the first observation baseline, but
+it cannot provide cross-vintage evidence. The result remains
+`COLLECTION_ONLY`, `actionable=false`, and assigns no stable instrument ID.
+
 The demo creates one create-once audit file in `var/audit`. Running the exact same
 snapshot again intentionally refuses to overwrite that file. The local record is
 hash-verified and published atomically, but a filesystem administrator can still
@@ -128,9 +167,9 @@ synthetic session arithmetic, split-session windows, next-session entry, a
 same-session EOD finality contract, stable listing/universe lineage, main-board
 eligibility, deterministic
 risk gates, provider-output identity binding, explicit lineage, and local audit
-integrity. An authenticated point-in-time NSE calendar, parsed historical security master and
-delistings, corporate-action
-vintages, complete Indian charge schedule, purged walk-forward evaluation, trial
+integrity. An authenticated point-in-time NSE calendar, historical security-master
+and lifecycle vintages, corporate-action
+vintages, historical Indian charge schedules, engine-generated evaluation metrics, trial
 registry, immutable cloud storage, and live adapters remain required before any
 real alert.
 
