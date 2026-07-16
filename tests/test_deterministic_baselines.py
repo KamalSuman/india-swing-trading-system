@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import unittest
 import json
+import io
 import tempfile
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from india_swing.evaluation import (
     DailyExecutionPolicy,
     DeterministicBaselineError,
+    DeterministicComparisonRunConflict,
     DeterministicBaselineEvaluationEngine,
     DeterministicEqualWeightBenchmarkGenerator,
     DeterministicMomentumIntentGenerator,
     EqualWeightBenchmarkConfig,
     EvaluationDataReadiness,
+    EvaluationEvidenceConfig,
     EvaluationDataset,
     GeneratedIntentRole,
     GeneratedIntentBatchConflict,
@@ -22,6 +26,7 @@ from india_swing.evaluation import (
     LocalGeneratedIntentBatchStore,
     LocalTrialFamilyAggregateStore,
     LocalTrialLifecycleStore,
+    LocalTrialFamilyReportStore,
     LocalTrialEvaluationComparisonStore,
     LocalTrialEvaluationResultStore,
     LocalTrialRegistry,
@@ -30,6 +35,7 @@ from india_swing.evaluation import (
     PointInTimeInstrument,
     TrialRegistration,
     TrialFamilyAggregationError,
+    TrialFamilyReportConflict,
     TrialLifecycleConflict,
     TrialLifecycleEventType,
     TrialFamilyEvaluationAggregator,
@@ -41,6 +47,7 @@ from india_swing.evaluation import (
     encode_trial_family_aggregate,
     build_trial_family_evaluation_report,
 )
+from india_swing.evaluation.cli import main as evaluation_cli_main
 from india_swing.execution import SimulationBar, zerodha_nse_delivery_schedule_2026
 from india_swing.identity import content_id
 
@@ -231,6 +238,18 @@ def evaluate_run(
 
 
 class DeterministicBaselineTests(unittest.TestCase):
+    def test_evaluation_evidence_config_has_safe_default_and_override(self) -> None:
+        self.assertEqual(
+            EvaluationEvidenceConfig.from_env({}).data_root,
+            Path("var/evaluation"),
+        )
+        self.assertEqual(
+            EvaluationEvidenceConfig.from_env(
+                {"INDIA_SWING_EVALUATION_ROOT": "D:/sealed/evaluation"}
+            ).data_root,
+            Path("D:/sealed/evaluation"),
+        )
+
     def test_momentum_generator_is_reproducible_and_explains_every_candidate(self) -> None:
         common = dict(
             config=strategy_config(),
@@ -398,6 +417,9 @@ class DeterministicBaselineStoreAndFamilyTests(unittest.TestCase):
             self.registry,
             self.comparison_store,
             self.family_store,
+        )
+        self.report_store = LocalTrialFamilyReportStore(
+            self.root / "evidence", self.family_store
         )
 
     def tearDown(self) -> None:
@@ -574,10 +596,18 @@ class DeterministicBaselineStoreAndFamilyTests(unittest.TestCase):
         second_report = build_trial_family_evaluation_report(
             aggregate=stored, runs=(run,)
         )
+        persisted_report = self.report_store.publish(
+            first_report,
+            aggregate=stored,
+            runs=(run,),
+        )
 
         self.assertEqual(decoded, aggregate)
         self.assertEqual(stored, aggregate)
         self.assertEqual(first_report.report_id, second_report.report_id)
+        self.assertEqual(persisted_report, first_report)
+        self.assertEqual(self.report_store.get(aggregate.aggregate_id), first_report)
+        self.assertEqual(self.report_store.list_reports(), (first_report,))
         self.assertIn("## Family decisions", first_report.markdown)
         self.assertIn("## Fold evidence", first_report.markdown)
         self.assertIn("not a profit forecast or trade alert", first_report.markdown)
@@ -699,7 +729,7 @@ class DeterministicBaselineStoreAndFamilyTests(unittest.TestCase):
                 changed_bar=bar(changed_session, "ALPHA", D("135"), 1_000_000)
             ),
         )
-        self.run_store.publish(completion_run)
+        self.comparison_store.publish(completion_run.comparison)
         self.lifecycle_store.append(
             trial_id=registered.trial_id,
             event_type=TrialLifecycleEventType.TRIAL_STARTED,
@@ -725,6 +755,98 @@ class DeterministicBaselineStoreAndFamilyTests(unittest.TestCase):
                 reason="Attempt to promote a different comparison.",
                 family_aggregate=aggregate,
             )
+
+    def test_trial_cannot_publish_a_second_deterministic_run(self) -> None:
+        registered = registration(multiple_testing_policy=FOLD_SIGN_HOLM_POLICY)
+        self.registry.register(registered)
+        first = evaluate_run(registered)
+        self.run_store.publish(first)
+        changed_session = split_plan().folds[0].test_sessions[2]
+        second = evaluate_run(
+            registered,
+            data=dataset(
+                changed_bar=bar(changed_session, "ALPHA", D("135"), 1_000_000)
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            DeterministicComparisonRunConflict, "different deterministic run"
+        ):
+            self.run_store.publish(second)
+
+    def test_evaluation_report_cli_publishes_lists_and_shows_persisted_report(self) -> None:
+        registered = registration(multiple_testing_policy=FOLD_SIGN_HOLM_POLICY)
+        self.registry.register(registered)
+        run = evaluate_run(registered)
+        self.run_store.publish(run)
+        aggregate = TrialFamilyEvaluationAggregator(
+            self.registry, self.run_store
+        ).aggregate(
+            strategy_family_id=registered.strategy_family_id,
+            runs=(run,),
+        )
+        self.family_store.publish(aggregate, runs=(run,))
+        environment = {
+            "INDIA_SWING_TRIAL_REGISTRY_ROOT": str(self.root / "trials"),
+            "INDIA_SWING_EVALUATION_ROOT": str(self.root / "evidence"),
+        }
+        publish_output = io.StringIO()
+        with patch.dict("os.environ", environment, clear=False), patch(
+            "sys.stdout", publish_output
+        ):
+            publish_code = evaluation_cli_main(
+                [
+                    "report",
+                    "publish",
+                    "--strategy-family-id",
+                    registered.strategy_family_id,
+                ]
+            )
+        response = json.loads(publish_output.getvalue())
+        show_output = io.StringIO()
+        with patch.dict("os.environ", environment, clear=False), patch(
+            "sys.stdout", show_output
+        ):
+            show_code = evaluation_cli_main(
+                ["report", "show", "--aggregate-id", aggregate.aggregate_id]
+            )
+        list_output = io.StringIO()
+        with patch.dict("os.environ", environment, clear=False), patch(
+            "sys.stdout", list_output
+        ):
+            list_code = evaluation_cli_main(["report", "list"])
+        listed = json.loads(list_output.getvalue())
+
+        self.assertEqual(publish_code, 0)
+        self.assertEqual(response["report_id"], self.report_store.get(aggregate.aggregate_id).report_id)
+        self.assertEqual(show_code, 0)
+        self.assertIn("# Trial family evaluation", show_output.getvalue())
+        self.assertEqual(list_code, 0)
+        self.assertEqual(listed["count"], 1)
+
+    def test_persisted_report_tampering_is_detected(self) -> None:
+        registered = registration(multiple_testing_policy=FOLD_SIGN_HOLM_POLICY)
+        self.registry.register(registered)
+        run = evaluate_run(registered)
+        self.run_store.publish(run)
+        aggregate = TrialFamilyEvaluationAggregator(
+            self.registry, self.run_store
+        ).aggregate(
+            strategy_family_id=registered.strategy_family_id,
+            runs=(run,),
+        )
+        self.family_store.publish(aggregate, runs=(run,))
+        report = build_trial_family_evaluation_report(
+            aggregate=aggregate, runs=(run,)
+        )
+        self.report_store.publish(report, aggregate=aggregate, runs=(run,))
+        path = self.report_store.path_for(aggregate.aggregate_id)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["report"]["markdown"] = "# Result-informed rewrite\n"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaises(TrialFamilyReportConflict):
+            self.report_store.get(aggregate.aggregate_id)
 
 
 if __name__ == "__main__":

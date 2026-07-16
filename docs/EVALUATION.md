@@ -92,6 +92,51 @@ still delete the newest files and related evidence. Production therefore needs
 conditional immutable Cloud Storage writes, retention controls, and access
 logs.
 
+## Sealed dataset assembly
+
+`assemble_evaluation_dataset` is the admission boundary between historical
+collection and the evaluation engine. It consumes one exact as-of calendar
+vintage and one exact universe snapshot for every evaluation session, one
+normalized price session for every session, and effective-dated tick-size specifications. It
+produces the existing `EvaluationDataset`, point-in-time baseline instruments,
+and a content-bound `EvaluationSessionEvidence` record for every session.
+
+Admission fails unless all inputs share either the explicit synthetic-test
+readiness or `POINT_IN_TIME_VERIFIED`. `COLLECTION_ONLY` fails. Sessions must be
+gap-free relative to each preceding as-of calendar; each universe must bind its
+same-session calendar vintage; every raw listing key must exist in that session's broad universe;
+and every actionable listing must have either an identity-matched bar or an
+exact explicit nontrading listing record. Absence from a Bhavcopy is therefore
+never treated as an eligibility or delisting fact.
+
+Each calendar vintage must itself have been sealed by that session's decision
+cutoff. The vintage used for session D must identify the next supplied session
+as its then-known next exchange session, and that next-session record must also
+have been known by the cutoff. A calendar assembled later in the evaluation
+window therefore cannot be reused for earlier decisions merely because its
+historical dates look correct.
+
+Every actionable listing requires a stable instrument ID, listing ID, ISIN, and
+exactly one timely effective tick size. The generated baseline instrument now
+retains the stable identity and a `(session, universe_snapshot_id)` binding for
+every eligible session. The current baseline deliberately rejects symbol,
+listing, ISIN, or tick-size transitions rather than joining them incorrectly.
+A later model can support transitions only by making their execution semantics
+explicit.
+
+`point_in_time_price_session_from_nse` normalizes a replay-verified raw NSE EOD
+artifact but preserves its readiness and `actionable` flag. Consequently the
+present manually acquired price archive remains ineligible. It also cannot
+invent explicit nontrading evidence or circuit-lock facts absent from the raw
+source.
+
+`LocalEvaluationDatasetStore` publishes one create-once JSON artifact under the
+evaluation evidence root. Reads reconstruct the dataset, bars, instruments,
+daily bindings, raw-price source references, effective tick specifications, and
+nested content IDs. This local materialization is content-addressed;
+point-in-time trust still comes from the referenced upstream stores and their
+future verified acquisition/adjudication paths.
+
 ## Engine-generated evaluation
 
 `TrialEvaluationEngine` consumes an immutable trial registration, its exact
@@ -198,8 +243,16 @@ persist.
 `build_trial_family_evaluation_report` renders a content-bound Markdown report
 from the aggregate and exact run set. It includes family decisions, Holm
 cutoffs, comparison eligibility, every fold's base/stressed excess, and an
-interpretation boundary. The report is deterministic but is not yet published
-by a dedicated local report store or CLI.
+interpretation boundary. `LocalDeterministicComparisonRunStore` now publishes
+one create-once run manifest per trial, binding both generated batches, the
+comparison, and every fold summary. A second result-derived run for the same
+trial is rejected.
+
+`LocalTrialFamilyReportStore` publishes one create-once report for each family
+aggregate and rechecks the aggregate and run evidence before writing. The
+`india-swing-evaluation` CLI can publish from persisted current-family runs,
+list report IDs, or render stored Markdown. It cannot accept caller-authored
+metrics, Markdown, aggregate decisions, or a selectively supplied trial list.
 
 Synthetic trials require an explicitly synthetic dataset. A non-synthetic
 trial requires `POINT_IN_TIME_VERIFIED`; `COLLECTION_ONLY` data fails before any

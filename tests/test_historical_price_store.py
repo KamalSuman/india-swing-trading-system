@@ -25,6 +25,10 @@ from india_swing.historical_prices import (
     materialize_nse_eod_session,
 )
 from india_swing.historical_prices.cli import main as historical_prices_main
+from india_swing.evaluation import (
+    EvaluationDataReadiness,
+    point_in_time_price_session_from_nse,
+)
 from tests.test_historical_prices import (
     CUTOFF,
     FIRST_SEEN,
@@ -82,6 +86,17 @@ class HistoricalPriceArtifactStoreTests(unittest.TestCase):
             loaded.manifest.source_bundle_manifest_id,
             self.bundle.manifest.manifest_id,
         )
+
+    def test_evaluation_normalizer_preserves_collection_only_boundary(self) -> None:
+        normalized = point_in_time_price_session_from_nse(self.artifact)
+
+        self.assertEqual(
+            normalized.readiness,
+            EvaluationDataReadiness.COLLECTION_ONLY,
+        )
+        self.assertFalse(normalized.actionable)
+        self.assertEqual(normalized.source_artifact_id, self.artifact.artifact_id)
+        self.assertEqual(len(normalized.bars), len(self.artifact.bars))
 
     def test_payload_and_manifest_tampering_are_rejected(self) -> None:
         stored = self.store.put(self.artifact)

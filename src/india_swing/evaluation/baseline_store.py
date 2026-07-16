@@ -22,6 +22,7 @@ from india_swing.execution.simulator import LimitEntryOrder
 from .baselines import (
     DeterministicBaselineError,
     DeterministicComparisonRun,
+    FoldComparisonSummary,
     GeneratedIntentBatch,
     GeneratedIntentRole,
     GeneratedSignalDecision,
@@ -34,6 +35,7 @@ from .trial_store import LocalTrialRegistry
 GENERATED_INTENT_BATCH_STORE_SCHEMA_VERSION = "local-generated-intent-batch/v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_BATCH_BYTES = 128 * 1024 * 1024
+_MAX_RUN_BYTES = 32 * 1024 * 1024
 
 
 class GeneratedIntentBatchConflict(DeterministicBaselineError):
@@ -41,6 +43,14 @@ class GeneratedIntentBatchConflict(DeterministicBaselineError):
 
 
 class GeneratedIntentBatchNotFound(DeterministicBaselineError):
+    pass
+
+
+class DeterministicComparisonRunConflict(DeterministicBaselineError):
+    pass
+
+
+class DeterministicComparisonRunNotFound(DeterministicBaselineError):
     pass
 
 
@@ -348,7 +358,7 @@ class LocalGeneratedIntentBatchStore:
 
 
 class LocalDeterministicComparisonRunStore:
-    """Publish generated batches before their comparison and verify intent lineage."""
+    """One create-once run manifest per trial, backed by full component artifacts."""
 
     def __init__(
         self,
@@ -361,6 +371,89 @@ class LocalDeterministicComparisonRunStore:
             raise TypeError("comparison_store must be exact")
         self.batch_store = batch_store
         self.comparison_store = comparison_store
+        if batch_store.root.resolve() != comparison_store.root.resolve():
+            raise ValueError("batch and comparison stores must share one evidence root")
+        self.root = batch_store.root
+
+    @property
+    def runs_root(self) -> Path:
+        return self.root / "deterministic_runs"
+
+    def _path(self, trial_id: str) -> Path:
+        if _SHA256.fullmatch(trial_id) is None:
+            raise DeterministicBaselineError("trial_id must be a full lowercase SHA-256")
+        return self.runs_root / f"{trial_id}.json"
+
+    @staticmethod
+    def _manifest(run: DeterministicComparisonRun) -> dict[str, object]:
+        return {
+            "store_schema_version": "local-deterministic-comparison-run/v1",
+            "trial_id": run.comparison.trial_id,
+            "run_id": run.run_id,
+            "strategy_batch_id": run.strategy_batch.batch_id,
+            "benchmark_batch_id": run.benchmark_batch.batch_id,
+            "comparison_id": run.comparison.comparison_id,
+            "fold_summaries": _json_value(run.fold_summaries),
+        }
+
+    @staticmethod
+    def _decode_metrics(value: object, name: str) -> tuple[tuple[str, Decimal], ...]:
+        if type(value) is not list:
+            raise DeterministicComparisonRunConflict(f"stored {name} must be a list")
+        metrics: list[tuple[str, Decimal]] = []
+        for item in value:
+            if type(item) is not list or len(item) != 2 or type(item[0]) is not str:
+                raise DeterministicComparisonRunConflict(f"stored {name} entry is invalid")
+            metrics.append((item[0], _decimal(item[1], name)))
+        return tuple(metrics)
+
+    @classmethod
+    def _decode_summary(cls, value: object) -> FoldComparisonSummary:
+        raw = _object(
+            value,
+            {item.name for item in fields(FoldComparisonSummary)},
+            "fold summary",
+        )
+        stored_metrics = cls._decode_metrics(
+            raw["comparison_metrics"], "comparison_metrics"
+        )
+        stored_outperformed = raw["outperformed"]
+        stored_id = raw["summary_id"]
+        summary = FoldComparisonSummary(
+            fold_id=raw["fold_id"],
+            first_session=_date(raw["first_session"], "summary.first_session"),
+            last_session=_date(raw["last_session"], "summary.last_session"),
+            primary_metric=raw["primary_metric"],
+            strategy_base_metrics=cls._decode_metrics(
+                raw["strategy_base_metrics"], "strategy_base_metrics"
+            ),
+            benchmark_base_metrics=cls._decode_metrics(
+                raw["benchmark_base_metrics"], "benchmark_base_metrics"
+            ),
+            strategy_stressed_metrics=(
+                None
+                if raw["strategy_stressed_metrics"] is None
+                else cls._decode_metrics(
+                    raw["strategy_stressed_metrics"], "strategy_stressed_metrics"
+                )
+            ),
+            benchmark_stressed_metrics=(
+                None
+                if raw["benchmark_stressed_metrics"] is None
+                else cls._decode_metrics(
+                    raw["benchmark_stressed_metrics"], "benchmark_stressed_metrics"
+                )
+            ),
+        )
+        if (
+            summary.comparison_metrics != stored_metrics
+            or summary.outperformed != stored_outperformed
+            or summary.summary_id != stored_id
+        ):
+            raise DeterministicComparisonRunConflict(
+                "stored fold summary differs from content"
+            )
+        return summary
 
     @staticmethod
     def _validate_intent_lineage(run: DeterministicComparisonRun) -> None:
@@ -389,7 +482,120 @@ class LocalDeterministicComparisonRunStore:
         self.batch_store.publish(trial_id, run.strategy_batch)
         self.batch_store.publish(trial_id, run.benchmark_batch)
         self.comparison_store.publish(run.comparison)
+        self.runs_root.mkdir(parents=True, exist_ok=True)
+        if _is_link_like(self.runs_root):
+            raise DeterministicComparisonRunConflict("deterministic-run root cannot be a link")
+        target = self._path(trial_id)
+        payload = (
+            json.dumps(
+                self._manifest(run),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        try:
+            with advisory_file_lock(self.runs_root / ".deterministic-runs.lock"):
+                if target.exists():
+                    stored = self.get(trial_id)
+                    if stored != run:
+                        raise DeterministicComparisonRunConflict(
+                            "trial already stores a different deterministic run"
+                        )
+                    return stored
+                descriptor, temporary_name = tempfile.mkstemp(
+                    prefix=".deterministic-run-", suffix=".tmp", dir=self.runs_root
+                )
+                temporary = Path(temporary_name)
+                try:
+                    with os.fdopen(descriptor, "wb") as handle:
+                        handle.write(payload)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.link(temporary, target)
+                finally:
+                    temporary.unlink(missing_ok=True)
+        except (FileLockUnavailable, FileSafetyError) as exc:
+            raise DeterministicComparisonRunConflict(
+                "deterministic-run store unavailable"
+            ) from exc
         return self.require_persisted(run)
+
+    def get(self, trial_id: str) -> DeterministicComparisonRun:
+        self.batch_store.registry.require_registered(trial_id)
+        path = self._path(trial_id)
+        if not path.exists():
+            raise DeterministicComparisonRunNotFound(trial_id)
+        if not path.is_file() or _is_link_like(path):
+            raise DeterministicComparisonRunConflict(
+                "deterministic run must be a regular file"
+            )
+        try:
+            raw = json.loads(
+                read_stable_regular_file(path, maximum_bytes=_MAX_RUN_BYTES).decode(
+                    "utf-8"
+                ),
+                object_pairs_hook=_unique_object,
+                parse_float=lambda _: (_ for _ in ()).throw(ValueError()),
+                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+            )
+            expected = {
+                "store_schema_version",
+                "trial_id",
+                "run_id",
+                "strategy_batch_id",
+                "benchmark_batch_id",
+                "comparison_id",
+                "fold_summaries",
+            }
+            if type(raw) is not dict or set(raw) != expected:
+                raise ValueError
+            if raw["store_schema_version"] != "local-deterministic-comparison-run/v1":
+                raise ValueError
+            if type(raw["fold_summaries"]) is not list:
+                raise ValueError
+            strategy_batch = self.batch_store.get(
+                trial_id, GeneratedIntentRole.STRATEGY
+            )
+            benchmark_batch = self.batch_store.get(
+                trial_id, GeneratedIntentRole.BENCHMARK
+            )
+            comparison = self.comparison_store.get(trial_id, raw["comparison_id"])
+            run = DeterministicComparisonRun(
+                strategy_batch=strategy_batch,
+                benchmark_batch=benchmark_batch,
+                comparison=comparison,
+                fold_summaries=tuple(
+                    self._decode_summary(value) for value in raw["fold_summaries"]
+                ),
+            )
+            if (
+                raw["trial_id"] != trial_id
+                or raw["strategy_batch_id"] != strategy_batch.batch_id
+                or raw["benchmark_batch_id"] != benchmark_batch.batch_id
+                or raw["comparison_id"] != comparison.comparison_id
+                or raw["run_id"] != run.run_id
+            ):
+                raise DeterministicComparisonRunConflict(
+                    "stored deterministic-run manifest differs from content"
+                )
+            return run
+        except DeterministicBaselineError:
+            raise
+        except (
+            FileSafetyError,
+            InvalidOperation,
+            KeyError,
+            TypeError,
+            ValueError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as exc:
+            raise DeterministicComparisonRunConflict(
+                "stored deterministic run is invalid"
+            ) from exc
 
     def require_persisted(
         self, run: DeterministicComparisonRun
@@ -399,7 +605,12 @@ class LocalDeterministicComparisonRunStore:
         run.verify_content_identity()
         trial_id = run.comparison.trial_id
         self._validate_intent_lineage(run)
+        stored = self.get(trial_id)
+        if stored != run:
+            raise DeterministicComparisonRunConflict(
+                "persisted deterministic run differs"
+            )
         self.batch_store.require_persisted(trial_id, run.strategy_batch)
         self.batch_store.require_persisted(trial_id, run.benchmark_batch)
         self.comparison_store.require_persisted(run.comparison)
-        return run
+        return stored

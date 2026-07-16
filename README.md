@@ -23,7 +23,12 @@ The current vertical slice implements:
   equal-weight benchmark intent generators, with explicit point-in-time
   eligibility, as-of evidence IDs, a decision or veto for every candidate,
   create-once per-role batches, per-fold dispersion, a Holm familywise gate,
-  persisted research promotion, and a deterministic Markdown report;
+  persisted research promotion, create-once deterministic run/report manifests,
+  and a report publication/inspection CLI;
+- a content-addressed evaluation-dataset assembler and create-once local store
+  that require gap-free versioned sessions, one universe snapshot per session,
+  adjudicated stable listing/ISIN identity, exact missing-row evidence, and
+  effective-dated tick sizes before producing baseline inputs;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually
@@ -39,7 +44,8 @@ The current vertical slice implements:
   final UDiFF/full Bhavcopies;
 - a sealed, positive-observation-only cross-vintage identity registry that
   detects rename candidates and identifier reuse without inventing delistings
-  or assigning tradable stable IDs;
+  or assigning tradable stable IDs, plus a create-once complete adjudication
+  queue that derives the official evidence required for every candidate;
 - immutable expanding purged walk-forward plans that use explicit trading
   sessions, ten-session minimum label/embargo boundaries, and nonrepeating test
   windows;
@@ -70,6 +76,13 @@ calendar provenance, adjudicated stable identity, liquidity, corporate actions,
 and multi-vintage completeness are still missing.
 Only synthetic decisions can pass the end-to-end demo today. Every such decision
 carries `execution_eligible=false`.
+
+The evaluation-dataset assembler is implemented, but it does not upgrade any
+manual NSE file. It normalizes the existing raw EOD artifact without changing
+its `COLLECTION_ONLY` status, then refuses it. A real dataset can be assembled
+only after the upstream calendar, daily universes, identities, price finality,
+explicit nontrading rows, and tick-size evidence are independently promoted to
+point-in-time verified artifacts.
 
 The default risk policy rejects provisional or unvalidated probability estimates.
 The fictional demo opts out explicitly so the plumbing can be exercised; its
@@ -103,6 +116,22 @@ The leakage-safe evaluation split boundary is documented in
 `docs/EVALUATION.md`.
 The effective-dated delivery-cost and conservative fill policy is documented in
 `docs/COSTS_AND_EXECUTION.md`.
+
+Persist or inspect a family evaluation report after its registrations, runs,
+comparisons, and family aggregate have already been sealed:
+
+```powershell
+python -m india_swing.evaluation.cli report publish `
+  --strategy-family-id <registered-family-id>
+
+python -m india_swing.evaluation.cli report show `
+  --aggregate-id <family-aggregate-id>
+
+python -m india_swing.evaluation.cli report list
+```
+
+The CLI reads `INDIA_SWING_TRIAL_REGISTRY_ROOT` and
+`INDIA_SWING_EVALUATION_ROOT`; failures emit only a sanitized error type.
 
 After manually downloading the report named **CM - MII - Security File (.gz)
 (NSE Listed securities)**, import it without extracting it:
