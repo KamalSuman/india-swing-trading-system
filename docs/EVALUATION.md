@@ -2,8 +2,9 @@
 
 The `india_swing.evaluation` package establishes immutable chronological folds
 and create-once trial preregistrations before any strategy, Kronos model,
-TradingAgents component, or benchmark can be evaluated. It does not yet
-calculate returns or claim strategy performance.
+TradingAgents component, or benchmark can be evaluated. Separate append-only
+lifecycle events audit holdout access and terminal outcomes. The package does
+not yet calculate returns or claim strategy performance.
 
 ## Implemented split contract
 
@@ -35,7 +36,8 @@ supplied:
 - an effective-dated Indian equity cost schedule and stressed slippage case;
 - conservative order, circuit, suspension, missing-quote, and delisting rules;
 - identical fills/costs for the strategy and simple benchmark;
-- append-only outcomes including failed, negative, and invalidated trials.
+- a metric engine that produces the lifecycle outcome rather than accepting
+  manually asserted performance.
 
 ## Trial preregistration
 
@@ -53,8 +55,29 @@ record, detects tampering, and keeps all family registrations queryable. Its
 default root is `var/trial_registry`.
 
 Holdout access/unsealing and trial outcomes are intentionally not fields that
-can mutate this registration. They remain to be implemented as separate
-append-only events.
+can mutate this registration.
+
+## Lifecycle event chain
+
+`LocalTrialLifecycleStore` writes create-once, per-trial event files linked by
+sequence number and predecessor content ID. A trial must be registered before
+its first `TRIAL_STARTED` event. The chain records holdout unsealing and
+feature/label/result access, then preserves completed, failed, aborted, and
+invalidated states.
+
+Holdout access fails before an unseal event or when its ID disagrees with the
+sealed registration. A completed confirmatory trial requires audited holdout
+results access and every registered metric. `passed=false` is a first-class
+terminal result and remains queryable. A later audit can append invalidation but
+cannot replace the original result. After a parent's holdout is unsealed, a
+confirmatory successor cannot reuse that holdout; it needs a new sealed holdout
+or must be exploratory.
+
+The local predecessor chain detects mutation, reordered events, and missing
+interior events. As with the other local stores, a filesystem administrator can
+still delete the newest files and related evidence. Production therefore needs
+conditional immutable Cloud Storage writes, retention controls, and access
+logs.
 
 The current real price archive contains only one session and remains
 `COLLECTION_ONLY`. It cannot be passed off as evaluation data.

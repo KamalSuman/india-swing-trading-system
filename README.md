@@ -38,6 +38,8 @@ The current vertical slice implements:
 - create-once, content-addressed trial preregistrations that freeze strategy
   families, hypotheses, inputs, hashes, metrics, thresholds, cost/execution
   bindings, multiple-testing policy, and sealed-holdout identity before a run;
+- append-only per-trial lifecycle chains for audited holdout unsealing/access,
+  completed-negative results, failures, aborts, and later invalidations;
 - content-addressed calendar/universe contracts with stable listing lineage;
 - effective-dated eligibility lineage and split-session trading windows;
 - stable instrument/listing/universe/data identity plus exact content

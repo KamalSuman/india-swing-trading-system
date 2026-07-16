@@ -1,4 +1,21 @@
 from .config import TRIAL_REGISTRY_ROOT_ENV, TrialRegistryConfig
+from .lifecycle import (
+    HOLDOUT_ACCESS_EVENT_TYPES,
+    HOLDOUT_EVENT_TYPES,
+    TERMINAL_OUTCOME_EVENT_TYPES,
+    TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION,
+    TrialLifecycleError,
+    TrialLifecycleEvent,
+    TrialLifecycleEventType,
+    TrialLifecycleIntegrityError,
+)
+from .lifecycle_store import (
+    TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION,
+    LocalTrialLifecycleStore,
+    TrialLifecycleConflict,
+    decode_trial_lifecycle_event,
+    encode_trial_lifecycle_event,
+)
 from .models import (
     EVALUATION_SPLIT_SCHEMA_VERSION,
     MINIMUM_SWING_LABEL_HORIZON_SESSIONS,
@@ -27,15 +44,26 @@ from .trials import (
 
 __all__ = [
     "EVALUATION_SPLIT_SCHEMA_VERSION",
+    "HOLDOUT_ACCESS_EVENT_TYPES",
+    "HOLDOUT_EVENT_TYPES",
+    "LocalTrialLifecycleStore",
     "MINIMUM_SWING_LABEL_HORIZON_SESSIONS",
     "EvaluationPlanError",
     "EvaluationPlanIntegrityError",
     "PurgedWalkForwardPlan",
     "SplitMethod",
+    "TERMINAL_OUTCOME_EVENT_TYPES",
+    "TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION",
+    "TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION",
     "TRIAL_REGISTRY_ROOT_ENV",
     "TRIAL_REGISTRATION_SCHEMA_VERSION",
     "TRIAL_REGISTRY_STORE_SCHEMA_VERSION",
     "TrialNotRegistered",
+    "TrialLifecycleConflict",
+    "TrialLifecycleError",
+    "TrialLifecycleEvent",
+    "TrialLifecycleEventType",
+    "TrialLifecycleIntegrityError",
     "TrialRegistration",
     "TrialRegistrationError",
     "TrialRegistrationIntegrityError",
@@ -45,6 +73,8 @@ __all__ = [
     "WalkForwardFold",
     "build_expanding_purged_walk_forward_plan",
     "decode_trial_registration",
+    "decode_trial_lifecycle_event",
     "encode_trial_registration",
+    "encode_trial_lifecycle_event",
     "LocalTrialRegistry",
 ]

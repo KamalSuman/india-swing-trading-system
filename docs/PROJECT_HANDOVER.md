@@ -15,12 +15,12 @@ trade alert: all real-file artifacts are deliberately `COLLECTION_ONLY` and
 - Local repository: `C:\project\india-swing-trading-system`
 - Private remote: `https://github.com/KamalSuman/india-swing-trading-system.git`
 - Working branch: `agent/cross-vintage-identity`
-- Implementation checkpoint: current branch tip (`Register immutable research trials`)
+- Implementation checkpoint: current branch tip (`Audit trial holdout and outcome events`)
 - Remote `main`: `a21333b`
 - The working branch has no upstream and is not on GitHub at this snapshot.
 - Verified runtime: Python 3.12
 - Last full verification: 287 unit tests run: 284 passed and 3 skipped. The
-  current trial-registry increment has 22 focused evaluation tests passing;
+  current evaluation increments have 35 focused tests passing;
   touched-source `compileall` and `git diff --check` passed.
 
 The handover document may be committed after the implementation checkpoint, so
@@ -94,8 +94,8 @@ packages under `src/india_swing` are:
   explicit identifier/series conflicts. It assigns no stable tradable IDs.
 - `evaluation`: immutable expanding purged walk-forward folds over a versioned
   trading-session tuple, plus create-once content-addressed trial
-  preregistrations with same-family parent lineage. It does not yet unseal
-  holdouts or calculate performance.
+  preregistrations with same-family parent lineage and append-only lifecycle
+  chains for holdout access and outcomes. It does not yet calculate performance.
 - Synthetic demo adapters for Kronos, signals, and TradingAgents. These prove
   contracts only; they are not real models or performance evidence.
 
@@ -279,9 +279,9 @@ python -m india_swing.identity_registry.cli materialize `
    candidate transitions/conflicts, and add official listing-status evidence to
    adjudicate stable effective-dated IDs. This remains the key survivorship-bias
    boundary before backtesting.
-6. Add separate append-only holdout-access and trial-outcome events, a dated
-   Indian cost schedule, and conservative execution simulator on top of the
-   implemented preregistration and purged-fold layers. Do not generate metrics
+6. Add a dated Indian cost schedule and conservative execution simulator on top
+   of the implemented preregistration, purged-fold, and lifecycle layers. The
+   engine—not a caller—must generate outcome metrics. Do not generate metrics
    from the one-session real archive.
 7. Add an official corporate-action source using a real archived fixture;
    design its schema from the source rather than guessing it.
