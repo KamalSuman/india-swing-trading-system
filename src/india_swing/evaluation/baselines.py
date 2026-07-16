@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from enum import Enum
 
 from india_swing.execution.costs import NseDeliveryCostSchedule
@@ -14,6 +14,7 @@ from .engine import (
     DailyExecutionPolicy,
     EvaluationDataset,
     EvaluationTradeIntent,
+    SUPPORTED_METRICS,
     TrialEvaluationComparisonEngine,
     TrialEvaluationComparisonResult,
     TrialEvaluationError,
@@ -366,10 +367,105 @@ class GeneratedIntentBatch:
 
 
 @dataclass(frozen=True, slots=True)
+class FoldComparisonSummary:
+    fold_id: str
+    first_session: date
+    last_session: date
+    primary_metric: str
+    strategy_base_metrics: tuple[tuple[str, Decimal], ...]
+    benchmark_base_metrics: tuple[tuple[str, Decimal], ...]
+    strategy_stressed_metrics: tuple[tuple[str, Decimal], ...] | None
+    benchmark_stressed_metrics: tuple[tuple[str, Decimal], ...] | None
+    comparison_metrics: tuple[tuple[str, Decimal], ...] = field(init=False)
+    outperformed: bool = field(init=False)
+    summary_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        _sha(self.fold_id, "fold_id")
+        if (
+            type(self.first_session) is not date
+            or type(self.last_session) is not date
+            or self.last_session < self.first_session
+        ):
+            raise DeterministicBaselineError("fold summary sessions are invalid")
+        if self.primary_metric not in SUPPORTED_METRICS - {"turnover"}:
+            raise DeterministicBaselineError("fold primary metric is unsupported")
+        for metrics, name in (
+            (self.strategy_base_metrics, "strategy_base_metrics"),
+            (self.benchmark_base_metrics, "benchmark_base_metrics"),
+        ):
+            _validate_metric_tuple(metrics, name)
+        stressed = (
+            self.strategy_stressed_metrics,
+            self.benchmark_stressed_metrics,
+        )
+        if (stressed[0] is None) != (stressed[1] is None):
+            raise DeterministicBaselineError(
+                "fold stress metrics must both be present or absent"
+            )
+        for metrics in stressed:
+            if metrics is not None:
+                _validate_metric_tuple(metrics, "stressed_metrics")
+        base_excess = (
+            dict(self.strategy_base_metrics)[self.primary_metric]
+            - dict(self.benchmark_base_metrics)[self.primary_metric]
+        )
+        comparison_metrics = [("base_primary_excess", base_excess)]
+        outperformed = base_excess >= ZERO
+        if stressed[0] is not None and stressed[1] is not None:
+            stressed_excess = (
+                dict(stressed[0])[self.primary_metric]
+                - dict(stressed[1])[self.primary_metric]
+            )
+            comparison_metrics.append(("stressed_primary_excess", stressed_excess))
+            outperformed = outperformed and stressed_excess >= ZERO
+        object.__setattr__(self, "comparison_metrics", tuple(comparison_metrics))
+        object.__setattr__(self, "outperformed", outperformed)
+        object.__setattr__(self, "summary_id", self._calculated_id())
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                "schema": "deterministic-fold-comparison-summary/v1",
+                "fold_id": self.fold_id,
+                "first_session": self.first_session,
+                "last_session": self.last_session,
+                "primary_metric": self.primary_metric,
+                "strategy_base_metrics": self.strategy_base_metrics,
+                "benchmark_base_metrics": self.benchmark_base_metrics,
+                "strategy_stressed_metrics": self.strategy_stressed_metrics,
+                "benchmark_stressed_metrics": self.benchmark_stressed_metrics,
+                "comparison_metrics": self.comparison_metrics,
+                "outperformed": self.outperformed,
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        if self.summary_id != self._calculated_id():
+            raise DeterministicBaselineError("fold summary content identity failed")
+
+
+def _validate_metric_tuple(
+    metrics: tuple[tuple[str, Decimal], ...], name: str
+) -> None:
+    if (
+        type(metrics) is not tuple
+        or tuple(item[0] for item in metrics) != tuple(sorted(SUPPORTED_METRICS))
+    ):
+        raise DeterministicBaselineError(f"{name} must contain the complete metric set")
+    for _, value in metrics:
+        if type(value) is not Decimal or not value.is_finite():
+            raise DeterministicBaselineError(f"{name} values must be finite Decimals")
+
+
+@dataclass(frozen=True, slots=True)
 class DeterministicComparisonRun:
     strategy_batch: GeneratedIntentBatch
     benchmark_batch: GeneratedIntentBatch
     comparison: TrialEvaluationComparisonResult
+    fold_summaries: tuple[FoldComparisonSummary, ...]
+    run_id: str = field(init=False)
 
     def __post_init__(self) -> None:
         if type(self.strategy_batch) is not GeneratedIntentBatch:
@@ -378,6 +474,80 @@ class DeterministicComparisonRun:
             raise DeterministicBaselineError("benchmark_batch must be exact")
         if type(self.comparison) is not TrialEvaluationComparisonResult:
             raise DeterministicBaselineError("comparison must be exact")
+        if (
+            type(self.fold_summaries) is not tuple
+            or not self.fold_summaries
+            or self.fold_summaries
+            != tuple(sorted(self.fold_summaries, key=lambda item: item.first_session))
+        ):
+            raise DeterministicBaselineError("fold summaries must be an ordered exact tuple")
+        if len({item.fold_id for item in self.fold_summaries}) != len(self.fold_summaries):
+            raise DeterministicBaselineError("fold summaries cannot repeat a fold")
+        for summary in self.fold_summaries:
+            if type(summary) is not FoldComparisonSummary:
+                raise DeterministicBaselineError("fold summaries must contain exact values")
+            summary.verify_content_identity()
+            if summary.primary_metric != self.comparison.primary_metric:
+                raise DeterministicBaselineError("fold summary primary metric differs")
+            strategy_decisions = tuple(
+                item for item in self.strategy_batch.decisions if item.fold_id == summary.fold_id
+            )
+            benchmark_decisions = tuple(
+                item for item in self.benchmark_batch.decisions if item.fold_id == summary.fold_id
+            )
+            if not strategy_decisions or not benchmark_decisions:
+                raise DeterministicBaselineError("fold summary has no generated decisions")
+            if any(
+                item.signal_session != summary.first_session
+                for item in strategy_decisions + benchmark_decisions
+            ):
+                raise DeterministicBaselineError("fold summary signal boundary differs")
+            fold_sessions = tuple(
+                point.session
+                for point in self.comparison.strategy_base.equity_curve
+                if summary.first_session <= point.session <= summary.last_session
+            )
+            if not fold_sessions or (
+                fold_sessions[0] != summary.first_session
+                or fold_sessions[-1] != summary.last_session
+            ):
+                raise DeterministicBaselineError("fold summary curve boundary differs")
+            expected = (
+                _fold_metrics(
+                    result=self.comparison.strategy_base,
+                    batch=self.strategy_batch,
+                    fold_sessions=fold_sessions,
+                ),
+                _fold_metrics(
+                    result=self.comparison.benchmark_base,
+                    batch=self.benchmark_batch,
+                    fold_sessions=fold_sessions,
+                ),
+                None
+                if self.comparison.strategy_stressed is None
+                else _fold_metrics(
+                    result=self.comparison.strategy_stressed,
+                    batch=self.strategy_batch,
+                    fold_sessions=fold_sessions,
+                ),
+                None
+                if self.comparison.benchmark_stressed is None
+                else _fold_metrics(
+                    result=self.comparison.benchmark_stressed,
+                    batch=self.benchmark_batch,
+                    fold_sessions=fold_sessions,
+                ),
+            )
+            actual = (
+                summary.strategy_base_metrics,
+                summary.benchmark_base_metrics,
+                summary.strategy_stressed_metrics,
+                summary.benchmark_stressed_metrics,
+            )
+            if actual != expected:
+                raise DeterministicBaselineError(
+                    "fold summary metrics differ from evaluation evidence"
+                )
         self.strategy_batch.verify_content_identity()
         self.benchmark_batch.verify_content_identity()
         self.comparison.verify_content_identity()
@@ -395,6 +565,28 @@ class DeterministicComparisonRun:
             != self.comparison.benchmark_base.split_plan_id
         ):
             raise DeterministicBaselineError("comparison split differs from generated batches")
+        object.__setattr__(self, "run_id", self._calculated_id())
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                "schema": "deterministic-comparison-run/v1",
+                "strategy_batch_id": self.strategy_batch.batch_id,
+                "benchmark_batch_id": self.benchmark_batch.batch_id,
+                "comparison_id": self.comparison.comparison_id,
+                "fold_summary_ids": tuple(item.summary_id for item in self.fold_summaries),
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        self.strategy_batch.verify_content_identity()
+        self.benchmark_batch.verify_content_identity()
+        self.comparison.verify_content_identity()
+        for summary in self.fold_summaries:
+            summary.verify_content_identity()
+        if self.run_id != self._calculated_id():
+            raise DeterministicBaselineError("deterministic run content identity failed")
 
 
 def _validate_inputs(
@@ -448,6 +640,114 @@ def _on_tick_floor(value: Decimal, tick_size: Decimal) -> Decimal:
 
 def _on_tick_ceiling(value: Decimal, tick_size: Decimal) -> Decimal:
     return (value / tick_size).to_integral_value(rounding=ROUND_CEILING) * tick_size
+
+
+def _fold_metrics(
+    *,
+    result: object,
+    batch: GeneratedIntentBatch,
+    fold_sessions: tuple[date, ...],
+) -> tuple[tuple[str, Decimal], ...]:
+    from .engine import TrialEvaluationResult
+
+    if type(result) is not TrialEvaluationResult:
+        raise DeterministicBaselineError("fold metrics require an exact evaluation result")
+    points = tuple(point for point in result.equity_curve if point.session in fold_sessions)
+    if tuple(point.session for point in points) != fold_sessions:
+        raise DeterministicBaselineError("evaluation curve does not cover every fold session")
+    intent_ids = {
+        intent.intent_id
+        for intent in batch.intents
+        if intent.entry_order.signal_session in fold_sessions
+    }
+    trades = tuple(trade for trade in result.trades if trade.intent_id in intent_ids)
+    start_equity = points[0].equity
+    if start_equity <= ZERO:
+        raise DeterministicBaselineError("fold start equity must be positive")
+    final_equity = points[-1].equity
+    net_profit = final_equity - start_equity
+    net_return = net_profit / start_equity
+    elapsed_days = Decimal(max((points[-1].session - points[0].session).days, 1))
+    if final_equity <= ZERO:
+        net_cagr = Decimal("-1")
+    else:
+        with localcontext() as context:
+            context.prec = 28
+            net_cagr = (
+                ((final_equity / start_equity).ln() * Decimal(365) / elapsed_days).exp()
+                - ONE
+            )
+    peak = start_equity
+    max_drawdown = ZERO
+    for point in points:
+        peak = max(peak, point.equity)
+        drawdown = point.equity / peak - ONE
+        max_drawdown = min(max_drawdown, drawdown)
+    turnover_value = sum(
+        (
+            trade.entry_fill.fill_price * trade.entry_fill.quantity
+            + trade.exit_fill.fill_price * trade.exit_fill.quantity
+            for trade in trades
+        ),
+        ZERO,
+    )
+    values = {
+        "max_drawdown": max_drawdown,
+        "net_cagr": net_cagr,
+        "net_profit": net_profit,
+        "net_return": net_return,
+        "trade_count": Decimal(len(trades)),
+        "turnover": turnover_value / start_equity,
+    }
+    return tuple(sorted(values.items()))
+
+
+def _fold_summaries(
+    *,
+    split_plan: PurgedWalkForwardPlan,
+    strategy_batch: GeneratedIntentBatch,
+    benchmark_batch: GeneratedIntentBatch,
+    comparison: TrialEvaluationComparisonResult,
+) -> tuple[FoldComparisonSummary, ...]:
+    summaries = []
+    for fold in split_plan.folds:
+        summaries.append(
+            FoldComparisonSummary(
+                fold_id=fold.fold_id,
+                first_session=fold.test_sessions[0],
+                last_session=fold.test_sessions[-1],
+                primary_metric=comparison.primary_metric,
+                strategy_base_metrics=_fold_metrics(
+                    result=comparison.strategy_base,
+                    batch=strategy_batch,
+                    fold_sessions=fold.test_sessions,
+                ),
+                benchmark_base_metrics=_fold_metrics(
+                    result=comparison.benchmark_base,
+                    batch=benchmark_batch,
+                    fold_sessions=fold.test_sessions,
+                ),
+                strategy_stressed_metrics=(
+                    None
+                    if comparison.strategy_stressed is None
+                    else _fold_metrics(
+                        result=comparison.strategy_stressed,
+                        batch=strategy_batch,
+                        fold_sessions=fold.test_sessions,
+                    )
+                ),
+                benchmark_stressed_metrics=(
+                    None
+                    if comparison.benchmark_stressed is None
+                    else _fold_metrics(
+                        result=comparison.benchmark_stressed,
+                        batch=benchmark_batch,
+                        fold_sessions=fold.test_sessions,
+                    )
+                ),
+            )
+        )
+    return tuple(summaries)
 
 
 def _intent(
@@ -821,4 +1121,10 @@ class DeterministicBaselineEvaluationEngine:
             strategy_batch=strategy_batch,
             benchmark_batch=benchmark_batch,
             comparison=comparison,
+            fold_summaries=_fold_summaries(
+                split_plan=split_plan,
+                strategy_batch=strategy_batch,
+                benchmark_batch=benchmark_batch,
+                comparison=comparison,
+            ),
         )

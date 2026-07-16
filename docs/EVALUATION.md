@@ -150,9 +150,43 @@ its score, selected/veto reason, and the exact bar IDs used as evidence.
 `PointInTimeInstrument.eligible_sessions` prevents a later constituent list
 from entering an earlier fold. `DeterministicBaselineEvaluationEngine` creates
 strategy and benchmark batches across all registered folds and sends both to
-the existing base/stressed comparison engine. Generated batches are not yet a
-separate create-once store; the persisted comparison still preserves their
-executed intent IDs, fills, costs, and outcomes.
+the existing base/stressed comparison engine.
+
+`LocalGeneratedIntentBatchStore` permits exactly one create-once strategy batch
+and one create-once benchmark batch for each registered trial. Its path is
+fixed by trial and role, rather than by caller-selected batch ID, so a later
+result-informed rerun cannot coexist as another candidate. Reads reconstruct
+every decision, entry order, and intent and recheck all nested content IDs.
+`LocalDeterministicComparisonRunStore` publishes both batches before the
+comparison and verifies every executed trade came from the corresponding
+generated intent set.
+
+Each deterministic run also contains a `FoldComparisonSummary` recomputed from
+its persisted intent lineage and mark-to-market equity curves. Fold return,
+CAGR, drawdown, profit, turnover, and trade count start from that scenario's
+own fold-opening equity. Base and stressed excess-primary metrics are reported
+separately; per-fold outperformance is descriptive and does not replace the
+trial's aggregate pass thresholds.
+
+## Multiple-testing family gate
+
+The supported `holm-familywise-primary-fold-sign-v1` policy is fully specified:
+for each registered variant, count strictly positive primary-metric excesses
+across folds, calculate an exact one-sided sign-test tail separately for base
+and stressed execution, and use the worse p-value. Holm step-down at alpha 0.05
+then covers every registered trial in the strategy family. Ties are non-wins.
+A statistically rejected variant is still ineligible unless its full persisted
+comparison also passed all trading thresholds and benchmark gates.
+
+`TrialFamilyEvaluationAggregator` refuses unsupported policy text, missing
+family variants, duplicate runs, non-persisted batches/comparisons, or missing
+stressed-fold evidence. It derives p-values rather than accepting caller-
+supplied confidence. The aggregate is content-bound and reproducible, but a
+separate create-once family-aggregate store and lifecycle promotion event are
+not yet implemented. Non-overlapping folds can still be regime-correlated, so
+this exact sign/Holm gate is a preregistered preliminary safeguard, not proof
+that fold signs are statistically independent or that a market edge will
+persist.
 
 Synthetic trials require an explicitly synthetic dataset. A non-synthetic
 trial requires `POINT_IN_TIME_VERIFIED`; `COLLECTION_ONLY` data fails before any
