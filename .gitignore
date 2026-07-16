@@ -21,5 +21,6 @@ var/reference_data/
 var/daily_reports/
 var/calendar_data/
 var/historical_prices/
+var/identity_registry/
 input_drop/
 tmp/
