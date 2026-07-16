@@ -15,12 +15,12 @@ trade alert: all real-file artifacts are deliberately `COLLECTION_ONLY` and
 - Local repository: `C:\project\india-swing-trading-system`
 - Private remote: `https://github.com/KamalSuman/india-swing-trading-system.git`
 - Working branch: `agent/cross-vintage-identity`
-- Implementation checkpoint: current branch tip (`Generate trial metrics from simulated execution`)
+- Implementation checkpoint: current branch tip (`Persist results and price intraday exits`)
 - Remote `main`: `a21333b`
 - The working branch has no upstream and is not on GitHub at this snapshot.
 - Verified runtime: Python 3.12
 - Last full verification: 287 unit tests run: 284 passed and 3 skipped. The
-  current cost/execution/evaluation integration has 63 focused tests passing;
+  current cost/execution/evaluation integration has 72 focused tests passing;
   touched-source `compileall` and `git diff --check` passed.
 
 The handover document may be committed after the implementation checkpoint, so
@@ -97,11 +97,13 @@ packages under `src/india_swing` are:
   preregistrations with same-family parent lineage and append-only lifecycle
   chains for holdout access and outcomes. Its engine generates fills, itemized
   costs, mark-to-market equity, fixed metrics, and threshold results while
-  rejecting training/validation signals and collection-only data.
-- `execution`: a content-bound Zerodha/NSE delivery tariff effective from
-  2026-03-01 and a pessimistic daily-bar simulator for next-session entries,
-  gaps, stops/targets, tick rounding, participation limits, and circuit locks.
-  It is wired to engine-generated synthetic/verified-data trial performance.
+  rejecting training/validation signals and collection-only data. Full results
+  are now create-once artifacts that must exist before lifecycle completion.
+- `execution`: a content-bound Zerodha/NSE delivery plus fully-netted intraday
+  tariff effective from 2026-03-01 and a pessimistic daily-bar simulator for
+  next-session entries, gaps, stops/targets, tick rounding, participation
+  limits, and circuit locks. It is wired to engine-generated
+  synthetic/verified-data trial performance.
 - Synthetic demo adapters for Kronos, signals, and TradingAgents. These prove
   contracts only; they are not real models or performance evidence.
 
@@ -266,13 +268,13 @@ python -m india_swing.identity_registry.cli materialize `
 - A production liquidity/eligibility universe promoted to
   `POINT_IN_TIME_VERIFIED`.
 - Historical cost schedules before 2026-03-01, point-in-time tick-size views,
-  and shadow contract-note reconciliation. The current Zerodha resident-retail
-  NSE delivery schedule does not cover other account/product/exchange tariffs.
+  partial same-day allocation evidence, and shadow contract-note reconciliation.
+  The current Zerodha resident-retail NSE cash schedule does not cover other
+  account/product/exchange tariffs or dealer/auto-square-off surcharges.
 - A fitted strategy, Kronos weights, calibrated probabilities, news feed,
   real-data purged walk-forward backtest, shadow/paper alerts, or performance report.
-- Create-once storage/codec for the full generated evaluation result. Lifecycle
-  completion records its content ID and generated metrics but not yet the full
-  fill/equity evidence artifact.
+- Engine-generated stressed-slippage metrics for confirmatory reporting and
+  identical benchmark evaluation through the same fill/cost path.
 - Cloud Storage immutability, Cloud Run scheduling, Secret Manager wiring,
   monitoring, notifications, or live Zerodha execution.
 
@@ -291,9 +293,9 @@ python -m india_swing.identity_registry.cli materialize `
    candidate transitions/conflicts, and add official listing-status evidence to
    adjudicate stable effective-dated IDs. This remains the key survivorship-bias
    boundary before backtesting.
-6. Add a create-once codec/store for the full engine-generated evaluation
-   result and an intraday tariff for same-session stop-outs. The one-session real
-   archive remains ineligible.
+6. Add engine-generated stressed-slippage scenarios and run the preregistered
+   benchmark through the identical fill/cost path. The one-session real archive
+   remains ineligible.
 7. Add an official corporate-action source using a real archived fixture;
    design its schema from the source rather than guessing it.
 8. Implement a deterministic non-LLM baseline strategy and evaluate it with
@@ -327,8 +329,8 @@ python -m india_swing.identity_registry.cli materialize `
 
 ## Honest progress assessment
 
-Approximately 65% of a research-and-notification MVP foundation is implemented,
-but only about 37% of the work required for a defensible real-capital pilot.
+Approximately 68% of a research-and-notification MVP foundation is implemented,
+but only about 40% of the work required for a defensible real-capital pilot.
 The system is 0% live-trade-ready because it correctly refuses all real alerts.
 The largest remaining effort is trustworthy historical data and evaluation,
 not connecting an LLM or formatting a notification.

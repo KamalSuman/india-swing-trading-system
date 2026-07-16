@@ -9,7 +9,7 @@ The current vertical slice implements:
 - strict point-in-time evidence validation;
 - NSE main-board eligibility without a market-cap cutoff;
 - explicit Kronos, signal, and TradingAgents adapter contracts;
-- deterministic ranking, sizing, cost, liquidity, and portfolio-risk gates;
+- deterministic ranking, sizing, delivery/intraday cost, liquidity, and portfolio-risk gates;
 - `BUY` or `NO_TRADE` output only;
 - typed failed-run output for data/model/research outages, always with `NO_TRADE`;
 - create-once typed pipeline audit records with run-ID, nested-integrity, and
@@ -17,7 +17,8 @@ The current vertical slice implements:
 - explicit trial, model, universe, calendar, data, source, execution, and cost
   lineage in every typed pipeline result, including result-only audit writes;
 - purged-fold-bound evaluation that generates conservative fills, itemized
-  delivery costs, mark-to-market equity, fixed metrics, and threshold outcomes;
+  cash-equity costs, mark-to-market equity, fixed metrics, threshold outcomes,
+  and create-once full-result evidence;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually

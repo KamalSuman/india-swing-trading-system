@@ -11,6 +11,7 @@ from india_swing.execution.costs import (
     FillSide,
     ZerodhaDpTariff,
     calculate_delivery_charges,
+    calculate_equity_cash_charges,
     zerodha_nse_delivery_schedule_2026,
 )
 
@@ -139,6 +140,61 @@ class DeliveryCostTests(unittest.TestCase):
                 (
                     fill(day, FillSide.BUY, 1, "100", "buy"),
                     fill(day, FillSide.SELL, 1, "101", "sell"),
+                ),
+                zerodha_nse_delivery_schedule_2026(),
+            )
+
+    def test_same_day_round_trip_uses_intraday_rates_and_no_dp(self) -> None:
+        day = date(2026, 7, 16)
+        charges = calculate_equity_cash_charges(
+            (
+                fill(day, FillSide.BUY, 100, "99.10", "buy"),
+                fill(day, FillSide.SELL, 100, "94.90", "sell"),
+            ),
+            zerodha_nse_delivery_schedule_2026(),
+        )
+
+        leg = charges.legs[0]
+        self.assertEqual(leg.brokerage, D("5.82"))
+        self.assertEqual(leg.stt, D("2"))
+        self.assertEqual(leg.exchange_and_ipft, D("0.60"))
+        self.assertEqual(leg.sebi, D("0.02"))
+        self.assertEqual(leg.stamp, D("0"))
+        self.assertEqual(leg.gst, D("1.16"))
+        self.assertEqual(leg.dp_total, D("0.00"))
+        self.assertEqual(leg.total, D("9.60"))
+
+    def test_cash_router_preserves_delivery_pricing_across_dates(self) -> None:
+        fills = (
+            fill(date(2026, 7, 16), FillSide.BUY, 1000, "100", "buy"),
+            fill(date(2026, 7, 20), FillSide.SELL, 1000, "110", "sell"),
+        )
+        schedule = zerodha_nse_delivery_schedule_2026()
+
+        self.assertEqual(
+            calculate_equity_cash_charges(fills, schedule),
+            calculate_delivery_charges(fills, schedule),
+        )
+
+    def test_intraday_brokerage_cap_applies_per_executed_order(self) -> None:
+        day = date(2026, 7, 16)
+        charges = calculate_equity_cash_charges(
+            (
+                fill(day, FillSide.BUY, 10000, "100", "buy"),
+                fill(day, FillSide.SELL, 10000, "101", "sell"),
+            ),
+            zerodha_nse_delivery_schedule_2026(),
+        )
+
+        self.assertEqual(charges.legs[0].brokerage, D("40.00"))
+
+    def test_partial_same_day_netting_fails_without_allocation_evidence(self) -> None:
+        day = date(2026, 7, 16)
+        with self.assertRaisesRegex(CostScheduleError, "allocation evidence"):
+            calculate_equity_cash_charges(
+                (
+                    fill(day, FillSide.BUY, 100, "100", "buy"),
+                    fill(day, FillSide.SELL, 60, "101", "sell"),
                 ),
                 zerodha_nse_delivery_schedule_2026(),
             )

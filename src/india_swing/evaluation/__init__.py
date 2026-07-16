@@ -37,6 +37,14 @@ from .models import (
     SplitMethod,
     WalkForwardFold,
 )
+from .result_store import (
+    TRIAL_EVALUATION_RESULT_STORE_SCHEMA_VERSION,
+    LocalTrialEvaluationResultStore,
+    TrialEvaluationResultConflict,
+    TrialEvaluationResultNotFound,
+    decode_trial_evaluation_result,
+    encode_trial_evaluation_result,
+)
 from .splits import build_expanding_purged_walk_forward_plan
 from .trial_store import (
     TRIAL_REGISTRY_STORE_SCHEMA_VERSION,
@@ -66,6 +74,7 @@ __all__ = [
     "HOLDOUT_ACCESS_EVENT_TYPES",
     "HOLDOUT_EVENT_TYPES",
     "LocalTrialLifecycleStore",
+    "LocalTrialEvaluationResultStore",
     "MINIMUM_SWING_LABEL_HORIZON_SESSIONS",
     "EvaluationPlanError",
     "EvaluationPlanIntegrityError",
@@ -73,6 +82,7 @@ __all__ = [
     "SplitMethod",
     "TERMINAL_OUTCOME_EVENT_TYPES",
     "TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION",
+    "TRIAL_EVALUATION_RESULT_STORE_SCHEMA_VERSION",
     "TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION",
     "TRIAL_REGISTRY_ROOT_ENV",
     "TRIAL_REGISTRATION_SCHEMA_VERSION",
@@ -86,6 +96,8 @@ __all__ = [
     "TrialEvaluationEngine",
     "TrialEvaluationError",
     "TrialEvaluationResult",
+    "TrialEvaluationResultConflict",
+    "TrialEvaluationResultNotFound",
     "TrialRegistration",
     "TrialRegistrationError",
     "TrialRegistrationIntegrityError",
@@ -95,8 +107,10 @@ __all__ = [
     "WalkForwardFold",
     "build_expanding_purged_walk_forward_plan",
     "decode_trial_registration",
+    "decode_trial_evaluation_result",
     "decode_trial_lifecycle_event",
     "encode_trial_registration",
+    "encode_trial_evaluation_result",
     "encode_trial_lifecycle_event",
     "LocalTrialRegistry",
 ]

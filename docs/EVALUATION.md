@@ -35,10 +35,10 @@ supplied:
 - point-in-time universe and stable listing identity for every historical date;
 - mature forward labels separated from feature access;
 - historical cost schedules for every evaluated date and a stressed slippage case;
-- complete suspension, partial-fill, missing-quote, delisting, and same-day
-  intraday-cost rules;
+- complete suspension, partial-fill, missing-quote, delisting, and partially
+  netted-order allocation rules;
 - identical fills/costs for the strategy and simple benchmark;
-- a create-once store for full generated evaluation-result evidence.
+- a generated stressed-slippage scenario for confirmatory reporting.
 
 ## Trial preregistration
 
@@ -70,7 +70,8 @@ Holdout access fails before an unseal event or when its ID disagrees with the
 sealed registration. A completed confirmatory trial requires audited holdout
 results access and every registered metric. Completion no longer accepts
 caller-provided metric tuples: it requires a `TrialEvaluationResult`, verifies
-its trial/split/execution/cost/threshold bindings, and records the generated
+its trial/split/execution/cost/threshold bindings, requires the full artifact to
+already exist in `LocalTrialEvaluationResultStore`, and records the generated
 result ID. `passed=false` is a first-class
 terminal result and remains queryable. A later audit can append invalidation but
 cannot replace the original result. After a parent's holdout is unsealed, a
@@ -106,12 +107,18 @@ checks final equity against gross fills less charges, recomputes drawdowns and
 metrics, and binds all evidence into a 64-character result ID. Post-calculation
 mutation invalidates that identity.
 
+`LocalTrialEvaluationResultStore` publishes the complete fills, itemized charge
+legs, mark-to-market equity curve, metrics, thresholds, and identities as one
+create-once JSON artifact. Reads reconstruct every nested typed value and
+recompute fill, trade, charge, metric, pass/fail, and result identities. A
+lifecycle completion cannot reference an in-memory-only result.
+
 Synthetic trials require an explicitly synthetic dataset. A non-synthetic
 trial requires `POINT_IN_TIME_VERIFIED`; `COLLECTION_ONLY` data fails before any
 metric is returned. Missing bars, insufficient horizon coverage, an unfilled
-time exit, a sell-side circuit lock at the horizon, or a same-day round trip
-that the delivery schedule cannot price also fail instead of being silently
-skipped.
+time exit, or a sell-side circuit lock at the horizon fails instead of being
+silently skipped. A fully netted same-day stop is priced with the intraday
+tariff; partial same-day netting fails without allocation evidence.
 
 The current real price archive contains only one session and remains
 `COLLECTION_ONLY`. It cannot be passed off as evaluation data.

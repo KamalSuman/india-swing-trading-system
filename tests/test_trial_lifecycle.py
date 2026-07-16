@@ -10,6 +10,7 @@ from pathlib import Path
 from india_swing.evaluation import (
     EquityPoint,
     LocalTrialLifecycleStore,
+    LocalTrialEvaluationResultStore,
     LocalTrialRegistry,
     TrialLifecycleConflict,
     TrialLifecycleEventType,
@@ -28,7 +29,12 @@ class TrialLifecycleTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "trials"
         self.registry = LocalTrialRegistry(self.root)
-        self.store = LocalTrialLifecycleStore(self.root, self.registry)
+        self.result_store = LocalTrialEvaluationResultStore(self.root, self.registry)
+        self.store = LocalTrialLifecycleStore(
+            self.root,
+            self.registry,
+            self.result_store,
+        )
         self.registration = registration()
         self.registry.register(self.registration)
         self.started_at = self.registration.registered_at + timedelta(seconds=1)
@@ -91,6 +97,7 @@ class TrialLifecycleTests(unittest.TestCase):
             pass_thresholds=self.registration.pass_thresholds,
             passed=False,
         )
+        self.result_store.publish(generated)
         return self.store.append(
             trial_id=self.registration.trial_id,
             event_type=TrialLifecycleEventType.TRIAL_COMPLETED,

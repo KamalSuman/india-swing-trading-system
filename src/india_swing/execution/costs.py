@@ -86,7 +86,7 @@ class DeliveryFill:
             "fill_id",
             content_id(
                 {
-                    "schema": "nse-delivery-fill/v1",
+                    "schema": "nse-equity-cash-fill/v2",
                     "trade_date": self.trade_date,
                     "symbol": self.symbol,
                     "isin": self.isin,
@@ -106,7 +106,7 @@ class DeliveryFill:
 
 @dataclass(frozen=True, slots=True)
 class NseDeliveryCostSchedule:
-    """One effective-dated Zerodha resident-retail NSE delivery tariff."""
+    """Effective-dated Zerodha resident-retail NSE cash-equity tariff."""
 
     effective_from: date
     effective_to: date | None
@@ -119,8 +119,12 @@ class NseDeliveryCostSchedule:
     stamp_buy_bps: Decimal
     gst_rate: Decimal
     dp_base_per_scrip: Decimal
+    intraday_brokerage_bps: Decimal
+    intraday_brokerage_cap_per_order: Decimal
+    intraday_stt_sell_bps: Decimal
+    intraday_stamp_buy_bps: Decimal
     source_urls: tuple[str, ...]
-    policy_version: str = "zerodha-nse-equity-delivery-cost/v1"
+    policy_version: str = "zerodha-nse-equity-cash-cost/v2"
     schedule_id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -142,6 +146,10 @@ class NseDeliveryCostSchedule:
             "stamp_buy_bps",
             "gst_rate",
             "dp_base_per_scrip",
+            "intraday_brokerage_bps",
+            "intraday_brokerage_cap_per_order",
+            "intraday_stt_sell_bps",
+            "intraday_stamp_buy_bps",
         ):
             _decimal(getattr(self, name), name)
         if self.gst_rate > Decimal("1"):
@@ -164,7 +172,7 @@ class NseDeliveryCostSchedule:
     def _calculated_id(self) -> str:
         return content_id(
             {
-                "schema": "nse-delivery-cost-schedule/v1",
+                "schema": "nse-equity-cash-cost-schedule/v2",
                 "effective_from": self.effective_from,
                 "effective_to": self.effective_to,
                 "dp_tariff": self.dp_tariff,
@@ -176,6 +184,10 @@ class NseDeliveryCostSchedule:
                 "stamp_buy_bps": self.stamp_buy_bps,
                 "gst_rate": self.gst_rate,
                 "dp_base_per_scrip": self.dp_base_per_scrip,
+                "intraday_brokerage_bps": self.intraday_brokerage_bps,
+                "intraday_brokerage_cap_per_order": self.intraday_brokerage_cap_per_order,
+                "intraday_stt_sell_bps": self.intraday_stt_sell_bps,
+                "intraday_stamp_buy_bps": self.intraday_stamp_buy_bps,
                 "source_urls": self.source_urls,
                 "policy_version": self.policy_version,
             },
@@ -242,7 +254,7 @@ class DeliveryChargeBreakdown:
             "calculation_id",
             content_id(
                 {
-                    "schema": "nse-delivery-charge-breakdown/v1",
+                    "schema": "nse-equity-cash-charge-breakdown/v2",
                     "schedule_id": self.schedule_id,
                     "legs": self.legs,
                 },
@@ -276,11 +288,16 @@ def zerodha_nse_delivery_schedule_2026(
         stamp_buy_bps=Decimal("1.5"),
         gst_rate=Decimal("0.18"),
         dp_base_per_scrip=dp_base,
+        intraday_brokerage_bps=Decimal("3"),
+        intraday_brokerage_cap_per_order=Decimal("20"),
+        intraday_stt_sell_bps=Decimal("2.5"),
+        intraday_stamp_buy_bps=Decimal("0.3"),
         source_urls=(
             "https://zerodha.com/charges",
             "https://nsearchives.nseindia.com/content/circulars/FA73061.pdf",
             "https://www.incometaxindia.gov.in/w/section-98-55",
             "https://support.zerodha.com/category/account-opening/resident-individual/ri-charges/articles/how-is-the-securities-transaction-tax-stt-calculated",
+            "https://support.zerodha.com/category/account-opening/resident-individual/ri-charges/articles/brokerage-charged-for-partial-delivery",
             "https://www.sebi.gov.in/sebi_data/attachdocs/aug-2021/1628678904669.pdf",
             "https://www.indiacode.nic.in/show-data?abv=CEN&actid=AC_CEN_2_2_00036_189902_1523339055436&orderno=18&orgactid=AC_CEN_2_2_00036_189902_1523339055436&sectionId=49724&sectionno=9A&statehandle=123456789%2F1362",
             "https://www.cdslindia.com/dp/dpdetails.aspx?dp_id=81600",
@@ -353,6 +370,139 @@ def calculate_delivery_charges(
             if fill.side is FillSide.SELL
         }
         dp_base = _paise(schedule.dp_base_per_scrip * len(sold_scrips))
+        dp_gst = _paise(dp_base * schedule.gst_rate)
+        legs.append(
+            DeliveryLegCharges(
+                trade_date=trade_date,
+                turnover=_paise(turnover),
+                brokerage=brokerage,
+                stt=stt,
+                exchange_and_ipft=exchange_and_ipft,
+                sebi=sebi,
+                stamp=stamp,
+                gst=gst,
+                dp_base=dp_base,
+                dp_gst=dp_gst,
+            )
+        )
+
+    return DeliveryChargeBreakdown(schedule_id=schedule.schedule_id, legs=tuple(legs))
+
+
+def calculate_equity_cash_charges(
+    fills: tuple[DeliveryFill, ...],
+    schedule: NseDeliveryCostSchedule,
+) -> DeliveryChargeBreakdown:
+    """Price mixed delivery/intraday cash fills from actual same-day netting."""
+
+    if type(fills) is not tuple or not fills:
+        raise ValueError("fills must be a non-empty tuple")
+    if type(schedule) is not NseDeliveryCostSchedule:
+        raise TypeError("schedule must be an exact NseDeliveryCostSchedule")
+    schedule.verify_content_identity()
+    if len({fill.fill_id for fill in fills}) != len(fills):
+        raise CostScheduleError("duplicate fills are not allowed")
+
+    by_date: dict[date, list[DeliveryFill]] = defaultdict(list)
+    for fill in fills:
+        if type(fill) is not DeliveryFill:
+            raise TypeError("every fill must be an exact DeliveryFill")
+        if not schedule.applies_on(fill.trade_date):
+            raise CostScheduleError(
+                f"schedule {schedule.schedule_id} does not apply on {fill.trade_date}"
+            )
+        by_date[fill.trade_date].append(fill)
+
+    legs: list[DeliveryLegCharges] = []
+    for trade_date, day_fills in sorted(by_date.items()):
+        quantity_by_scrip_side: dict[tuple[str, str, FillSide], int] = defaultdict(int)
+        sides_by_scrip: dict[tuple[str, str], set[FillSide]] = defaultdict(set)
+        for fill in day_fills:
+            key = (fill.symbol, fill.isin)
+            sides_by_scrip[key].add(fill.side)
+            quantity_by_scrip_side[(fill.symbol, fill.isin, fill.side)] += fill.quantity
+
+        intraday_scrips: set[tuple[str, str]] = set()
+        for key, sides in sides_by_scrip.items():
+            if len(sides) == 1:
+                continue
+            buy_quantity = quantity_by_scrip_side[(*key, FillSide.BUY)]
+            sell_quantity = quantity_by_scrip_side[(*key, FillSide.SELL)]
+            if buy_quantity != sell_quantity:
+                raise CostScheduleError(
+                    "partially netted same-day positions require explicit allocation evidence"
+                )
+            intraday_scrips.add(key)
+
+        buy_turnover = sum(
+            (fill.turnover for fill in day_fills if fill.side is FillSide.BUY), ZERO
+        )
+        sell_turnover = sum(
+            (fill.turnover for fill in day_fills if fill.side is FillSide.SELL), ZERO
+        )
+        turnover = buy_turnover + sell_turnover
+        intraday_buy_turnover = sum(
+            (
+                fill.turnover
+                for fill in day_fills
+                if fill.side is FillSide.BUY
+                and (fill.symbol, fill.isin) in intraday_scrips
+            ),
+            ZERO,
+        )
+        delivery_buy_turnover = buy_turnover - intraday_buy_turnover
+
+        order_turnover: dict[tuple[str, str, FillSide, str], Decimal] = defaultdict(
+            lambda: ZERO
+        )
+        for fill in day_fills:
+            if (fill.symbol, fill.isin) in intraday_scrips:
+                order_turnover[
+                    (fill.symbol, fill.isin, fill.side, fill.order_id)
+                ] += fill.turnover
+        brokerage = sum(
+            (
+                min(
+                    schedule.intraday_brokerage_cap_per_order,
+                    _paise(_bps(value, schedule.intraday_brokerage_bps)),
+                )
+                for value in order_turnover.values()
+            ),
+            ZERO,
+        )
+        brokerage = _paise(brokerage + _bps(
+            turnover - sum(order_turnover.values(), ZERO),
+            schedule.brokerage_bps,
+        ))
+        exchange_and_ipft = _paise(_bps(turnover, schedule.exchange_and_ipft_bps))
+        sebi = _paise(_bps(turnover, schedule.sebi_bps))
+        stamp = _rupee(
+            _bps(delivery_buy_turnover, schedule.stamp_buy_bps)
+            + _bps(intraday_buy_turnover, schedule.intraday_stamp_buy_bps)
+        )
+
+        stt_by_security = ZERO
+        security_turnover: dict[tuple[str, str, FillSide], Decimal] = defaultdict(
+            lambda: ZERO
+        )
+        for fill in day_fills:
+            security_turnover[(fill.symbol, fill.isin, fill.side)] += fill.turnover
+        for (symbol, isin, side), value in security_turnover.items():
+            if (symbol, isin) in intraday_scrips:
+                rate = schedule.intraday_stt_sell_bps if side is FillSide.SELL else ZERO
+            else:
+                rate = schedule.stt_buy_bps if side is FillSide.BUY else schedule.stt_sell_bps
+            stt_by_security += _paise(_bps(value, rate))
+        stt = _rupee(stt_by_security)
+
+        gst = _paise((brokerage + exchange_and_ipft + sebi) * schedule.gst_rate)
+        delivery_sells = {
+            (fill.symbol, fill.isin)
+            for fill in day_fills
+            if fill.side is FillSide.SELL
+            and (fill.symbol, fill.isin) not in intraday_scrips
+        }
+        dp_base = _paise(schedule.dp_base_per_scrip * len(delivery_sells))
         dp_gst = _paise(dp_base * schedule.gst_rate)
         legs.append(
             DeliveryLegCharges(

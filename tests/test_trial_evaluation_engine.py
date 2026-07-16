@@ -332,7 +332,7 @@ class TrialEvaluationEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(TrialEvaluationError, "available cash"):
             self.evaluate(intents=(intent(entry_order=oversized_order),))
 
-    def test_same_day_stop_requires_non_delivery_cost_schedule(self) -> None:
+    def test_same_day_stop_is_priced_as_intraday(self) -> None:
         same_day_stop = dataset(
             bars=(
                 simulation_bar(
@@ -347,8 +347,12 @@ class TrialEvaluationEngineTests(unittest.TestCase):
             )
         )
 
-        with self.assertRaisesRegex(TrialEvaluationError, "cannot be priced"):
-            self.evaluate(dataset=same_day_stop)
+        result = self.evaluate(dataset=same_day_stop)
+
+        self.assertEqual(len(result.trades), 1)
+        assert result.charges is not None
+        self.assertEqual(result.charges.total, D("9.60"))
+        self.assertEqual(result.equity_curve[-1].equity, D("99570.40"))
 
     def test_changed_bar_content_changes_dataset_and_result_identity(self) -> None:
         original = self.evaluate()

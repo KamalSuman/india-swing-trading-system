@@ -12,7 +12,7 @@ from india_swing.execution.costs import (
     DeliveryFill,
     FillSide,
     NseDeliveryCostSchedule,
-    calculate_delivery_charges,
+    calculate_equity_cash_charges,
 )
 from india_swing.execution.simulator import (
     LimitEntryOrder,
@@ -580,7 +580,7 @@ class TrialEvaluationEngine:
         )
         try:
             charges = (
-                calculate_delivery_charges(delivery_fills, cost_schedule)
+                calculate_equity_cash_charges(delivery_fills, cost_schedule)
                 if delivery_fills
                 else None
             )

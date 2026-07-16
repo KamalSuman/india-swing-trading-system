@@ -17,7 +17,7 @@ from india_swing._filesystem import (
     advisory_file_lock,
     read_stable_regular_file,
 )
-from .engine import TrialEvaluationResult
+from .engine import TrialEvaluationError, TrialEvaluationResult
 
 from .lifecycle import (
     HOLDOUT_ACCESS_EVENT_TYPES,
@@ -29,6 +29,7 @@ from .lifecycle import (
     TrialLifecycleEventType,
     TrialLifecycleIntegrityError,
 )
+from .result_store import LocalTrialEvaluationResultStore
 from .trial_store import LocalTrialRegistry, TrialNotRegistered
 from .trials import TrialRegistration, TrialStage
 
@@ -254,11 +255,19 @@ def _validate_history(
 class LocalTrialLifecycleStore:
     """Create-once per-trial event chains bound to immutable registrations."""
 
-    def __init__(self, root: Path, registry: LocalTrialRegistry) -> None:
+    def __init__(
+        self,
+        root: Path,
+        registry: LocalTrialRegistry,
+        result_store: LocalTrialEvaluationResultStore,
+    ) -> None:
         self.root = Path(root)
         if type(registry) is not LocalTrialRegistry:
             raise TypeError("registry must be an exact LocalTrialRegistry")
+        if type(result_store) is not LocalTrialEvaluationResultStore:
+            raise TypeError("result_store must be an exact LocalTrialEvaluationResultStore")
         self.registry = registry
+        self.result_store = result_store
 
     @property
     def events_root(self) -> Path:
@@ -329,6 +338,12 @@ class LocalTrialLifecycleStore:
                     "caller-provided completion metrics are forbidden"
                 )
             evaluation_result.verify_content_identity()
+            try:
+                self.result_store.require_persisted(evaluation_result)
+            except TrialEvaluationError as exc:
+                raise TrialLifecycleConflict(
+                    "trial completion requires a persisted evaluation result"
+                ) from exc
             if evaluation_result.trial_id != registration.trial_id:
                 raise TrialLifecycleConflict("evaluation result belongs to another trial")
             if (

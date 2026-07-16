@@ -8,6 +8,7 @@ from .costs import (
     NseDeliveryCostSchedule,
     ZerodhaDpTariff,
     calculate_delivery_charges,
+    calculate_equity_cash_charges,
     zerodha_nse_delivery_schedule_2026,
 )
 from .simulator import (
@@ -34,6 +35,7 @@ __all__ = [
     "SimulationBar",
     "ZerodhaDpTariff",
     "calculate_delivery_charges",
+    "calculate_equity_cash_charges",
     "simulate_limit_entry",
     "simulate_protective_exit",
     "simulate_time_exit",
