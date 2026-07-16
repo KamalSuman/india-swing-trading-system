@@ -37,7 +37,8 @@ supplied:
 - historical cost schedules for every evaluated date and a stressed slippage case;
 - complete suspension, partial-fill, missing-quote, delisting, and partially
   netted-order allocation rules;
-- a real preregistered deterministic strategy and benchmark implementation;
+- point-in-time verified inputs for the implemented deterministic strategy and
+  benchmark generators;
 - multiple-testing correction over actual trial families and repetitions.
 
 ## Trial preregistration
@@ -127,6 +128,31 @@ result, then writes a create-once comparison artifact containing their IDs,
 registered strategy/benchmark/slippage bindings, excess-primary metrics, and
 the recomputed pass result. Lifecycle completion consumes this persisted
 comparison, not a selectively chosen scenario.
+
+## Deterministic baseline generators
+
+`DeterministicMomentumIntentGenerator` implements a deliberately simple,
+non-LLM cross-sectional close-momentum baseline. On the first test session of
+each registered fold it ranks only instruments explicitly eligible in their
+point-in-time universe record. Momentum uses the signal close and one
+preregistered historical close; future bars, validation labels, and test
+outcomes are not inputs. Selected limit orders become eligible on the next
+session only.
+
+`DeterministicEqualWeightBenchmarkGenerator` selects the most liquid eligible
+constituents using signal-close turnover, then assigns equal slot notional. It
+is a tradable holding-window comparator, not an index-return shortcut. Both
+generator configurations have content-derived IDs that must exactly equal the
+trial's registered model and benchmark IDs.
+
+Every instrument receives a content-bound `GeneratedSignalDecision`, including
+its score, selected/veto reason, and the exact bar IDs used as evidence.
+`PointInTimeInstrument.eligible_sessions` prevents a later constituent list
+from entering an earlier fold. `DeterministicBaselineEvaluationEngine` creates
+strategy and benchmark batches across all registered folds and sends both to
+the existing base/stressed comparison engine. Generated batches are not yet a
+separate create-once store; the persisted comparison still preserves their
+executed intent IDs, fills, costs, and outcomes.
 
 Synthetic trials require an explicitly synthetic dataset. A non-synthetic
 trial requires `POINT_IN_TIME_VERIFIED`; `COLLECTION_ONLY` data fails before any
