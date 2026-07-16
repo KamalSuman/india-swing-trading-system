@@ -597,6 +597,22 @@ class CollectionReconciliationTests(unittest.TestCase):
                 cutoff=CUTOFF,
             )
 
+        descriptive_name_difference = self._import_bundle(
+            _bundle_bytes(infy_udiff_name="INFOSYS TECHNOLOGIES LIMITED"),
+            "daily-descriptive-name-difference",
+        )
+        snapshot = reconcile_collection_only(
+            security_master=self.master,
+            daily_bundles=(descriptive_name_difference,),
+            market_session=SESSION,
+            cutoff=CUTOFF,
+        )
+        infy = next(entry for entry in snapshot.entries if entry.symbol == "INFY")
+        self.assertIn(
+            "UDIFF_MASTER_INSTRUMENT_NAME_MISMATCH",
+            infy.reason_codes,
+        )
+
     def test_reverse_identity_board_lot_and_band_change_conflicts_fail_closed(self) -> None:
         renamed_identity = self._import_bundle(
             _bundle_bytes(infy_udiff_symbol="INFYNEW"),

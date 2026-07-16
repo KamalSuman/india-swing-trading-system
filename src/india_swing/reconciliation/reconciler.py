@@ -479,6 +479,7 @@ def reconcile_collection_only(
     complete_bands_by_key: dict[tuple[str, str], list[BandObservation]] = defaultdict(list)
     sme_bands_by_key: dict[tuple[str, str], list[BandObservation]] = defaultdict(list)
     udiff_target: dict[tuple[str, str], EvidenceRowRef] = {}
+    udiff_master_name_mismatch_keys: set[tuple[str, str]] = set()
     full_target: dict[tuple[str, str], EvidenceRowRef] = {}
     band_changes_target: dict[
         tuple[str, str], list[BandChangeObservation]
@@ -592,13 +593,21 @@ def reconcile_collection_only(
                     str(master_record.financial_instrument_id)
                     != values["FinInstrmId"]
                     or master_record.raw_source_identifier != values["ISIN"]
-                    or master_record.instrument_name != values["FinInstrmNm"]
                     or str(master_record.board_lot_quantity)
                     != values["NewBrdLotQty"]
                 ):
                     raise ReconciliationIntegrityError(
                         "same-vintage security master and UDiFF identity or board-lot fields contradict"
                     )
+                if (
+                    master_record is not None
+                    and master_record.instrument_name != values["FinInstrmNm"]
+                ):
+                    # NSE's security master and UDiFF use different descriptive-name
+                    # fields. Preserve their disagreement as evidence, but do not
+                    # treat a display-name variation as an identity contradiction
+                    # when the instrument ID, ISIN, listing key, and board lot agree.
+                    udiff_master_name_mismatch_keys.add(primary_key)
                 udiff_target[primary_key] = row_ref
             elif (
                 report.family is DailyReportFamily.FULL_BHAVCOPY_DELIVERY
@@ -828,6 +837,8 @@ def reconcile_collection_only(
             reasons.add("REG1_STATUS_NOT_ACTIVE")
         if record.delete_flag == "Y":
             reasons.add("MASTER_DELETE_FLAG_SET")
+        if key in udiff_master_name_mismatch_keys:
+            reasons.add("UDIFF_MASTER_INSTRUMENT_NAME_MISMATCH")
 
         entries.append(
             ReconciledListingEvidence(
