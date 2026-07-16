@@ -80,6 +80,12 @@ cannot replace the original result. After a parent's holdout is unsealed, a
 confirmatory successor cannot reuse that holdout; it needs a new sealed holdout
 or must be exploratory.
 
+`TRIAL_PROMOTED` is a separate post-completion research event. It requires a
+configured family-aggregate store, an eligible current-family decision, and the
+exact comparison ID already recorded by `TRIAL_COMPLETED`. Only one promotion
+may follow completion; invalidation remains append-only afterward. Promotion
+does not authorize a live alert or change any dataset readiness state.
+
 The local predecessor chain detects mutation, reordered events, and missing
 interior events. As with the other local stores, a filesystem administrator can
 still delete the newest files and related evidence. Production therefore needs
@@ -181,12 +187,19 @@ comparison also passed all trading thresholds and benchmark gates.
 `TrialFamilyEvaluationAggregator` refuses unsupported policy text, missing
 family variants, duplicate runs, non-persisted batches/comparisons, or missing
 stressed-fold evidence. It derives p-values rather than accepting caller-
-supplied confidence. The aggregate is content-bound and reproducible, but a
-separate create-once family-aggregate store and lifecycle promotion event are
-not yet implemented. Non-overlapping folds can still be regime-correlated, so
+supplied confidence. `LocalTrialFamilyAggregateStore` recomputes the aggregate
+from persisted runs before publishing one create-once artifact for the exact
+registered-family snapshot. If another variant is later registered, the older
+snapshot cannot be used for promotion. Non-overlapping folds can still be regime-correlated, so
 this exact sign/Holm gate is a preregistered preliminary safeguard, not proof
 that fold signs are statistically independent or that a market edge will
 persist.
+
+`build_trial_family_evaluation_report` renders a content-bound Markdown report
+from the aggregate and exact run set. It includes family decisions, Holm
+cutoffs, comparison eligibility, every fold's base/stressed excess, and an
+interpretation boundary. The report is deterministic but is not yet published
+by a dedicated local report store or CLI.
 
 Synthetic trials require an explicitly synthetic dataset. A non-synthetic
 trial requires `POINT_IN_TIME_VERIFIED`; `COLLECTION_ONLY` data fails before any

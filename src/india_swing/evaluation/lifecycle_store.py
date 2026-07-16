@@ -19,10 +19,16 @@ from india_swing._filesystem import (
 )
 from .comparison_store import LocalTrialEvaluationComparisonStore
 from .engine import TrialEvaluationComparisonResult, TrialEvaluationError
+from .family_aggregate_store import LocalTrialFamilyAggregateStore
+from .family_aggregation import (
+    TrialFamilyAggregationError,
+    TrialFamilyEvaluationAggregate,
+)
 
 from .lifecycle import (
     HOLDOUT_ACCESS_EVENT_TYPES,
     HOLDOUT_EVENT_TYPES,
+    PROMOTION_EVENT_TYPES,
     TERMINAL_OUTCOME_EVENT_TYPES,
     TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION,
     TrialLifecycleError,
@@ -34,7 +40,7 @@ from .trial_store import LocalTrialRegistry, TrialNotRegistered
 from .trials import TrialRegistration, TrialStage
 
 
-TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION = "local-trial-lifecycle-store/v2"
+TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION = "local-trial-lifecycle-store/v3"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _EVENT_FILENAME = re.compile(r"([0-9]{20})-([0-9a-f]{64})\.json\Z")
 _MAX_EVENT_BYTES = 4 * 1024 * 1024
@@ -145,6 +151,7 @@ def decode_trial_lifecycle_event(payload: bytes) -> TrialLifecycleEvent:
             ),
             passed=raw["passed"],
             evaluation_result_id=raw["evaluation_result_id"],
+            family_aggregate_id=raw["family_aggregate_id"],
             schema_version=raw["schema_version"],
         )
         if event.event_id != stored_event_id:
@@ -178,7 +185,8 @@ def _validate_history(
     started = False
     unsealed = False
     holdout_results_accessed = False
-    terminal = False
+    terminal: TrialLifecycleEventType | None = None
+    promoted = False
     invalidated = False
     previous: TrialLifecycleEvent | None = None
     for expected_sequence, event in enumerate(events, start=1):
@@ -199,10 +207,16 @@ def _validate_history(
             )
         if invalidated:
             raise TrialLifecycleConflict("no event may follow invalidation")
-        if terminal and event.event_type is not TrialLifecycleEventType.TRIAL_INVALIDATED:
-            raise TrialLifecycleConflict(
-                "only invalidation may follow a terminal trial outcome"
-            )
+        if promoted and event.event_type is not TrialLifecycleEventType.TRIAL_INVALIDATED:
+            raise TrialLifecycleConflict("only invalidation may follow promotion")
+        if terminal is not None:
+            allowed = {TrialLifecycleEventType.TRIAL_INVALIDATED}
+            if terminal is TrialLifecycleEventType.TRIAL_COMPLETED and not promoted:
+                allowed.add(TrialLifecycleEventType.TRIAL_PROMOTED)
+            if event.event_type not in allowed:
+                raise TrialLifecycleConflict(
+                    "only invalidation, or one eligible promotion, may follow a completed trial"
+                )
         if event.event_type is TrialLifecycleEventType.TRIAL_STARTED:
             if started or expected_sequence != 1:
                 raise TrialLifecycleConflict("trial can start exactly once as its first event")
@@ -241,12 +255,16 @@ def _validate_history(
                     raise TrialLifecycleConflict(
                         "completed outcome omits a registered evaluation metric"
                     )
-                terminal = True
+                terminal = event.event_type
             elif event.event_type in {
                 TrialLifecycleEventType.TRIAL_FAILED,
                 TrialLifecycleEventType.TRIAL_ABORTED,
             }:
-                terminal = True
+                terminal = event.event_type
+            elif event.event_type is TrialLifecycleEventType.TRIAL_PROMOTED:
+                if terminal is not TrialLifecycleEventType.TRIAL_COMPLETED:
+                    raise TrialLifecycleConflict("promotion requires a completed trial")
+                promoted = True
             elif event.event_type is TrialLifecycleEventType.TRIAL_INVALIDATED:
                 invalidated = True
         previous = event
@@ -260,6 +278,7 @@ class LocalTrialLifecycleStore:
         root: Path,
         registry: LocalTrialRegistry,
         comparison_store: LocalTrialEvaluationComparisonStore,
+        family_aggregate_store: LocalTrialFamilyAggregateStore | None = None,
     ) -> None:
         self.root = Path(root)
         if type(registry) is not LocalTrialRegistry:
@@ -268,6 +287,11 @@ class LocalTrialLifecycleStore:
             raise TypeError("comparison_store must be exact")
         self.registry = registry
         self.comparison_store = comparison_store
+        if family_aggregate_store is not None and type(
+            family_aggregate_store
+        ) is not LocalTrialFamilyAggregateStore:
+            raise TypeError("family_aggregate_store must be exact")
+        self.family_aggregate_store = family_aggregate_store
 
     @property
     def events_root(self) -> Path:
@@ -325,9 +349,11 @@ class LocalTrialLifecycleStore:
         metrics: tuple[tuple[str, Decimal], ...] = (),
         passed: bool | None = None,
         evaluation_comparison: TrialEvaluationComparisonResult | None = None,
+        family_aggregate: TrialFamilyEvaluationAggregate | None = None,
     ) -> TrialLifecycleEvent:
         registration = self.registry.require_registered(trial_id)
         evaluation_result_id: str | None = None
+        family_aggregate_id: str | None = None
         if event_type is TrialLifecycleEventType.TRIAL_COMPLETED:
             if type(evaluation_comparison) is not TrialEvaluationComparisonResult:
                 raise TrialLifecycleConflict(
@@ -371,6 +397,47 @@ class LocalTrialLifecycleStore:
             raise TrialLifecycleConflict(
                 "only trial completion can carry an evaluation result"
             )
+        if event_type is TrialLifecycleEventType.TRIAL_PROMOTED:
+            if type(family_aggregate) is not TrialFamilyEvaluationAggregate:
+                raise TrialLifecycleConflict(
+                    "trial promotion requires a family aggregate"
+                )
+            if self.family_aggregate_store is None:
+                raise TrialLifecycleConflict(
+                    "trial promotion requires a configured family-aggregate store"
+                )
+            if metrics or passed is not None:
+                raise TrialLifecycleConflict(
+                    "caller-provided promotion outcome is forbidden"
+                )
+            try:
+                self.family_aggregate_store.require_persisted(family_aggregate)
+            except TrialFamilyAggregationError as exc:
+                raise TrialLifecycleConflict(
+                    "trial promotion requires a persisted family aggregate"
+                ) from exc
+            current_family_ids = tuple(
+                sorted(
+                    value.trial_id
+                    for value in self.registry.registrations_for_family(
+                        registration.strategy_family_id
+                    )
+                )
+            )
+            if (
+                family_aggregate.strategy_family_id
+                != registration.strategy_family_id
+                or family_aggregate.registered_trial_ids != current_family_ids
+                or trial_id not in family_aggregate.eligible_trial_ids
+            ):
+                raise TrialLifecycleConflict(
+                    "family aggregate does not make this current family trial eligible"
+                )
+            family_aggregate_id = family_aggregate.aggregate_id
+        elif family_aggregate is not None:
+            raise TrialLifecycleConflict(
+                "only trial promotion can carry a family aggregate"
+            )
         self.events_root.mkdir(parents=True, exist_ok=True)
         if _is_link_like(self.events_root):
             raise TrialLifecycleIntegrityError("trial-events root cannot be a link")
@@ -384,6 +451,45 @@ class LocalTrialLifecycleStore:
                 existing = self.list_events(trial_id)
                 if not existing and event_type is TrialLifecycleEventType.TRIAL_STARTED:
                     self._reject_contaminated_confirmatory_successor(registration)
+                if event_type is TrialLifecycleEventType.TRIAL_PROMOTED:
+                    assert family_aggregate is not None
+                    current_family_ids = tuple(
+                        sorted(
+                            value.trial_id
+                            for value in self.registry.registrations_for_family(
+                                registration.strategy_family_id
+                            )
+                        )
+                    )
+                    if family_aggregate.registered_trial_ids != current_family_ids:
+                        raise TrialLifecycleConflict(
+                            "family aggregate no longer covers the current family"
+                        )
+                    completed = next(
+                        (
+                            value
+                            for value in existing
+                            if value.event_type
+                            is TrialLifecycleEventType.TRIAL_COMPLETED
+                        ),
+                        None,
+                    )
+                    decision = next(
+                        (
+                            value
+                            for value in family_aggregate.decisions
+                            if value.trial_id == trial_id
+                        ),
+                        None,
+                    )
+                    if (
+                        completed is None
+                        or decision is None
+                        or completed.evaluation_result_id != decision.comparison_id
+                    ):
+                        raise TrialLifecycleConflict(
+                            "promotion aggregate differs from the completed comparison"
+                        )
                 event = TrialLifecycleEvent(
                     trial_id=trial_id,
                     sequence=len(existing) + 1,
@@ -396,6 +502,7 @@ class LocalTrialLifecycleStore:
                     metrics=metrics,
                     passed=passed,
                     evaluation_result_id=evaluation_result_id,
+                    family_aggregate_id=family_aggregate_id,
                 )
                 proposed = existing + (event,)
                 _validate_history(registration, proposed)
@@ -448,5 +555,6 @@ class LocalTrialLifecycleStore:
             event
             for event in self.list_events(trial_id)
             if event.event_type in TERMINAL_OUTCOME_EVENT_TYPES
+            or event.event_type in PROMOTION_EVENT_TYPES
             or event.event_type is TrialLifecycleEventType.TRIAL_INVALIDATED
         )

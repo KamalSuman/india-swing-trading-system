@@ -20,6 +20,8 @@ from india_swing.evaluation import (
     GeneratedIntentBatchConflict,
     LocalDeterministicComparisonRunStore,
     LocalGeneratedIntentBatchStore,
+    LocalTrialFamilyAggregateStore,
+    LocalTrialLifecycleStore,
     LocalTrialEvaluationComparisonStore,
     LocalTrialEvaluationResultStore,
     LocalTrialRegistry,
@@ -28,11 +30,16 @@ from india_swing.evaluation import (
     PointInTimeInstrument,
     TrialRegistration,
     TrialFamilyAggregationError,
+    TrialLifecycleConflict,
+    TrialLifecycleEventType,
     TrialFamilyEvaluationAggregator,
     TrialStage,
     build_expanding_purged_walk_forward_plan,
     decode_generated_intent_batch,
+    decode_trial_family_aggregate,
     encode_generated_intent_batch,
+    encode_trial_family_aggregate,
+    build_trial_family_evaluation_report,
 )
 from india_swing.execution import SimulationBar, zerodha_nse_delivery_schedule_2026
 from india_swing.identity import content_id
@@ -208,13 +215,14 @@ def registration(
 def evaluate_run(
     registered: TrialRegistration | None = None,
     strategy: MomentumBaselineConfig | None = None,
+    data: EvaluationDataset | None = None,
 ):
     return DeterministicBaselineEvaluationEngine().evaluate(
         registration=registered or registration(strategy=strategy),
         strategy_config=strategy or strategy_config(),
         benchmark_config=benchmark_config(),
         split_plan=split_plan(),
-        dataset=dataset(),
+        dataset=data or dataset(),
         instruments=instruments(),
         execution_policy=policy(),
         cost_schedule=zerodha_nse_delivery_schedule_2026(),
@@ -382,6 +390,15 @@ class DeterministicBaselineStoreAndFamilyTests(unittest.TestCase):
         self.run_store = LocalDeterministicComparisonRunStore(
             self.batch_store, self.comparison_store
         )
+        self.family_store = LocalTrialFamilyAggregateStore(
+            self.root / "evidence", self.registry, self.run_store
+        )
+        self.lifecycle_store = LocalTrialLifecycleStore(
+            self.root / "lifecycle",
+            self.registry,
+            self.comparison_store,
+            self.family_store,
+        )
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -533,6 +550,180 @@ class DeterministicBaselineStoreAndFamilyTests(unittest.TestCase):
             TrialFamilyEvaluationAggregator(self.registry, self.run_store).aggregate(
                 strategy_family_id=parent.strategy_family_id,
                 runs=(parent_run,),
+            )
+
+    def test_family_aggregate_store_and_human_report_are_deterministic(self) -> None:
+        registered = registration(multiple_testing_policy=FOLD_SIGN_HOLM_POLICY)
+        self.registry.register(registered)
+        run = evaluate_run(registered)
+        self.run_store.publish(run)
+        aggregate = TrialFamilyEvaluationAggregator(
+            self.registry, self.run_store
+        ).aggregate(
+            strategy_family_id=registered.strategy_family_id,
+            runs=(run,),
+        )
+
+        decoded = decode_trial_family_aggregate(
+            encode_trial_family_aggregate(aggregate)
+        )
+        stored = self.family_store.publish(aggregate, runs=(run,))
+        first_report = build_trial_family_evaluation_report(
+            aggregate=stored, runs=(run,)
+        )
+        second_report = build_trial_family_evaluation_report(
+            aggregate=stored, runs=(run,)
+        )
+
+        self.assertEqual(decoded, aggregate)
+        self.assertEqual(stored, aggregate)
+        self.assertEqual(first_report.report_id, second_report.report_id)
+        self.assertIn("## Family decisions", first_report.markdown)
+        self.assertIn("## Fold evidence", first_report.markdown)
+        self.assertIn("not a profit forecast or trade alert", first_report.markdown)
+
+    def test_promotion_requires_current_persisted_eligible_family_aggregate(self) -> None:
+        registered = registration(multiple_testing_policy=FOLD_SIGN_HOLM_POLICY)
+        self.registry.register(registered)
+        run = evaluate_run(registered)
+        self.run_store.publish(run)
+        aggregate = TrialFamilyEvaluationAggregator(
+            self.registry, self.run_store
+        ).aggregate(
+            strategy_family_id=registered.strategy_family_id,
+            runs=(run,),
+        )
+        self.family_store.publish(aggregate, runs=(run,))
+        started = self.lifecycle_store.append(
+            trial_id=registered.trial_id,
+            event_type=TrialLifecycleEventType.TRIAL_STARTED,
+            occurred_at=registered.registered_at + timedelta(seconds=1),
+            actor_id="evaluation-runner",
+            reason="Start the registered synthetic family evaluation.",
+        )
+        completed = self.lifecycle_store.append(
+            trial_id=registered.trial_id,
+            event_type=TrialLifecycleEventType.TRIAL_COMPLETED,
+            occurred_at=registered.registered_at + timedelta(seconds=2),
+            actor_id="evaluation-runner",
+            reason="Record the persisted strategy and benchmark comparison.",
+            evaluation_comparison=run.comparison,
+        )
+        promoted = self.lifecycle_store.append(
+            trial_id=registered.trial_id,
+            event_type=TrialLifecycleEventType.TRIAL_PROMOTED,
+            occurred_at=registered.registered_at + timedelta(seconds=3),
+            actor_id="research-owner",
+            reason="Promote only after the complete registered family passed.",
+            family_aggregate=aggregate,
+        )
+
+        self.assertEqual(promoted.family_aggregate_id, aggregate.aggregate_id)
+        self.assertEqual(
+            self.lifecycle_store.outcomes(registered.trial_id),
+            (completed, promoted),
+        )
+        self.assertEqual(promoted.previous_event_id, completed.event_id)
+        self.assertNotEqual(started.event_id, promoted.event_id)
+
+    def test_new_family_variant_makes_older_aggregate_ineligible_for_promotion(self) -> None:
+        parent = registration(multiple_testing_policy=FOLD_SIGN_HOLM_POLICY)
+        self.registry.register(parent)
+        run = evaluate_run(parent)
+        self.run_store.publish(run)
+        aggregate = TrialFamilyEvaluationAggregator(
+            self.registry, self.run_store
+        ).aggregate(
+            strategy_family_id=parent.strategy_family_id,
+            runs=(run,),
+        )
+        self.family_store.publish(aggregate, runs=(run,))
+        child_strategy = MomentumBaselineConfig(
+            lookback_sessions=9,
+            maximum_positions=2,
+            gross_exposure_fraction=D("0.80"),
+            minimum_momentum=D("0.01"),
+            stop_loss_fraction=D("0.50"),
+            target_gain_fraction=D("0.50"),
+            maximum_holding_sessions=3,
+        )
+        child = registration(
+            strategy=child_strategy,
+            multiple_testing_policy=FOLD_SIGN_HOLM_POLICY,
+            registered_at=parent.registered_at + timedelta(seconds=1),
+            parent_trial_id=parent.trial_id,
+        )
+        self.registry.register(child)
+        self.lifecycle_store.append(
+            trial_id=parent.trial_id,
+            event_type=TrialLifecycleEventType.TRIAL_STARTED,
+            occurred_at=parent.registered_at + timedelta(seconds=2),
+            actor_id="evaluation-runner",
+            reason="Start the parent trial lifecycle.",
+        )
+        self.lifecycle_store.append(
+            trial_id=parent.trial_id,
+            event_type=TrialLifecycleEventType.TRIAL_COMPLETED,
+            occurred_at=parent.registered_at + timedelta(seconds=3),
+            actor_id="evaluation-runner",
+            reason="Record the parent comparison before family promotion.",
+            evaluation_comparison=run.comparison,
+        )
+
+        with self.assertRaisesRegex(TrialLifecycleConflict, "current family"):
+            self.lifecycle_store.append(
+                trial_id=parent.trial_id,
+                event_type=TrialLifecycleEventType.TRIAL_PROMOTED,
+                occurred_at=parent.registered_at + timedelta(seconds=4),
+                actor_id="research-owner",
+                reason="Attempt promotion using a stale family snapshot.",
+                family_aggregate=aggregate,
+            )
+
+    def test_promotion_must_match_the_comparison_recorded_at_completion(self) -> None:
+        registered = registration(multiple_testing_policy=FOLD_SIGN_HOLM_POLICY)
+        self.registry.register(registered)
+        aggregate_run = evaluate_run(registered)
+        self.run_store.publish(aggregate_run)
+        aggregate = TrialFamilyEvaluationAggregator(
+            self.registry, self.run_store
+        ).aggregate(
+            strategy_family_id=registered.strategy_family_id,
+            runs=(aggregate_run,),
+        )
+        self.family_store.publish(aggregate, runs=(aggregate_run,))
+        changed_session = split_plan().folds[0].test_sessions[2]
+        completion_run = evaluate_run(
+            registered,
+            data=dataset(
+                changed_bar=bar(changed_session, "ALPHA", D("135"), 1_000_000)
+            ),
+        )
+        self.run_store.publish(completion_run)
+        self.lifecycle_store.append(
+            trial_id=registered.trial_id,
+            event_type=TrialLifecycleEventType.TRIAL_STARTED,
+            occurred_at=registered.registered_at + timedelta(seconds=1),
+            actor_id="evaluation-runner",
+            reason="Start the registered comparison-matching test.",
+        )
+        self.lifecycle_store.append(
+            trial_id=registered.trial_id,
+            event_type=TrialLifecycleEventType.TRIAL_COMPLETED,
+            occurred_at=registered.registered_at + timedelta(seconds=2),
+            actor_id="evaluation-runner",
+            reason="Complete using a different persisted comparison.",
+            evaluation_comparison=completion_run.comparison,
+        )
+
+        with self.assertRaisesRegex(TrialLifecycleConflict, "completed comparison"):
+            self.lifecycle_store.append(
+                trial_id=registered.trial_id,
+                event_type=TrialLifecycleEventType.TRIAL_PROMOTED,
+                occurred_at=registered.registered_at + timedelta(seconds=3),
+                actor_id="research-owner",
+                reason="Attempt to promote a different comparison.",
+                family_aggregate=aggregate,
             )
 
 

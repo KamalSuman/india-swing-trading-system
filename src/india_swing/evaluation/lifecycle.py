@@ -9,7 +9,7 @@ from enum import Enum
 from india_swing.identity import content_id
 
 
-TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION = "research-trial-lifecycle-event/v2"
+TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION = "research-trial-lifecycle-event/v3"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -28,6 +28,7 @@ class TrialLifecycleEventType(str, Enum):
     HOLDOUT_LABELS_ACCESSED = "HOLDOUT_LABELS_ACCESSED"
     HOLDOUT_RESULTS_ACCESSED = "HOLDOUT_RESULTS_ACCESSED"
     TRIAL_COMPLETED = "TRIAL_COMPLETED"
+    TRIAL_PROMOTED = "TRIAL_PROMOTED"
     TRIAL_FAILED = "TRIAL_FAILED"
     TRIAL_ABORTED = "TRIAL_ABORTED"
     TRIAL_INVALIDATED = "TRIAL_INVALIDATED"
@@ -51,6 +52,7 @@ TERMINAL_OUTCOME_EVENT_TYPES = frozenset(
         TrialLifecycleEventType.TRIAL_ABORTED,
     }
 )
+PROMOTION_EVENT_TYPES = frozenset({TrialLifecycleEventType.TRIAL_PROMOTED})
 
 
 def _sha(value: str, name: str) -> None:
@@ -81,6 +83,7 @@ class TrialLifecycleEvent:
     metrics: tuple[tuple[str, Decimal], ...] = ()
     passed: bool | None = None
     evaluation_result_id: str | None = None
+    family_aggregate_id: str | None = None
     schema_version: str = TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION
     event_id: str = field(init=False)
 
@@ -134,10 +137,25 @@ class TrialLifecycleEvent:
                     "completed trial requires a generated result, metrics, and pass result"
                 )
             _sha(self.evaluation_result_id, "evaluation_result_id")
+            if self.family_aggregate_id is not None:
+                raise TrialLifecycleError("completed trial cannot carry family promotion")
+        elif self.event_type is TrialLifecycleEventType.TRIAL_PROMOTED:
+            if (
+                self.metrics
+                or self.passed is not None
+                or self.evaluation_result_id is not None
+                or self.family_aggregate_id is None
+            ):
+                raise TrialLifecycleError(
+                    "promotion requires only a persisted family aggregate"
+                )
+            _sha(self.family_aggregate_id, "family_aggregate_id")
         elif self.metrics or self.passed is not None or self.evaluation_result_id is not None:
             raise TrialLifecycleError(
                 "only a completed trial can carry a generated evaluation result"
             )
+        elif self.family_aggregate_id is not None:
+            raise TrialLifecycleError("only promotion can carry a family aggregate")
         if self.schema_version != TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION:
             raise TrialLifecycleError("unsupported trial-lifecycle schema")
         object.__setattr__(self, "event_id", self._calculated_id())
@@ -157,6 +175,7 @@ class TrialLifecycleEvent:
                 "metrics": self.metrics,
                 "passed": self.passed,
                 "evaluation_result_id": self.evaluation_result_id,
+                "family_aggregate_id": self.family_aggregate_id,
             },
             length=64,
         )

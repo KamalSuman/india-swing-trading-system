@@ -45,6 +45,7 @@ from .engine import (
 from .lifecycle import (
     HOLDOUT_ACCESS_EVENT_TYPES,
     HOLDOUT_EVENT_TYPES,
+    PROMOTION_EVENT_TYPES,
     TERMINAL_OUTCOME_EVENT_TYPES,
     TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION,
     TrialLifecycleError,
@@ -59,6 +60,18 @@ from .family_aggregation import (
     TrialFamilyAggregationError,
     TrialFamilyEvaluationAggregate,
     TrialFamilyEvaluationAggregator,
+)
+from .family_aggregate_store import (
+    TRIAL_FAMILY_AGGREGATE_STORE_SCHEMA_VERSION,
+    LocalTrialFamilyAggregateStore,
+    TrialFamilyAggregateConflict,
+    TrialFamilyAggregateNotFound,
+    decode_trial_family_aggregate,
+    encode_trial_family_aggregate,
+)
+from .family_report import (
+    TrialFamilyEvaluationReport,
+    build_trial_family_evaluation_report,
 )
 from .lifecycle_store import (
     TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION,
@@ -128,9 +141,11 @@ __all__ = [
     "GeneratedSignalDecision",
     "HOLDOUT_ACCESS_EVENT_TYPES",
     "HOLDOUT_EVENT_TYPES",
+    "PROMOTION_EVENT_TYPES",
     "LocalTrialLifecycleStore",
     "LocalDeterministicComparisonRunStore",
     "LocalGeneratedIntentBatchStore",
+    "LocalTrialFamilyAggregateStore",
     "LocalTrialEvaluationResultStore",
     "LocalTrialEvaluationComparisonStore",
     "MINIMUM_SWING_LABEL_HORIZON_SESSIONS",
@@ -145,6 +160,7 @@ __all__ = [
     "TRIAL_EVALUATION_RESULT_STORE_SCHEMA_VERSION",
     "TRIAL_EVALUATION_COMPARISON_STORE_SCHEMA_VERSION",
     "TRIAL_LIFECYCLE_STORE_SCHEMA_VERSION",
+    "TRIAL_FAMILY_AGGREGATE_STORE_SCHEMA_VERSION",
     "TRIAL_REGISTRY_ROOT_ENV",
     "TRIAL_REGISTRATION_SCHEMA_VERSION",
     "TRIAL_REGISTRY_STORE_SCHEMA_VERSION",
@@ -162,8 +178,11 @@ __all__ = [
     "TrialEvaluationResultConflict",
     "TrialEvaluationResultNotFound",
     "TrialFamilyAggregationError",
+    "TrialFamilyAggregateConflict",
+    "TrialFamilyAggregateNotFound",
     "TrialFamilyEvaluationAggregate",
     "TrialFamilyEvaluationAggregator",
+    "TrialFamilyEvaluationReport",
     "TrialEvaluationComparisonConflict",
     "TrialEvaluationComparisonNotFound",
     "TrialRegistration",
@@ -176,11 +195,14 @@ __all__ = [
     "build_expanding_purged_walk_forward_plan",
     "decode_trial_registration",
     "decode_generated_intent_batch",
+    "decode_trial_family_aggregate",
     "decode_trial_evaluation_result",
     "decode_trial_lifecycle_event",
     "encode_trial_registration",
     "encode_generated_intent_batch",
+    "encode_trial_family_aggregate",
     "encode_trial_evaluation_result",
     "encode_trial_lifecycle_event",
     "LocalTrialRegistry",
+    "build_trial_family_evaluation_report",
 ]

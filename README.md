@@ -22,7 +22,8 @@ The current vertical slice implements:
 - preregistration-bound deterministic close-momentum strategy and liquid
   equal-weight benchmark intent generators, with explicit point-in-time
   eligibility, as-of evidence IDs, a decision or veto for every candidate,
-  create-once per-role batches, per-fold dispersion, and a Holm familywise gate;
+  create-once per-role batches, per-fold dispersion, a Holm familywise gate,
+  persisted research promotion, and a deterministic Markdown report;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually
