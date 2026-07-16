@@ -116,16 +116,27 @@ the original bytes rather than trusting a cached Python object.
 - Artifact ID: `92cdc918f207226eb0137bd59f83cc1ce9cb72b71b16de060fa7fd64033e05c1`
 - Observed dates: 2026-07-14 and 2026-07-15
 
-### Reconciliation diagnostic
+### NSE CM calendar sources and materialization
 
-- Snapshot ID: `f872907c3f4951c0e62b3473676cf8f0804f0ec4d912c7f05a7ff4cfdfcc199d`
+- Base schedule source `NSE-CMTR-73927`: `619daa17de902975f4d10247d2277819969573d40e21d03212d1b29c92c6dfb3`
+- Annual holidays source `NSE-CMTR-71775`: `4045763fb4d759aafd0027392d8daf50c51dd2f7834bab2fbcda555b97775bc6`
+- January 15 amendment `NSE-CMTR-72260`: `4deedb475933d5d76cfd7a5a20b33989fb3e612bb9ab93712a76ba4a87905619`
+- Materialization ID: `e9c240e72447a3b0ad061dd2fe79cb617e7e36120f9e04f9757cc5fc5e87463a`
+- Calendar snapshot ID: `1457b00b776c1ffe8695c602c6216ace685ba0c31f5bcce67507f2447955771f`
+- Coverage: 2026-01-01 through 2026-07-31; 212 days and 142 sessions
+- Evidence cross-check: one sealed daily bundle covering positive trade dates
+- Readiness: `COLLECTION_ONLY`; actionable: false
+
+### Calendar-backed reconciliation diagnostic
+
+- Snapshot ID: `df53480a2c5c30a9a1a1e28842e00fa77e34fefdd2fdd98997148232fb8ebbd9`
 - Retained master rows: 21,133
 - Broad EQ scope: 3,510, including small caps
 - SM watch-only scope: 772
 - Other explicitly unsupported series: 16,851
 - Same-session retained rows with trade evidence: 2,834
 - Daily-report orphan keys retained as orphans: 2,686
-- Supported rows unresolved without a verified calendar: 4,282
+- Supported rows unresolved after calendar resolution: 1,852
 - Actionable rows: zero
 
 ### Raw EOD historical-price session
@@ -203,8 +214,8 @@ python -m india_swing.historical_prices.cli materialize `
 ## What is not implemented
 
 - Authenticated/licensed, automatically acquired point-in-time NSE calendar.
-- A complete set of real calendar circulars and declarations for the target
-  coverage period.
+- Calendar changes after 2026-07-31, including the August closing-auction
+  transition and later special-session circulars.
 - Historical daily security-master vintages, delistings, renames, mergers, and
   a stable cross-vintage instrument/company identity registry.
 - Official corporate-action ingestion and cutoff-specific adjusted views.
@@ -218,15 +229,13 @@ python -m india_swing.historical_prices.cli materialize `
 
 ## Recommended next milestones, in order
 
-1. Review `6aee3a8`, push this branch, and open a PR. Do not merge merely because
+1. Review the latest local branch, push it, and open a PR. Do not merge merely because
    tests pass; review the promotion boundaries and raw-data replay cost.
-2. Collect the official NSE base trading schedule, annual holiday circular, and
-   every amendment, closure, or special-session circular needed for current
-   date plus at least ten future sessions. Create and independently verify the
-   strict JSON declarations, then materialize and seal the bounded calendar.
-3. Re-run reconciliation with `--calendar-id`. Calendar schedule resolution is
-   diagnostic until acquisition provenance and independent provider finality
-   are verified.
+2. Independently review the three local calendar declarations against PDF pages
+   45-47, pages 1-2, and page 1 respectively. Calendar schedule resolution stays
+   diagnostic until acquisition provenance and provider finality are verified.
+3. Collect and model the August 2026 closing-auction transition before extending
+   calendar coverage beyond July 31.
 4. Establish a recurring authorized collection job for the daily security
    master and Multiple File Download bundle. Materialize each raw EOD session.
 5. Build cross-vintage identity and listing-status history. This is the key
@@ -247,9 +256,10 @@ python -m india_swing.historical_prices.cli materialize `
 
 ## Inputs required from the owner
 
-- The official NSE calendar PDFs for the intended period: base schedule,
-  holiday calendar, amendments/closures, and special sessions. The declarations
-  need human verification because they transcribe executable dates and windows.
+- Independent owner review of the generated calendar declarations in
+  `input_drop/calendar`; the exact source locators are recorded in each event.
+- Future NSE calendar amendments and special-session circulars before extending
+  the current 2026-07-31 coverage boundary.
 - A decision on an authorized recurring NSE data source/license. Manual portal
   downloads are acceptable for collection experiments but not unattended
   production.
@@ -261,9 +271,8 @@ python -m india_swing.historical_prices.cli materialize `
 
 ## Honest progress assessment
 
-Approximately 50% of a research-and-notification MVP foundation is implemented,
-but only about 25-30% of the work required for a defensible real-capital pilot.
+Approximately 55% of a research-and-notification MVP foundation is implemented,
+but only about 30% of the work required for a defensible real-capital pilot.
 The system is 0% live-trade-ready because it correctly refuses all real alerts.
 The largest remaining effort is trustworthy historical data and evaluation,
 not connecting an LLM or formatting a notification.
-

@@ -89,6 +89,26 @@ Optional repeated `--observed-daily-bundle-id` arguments add positive traded-dat
 cross-checks. The sealed materialization store reopens every source and daily
 bundle and reproduces the exact calendar bytes on each read.
 
+## Current real-file diagnostic
+
+The manually supplied official NSE files `CMTR73927.zip`, `CMTR71775.pdf`, and
+`CMTR72260.pdf` were inspected and transcribed on 2026-07-16. The consolidated
+archive's inner `CMTR73927.pdf` supplies the Monday-Friday 09:15-15:30 base
+window; the other PDFs supply the annual closures and January 15 amendment.
+
+The three sealed source IDs are, respectively:
+
+- `619daa17de902975f4d10247d2277819969573d40e21d03212d1b29c92c6dfb3`;
+- `4045763fb4d759aafd0027392d8daf50c51dd2f7834bab2fbcda555b97775bc6`;
+- `4deedb475933d5d76cfd7a5a20b33989fb3e612bb9ab93712a76ba4a87905619`.
+
+Materialization
+`e9c240e72447a3b0ad061dd2fe79cb617e7e36120f9e04f9757cc5fc5e87463a`
+covers 2026-01-01 through 2026-07-31 with 142 sessions and is cross-checked
+against the sealed July daily bundle. It deliberately stops before the August
+closing-auction transition. It remains manual, collection-only, and unusable
+for an alert.
+
 ## Promotion boundary
 
 Manual acquisition and human declarations cannot become
