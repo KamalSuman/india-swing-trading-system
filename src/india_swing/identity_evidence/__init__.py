@@ -1,4 +1,7 @@
-from .artifact_store import LocalIdentityEvidenceArtifactStore
+from .artifact_store import (
+    LocalIdentityEvidenceArtifactStore,
+    verify_stored_identity_evidence_provenance,
+)
 from .codec import encode_identity_evidence_declaration
 from .config import IDENTITY_EVIDENCE_ROOT_ENV, IdentityEvidenceConfig
 from .coverage import (
@@ -55,4 +58,5 @@ __all__ = [
     "StoredIdentityEvidenceArtifact",
     "build_identity_evidence_coverage",
     "encode_identity_evidence_declaration",
+    "verify_stored_identity_evidence_provenance",
 ]

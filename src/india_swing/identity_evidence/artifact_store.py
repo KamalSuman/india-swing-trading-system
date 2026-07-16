@@ -295,3 +295,31 @@ class LocalIdentityEvidenceArtifactStore:
                 raise IdentityEvidenceIntegrityError("identity evidence archive contains an unexpected entry")
             result.append(self.get(path.name))
         return tuple(result)
+
+
+def verify_stored_identity_evidence_provenance(
+    artifact: StoredIdentityEvidenceArtifact,
+) -> None:
+    """Re-open the sealed artifact and reject an in-memory graph substitution."""
+
+    if type(artifact) is not StoredIdentityEvidenceArtifact:
+        raise TypeError("identity evidence artifact must be exact")
+    try:
+        reloaded = LocalIdentityEvidenceArtifactStore(
+            artifact.path.parent.parent
+        ).get(artifact.manifest.artifact_id)
+    except (IdentityEvidenceNotFound, IdentityEvidenceConflict) as exc:
+        raise IdentityEvidenceIntegrityError(
+            "identity evidence sealed provenance is ambiguous or missing"
+        ) from exc
+    if (
+        reloaded.path.resolve() != artifact.path.resolve()
+        or reloaded.manifest != artifact.manifest
+        or reloaded.parsed != artifact.parsed
+        or reloaded.source_bytes != artifact.source_bytes
+        or reloaded.declaration_bytes != artifact.declaration_bytes
+        or reloaded.normalized_bytes != artifact.normalized_bytes
+    ):
+        raise IdentityEvidenceIntegrityError(
+            "identity evidence memory graph disagrees with sealed provenance"
+        )

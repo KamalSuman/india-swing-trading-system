@@ -50,6 +50,10 @@ The current vertical slice implements:
   for exact Listing circular PDFs and corporate-action CSVs, with declarations
   bound to exact candidate/requirement pairs and a coverage report that cannot
   adjudicate cases or assign stable IDs;
+- explicit human review bundles and a partial stable-identity materializer that
+  rejects duplicate or mismatched decisions, preserves one listing ID across a
+  same-series symbol rename, records only observed effective dates, and remains
+  collection-only even after assignment;
 - an explicit-predecessor daily collection runner that imports one session,
   derives prices and reconciliation, rebuilds the identity registry/queue, and
   persists one content-addressed completeness report without any implicit
@@ -84,7 +88,9 @@ official input, but they deliberately remain `COLLECTION_ONLY`; authenticated
 calendar provenance, adjudicated stable identity, liquidity, corporate actions,
 and multi-vintage completeness are still missing.
 The identity-evidence archive can collect official documents, but no reviewed
-decision or promotion layer has been implemented yet.
+decision has yet been supplied for the real queue. The reviewed-decision and
+partial stable-ID mechanism is implemented, but its real snapshot assigns zero
+identities until those decisions exist.
 Only synthetic decisions can pass the end-to-end demo today. Every such decision
 carries `execution_eligible=false`.
 
