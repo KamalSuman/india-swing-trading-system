@@ -46,6 +46,10 @@ The current vertical slice implements:
   detects rename candidates and identifier reuse without inventing delistings
   or assigning tradable stable IDs, plus a create-once complete adjudication
   queue that derives the official evidence required for every candidate;
+- a content-addressed, collection-only NSE identity/lifecycle evidence archive
+  for exact Listing circular PDFs and corporate-action CSVs, with declarations
+  bound to exact candidate/requirement pairs and a coverage report that cannot
+  adjudicate cases or assign stable IDs;
 - an explicit-predecessor daily collection runner that imports one session,
   derives prices and reconciliation, rebuilds the identity registry/queue, and
   persists one content-addressed completeness report without any implicit
@@ -79,6 +83,8 @@ universe artifacts. The security-master importer preserves and validates each
 official input, but they deliberately remain `COLLECTION_ONLY`; authenticated
 calendar provenance, adjudicated stable identity, liquidity, corporate actions,
 and multi-vintage completeness are still missing.
+The identity-evidence archive can collect official documents, but no reviewed
+decision or promotion layer has been implemented yet.
 Only synthetic decisions can pass the end-to-end demo today. Every such decision
 carries `execution_eligible=false`.
 
