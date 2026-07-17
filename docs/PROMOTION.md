@@ -45,7 +45,8 @@ python -m india_swing.promotion.cli evaluate-daily-run `
   --run-id <sealed-daily-run-id> `
   --history-start 2020-01-01 `
   --tick-size-snapshot-id <optional-tick-size-snapshot-id> `
-  --liquidity-snapshot-id <optional-liquidity-snapshot-id>
+  --liquidity-snapshot-id <optional-liquidity-snapshot-id> `
+  --universe-snapshot-id <optional-universe-snapshot-id>
 ```
 
 The command loads the run from `INDIA_SWING_DAILY_PIPELINE_ROOT`, derives only
@@ -62,7 +63,10 @@ stable listing identity and source provenance are promoted. A trailing-liquidity
 snapshot can similarly replace the generic liquidity placeholder through
 `--liquidity-snapshot-id`. The adapter preserves all snapshot reason codes and
 does not infer zero volume from absent traded-only Bhavcopy rows. Corporate
-actions remain explicitly missing until their source-backed importer exists.
+The source-backed broad-equity diagnostic can replace the generic universe
+placeholder through `--universe-snapshot-id`; it preserves every exact row and
+exclusion but remains unverified. Corporate actions remain explicitly missing
+until their source-backed importer exists.
 Model validation, risk authorization, and shadow operations remain alert-stage
 requirements rather than being inferred from a collection run.
 
@@ -78,3 +82,13 @@ the required 120 observed sessions. Promotion decision
 `b644426b912521a375fae13d30cf3d6d48eee673c4cd4c8745d2b00488a94500`
 binds this diagnostic and the 16 July tick-size snapshot to the sealed 16 July
 daily run; it correctly remains `COLLECTION_ONLY`.
+
+The current broad-universe snapshot is
+`f9dca3a8233f2249aee8455032c080cb670f8f1376cdd2fc747ecde3fdf05b48`.
+It audits 36,062 source rows and retains 21,133 unverified equities with no
+market-cap cutoff. Promotion decision
+`8c15742e40bdb3c5eaa3b3c757055a43c0439877e2bbde440c1fa0a6533d0634`
+binds the universe, liquidity, and tick-size diagnostics together. It remains
+collection-only because stable identity, point-in-time listing state, board,
+surveillance, calendar provenance, report date, and acquisition provenance are
+not verified.

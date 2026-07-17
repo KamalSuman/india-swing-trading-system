@@ -27,6 +27,7 @@ var/daily_pipeline/
 var/promotion/
 var/tick_sizes/
 var/liquidity/
+var/universe/
 var/trial_registry/
 input_drop/
 tmp/

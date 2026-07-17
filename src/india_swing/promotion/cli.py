@@ -20,6 +20,11 @@ from india_swing.tick_sizes import (
     TickSizeConfig,
     tick_size_promotion_evidence,
 )
+from india_swing.universe import (
+    CollectionUniverseConfig,
+    LocalCollectionUniverseSnapshotStore,
+    universe_promotion_evidence,
+)
 
 from .adapters import promotion_evidence_from_daily_run
 from .config import PromotionConfig
@@ -58,6 +63,7 @@ def parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--history-start", type=_date, required=True)
     evaluate.add_argument("--tick-size-snapshot-id")
     evaluate.add_argument("--liquidity-snapshot-id")
+    evaluate.add_argument("--universe-snapshot-id")
     show = commands.add_parser("show", help="show one promotion decision")
     show.add_argument("--decision-id", required=True)
     commands.add_parser("list", help="list promotion decisions")
@@ -110,6 +116,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if value.capability is not PromotionCapability.LIQUIDITY
                 ]
                 evidence.append(liquidity_promotion_evidence(liquidity_snapshot))
+            if args.universe_snapshot_id is not None:
+                universe_snapshot = LocalCollectionUniverseSnapshotStore(
+                    CollectionUniverseConfig.from_env().data_root,
+                    ReferenceDataConfig.from_env().data_root,
+                ).get(args.universe_snapshot_id)
+                evidence = [
+                    value
+                    for value in evidence
+                    if value.capability is not PromotionCapability.UNIVERSE
+                ]
+                evidence.append(universe_promotion_evidence(universe_snapshot))
             if args.tick_size_snapshot_id is not None:
                 tick_snapshot = LocalTickSizeSnapshotStore(
                     TickSizeConfig.from_env().data_root,

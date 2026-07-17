@@ -153,6 +153,10 @@ packages under `src/india_swing` are:
   sessions, with exact Decimal arithmetic, source-replay storage, a sanitized
   CLI, and promotion evidence. Missing traded-only rows are never interpreted
   as zero volume, and candidate keys are not promoted as stable identities.
+- `universe`: a collection-only, no-market-cap-cutoff audit of every sealed
+  security-master row. It retains the full source-classified equity scope,
+  records all exclusions and raw normal-market flags, and never invents stable
+  identity, board, listing-state, suspension, or surveillance facts.
 
 See `README.md`, `docs/BIAS_INVARIANTS.md`, `docs/CALENDAR_DATA.md`,
 `docs/DAILY_PIPELINE.md`, `docs/HISTORICAL_PRICES.md`, and
@@ -252,6 +256,19 @@ the original bytes rather than trusting a cached Python object.
   remain unverified, so the snapshot is `COLLECTION_ONLY` and non-actionable.
 - Promotion decision with this snapshot and the 16 July tick snapshot:
   `b644426b912521a375fae13d30cf3d6d48eee673c4cd4c8745d2b00488a94500`.
+
+### Broad collection-universe snapshot
+
+- Snapshot ID:
+  `f9dca3a8233f2249aee8455032c080cb670f8f1376cdd2fc747ecde3fdf05b48`
+- Source rows audited: 36,062.
+- In-scope unverified equities: 21,133; market-cap cutoff: none.
+- Exact exclusions: 14,906 non-equities and 23 test securities.
+- It binds calendar snapshot `1457b00b...5771f`, but both calendar provenance
+  and the manual master's report date remain unverified.
+- It is `COLLECTION_ONLY`, non-actionable, and assigns no stable identities.
+- Promotion decision binding universe, liquidity, and tick-size diagnostics:
+  `8c15742e40bdb3c5eaa3b3c757055a43c0439877e2bbde440c1fa0a6533d0634`.
 
 ### Cross-vintage identity baseline
 
@@ -475,7 +492,10 @@ python -m india_swing.identity_decisions.cli materialize `
    daily universes, stable listing identities, explicit nontrading state, and
    effective-dated tick sizes. Collection tick-size snapshots now exist, but
    still require stable-identity intervals and verified provenance. The
-   trailing-liquidity materializer also exists, but requires at least 120
+   broad collection-universe now preserves all source-classified equities with
+   no market-cap cutoff, but still requires adjudicated stable identities and
+   verified board/listing/surveillance facts. The trailing-liquidity materializer
+   also exists, but requires at least 120
    verified sessions, complete calendar/nontrading coverage, and stable listing
    identity before promotion. Feed the promoted artifacts to the implemented
    sealed dataset assembler. The current two-session real archive remains

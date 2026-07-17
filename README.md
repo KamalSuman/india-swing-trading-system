@@ -40,6 +40,10 @@ The current vertical slice implements:
   security master's paise-denominated `BidIntrvl`, with exact Decimal conversion,
   reserved-field change detection, create-once storage, CLI, and promotion
   evidence;
+- a replay-verified collection universe that audits every security-master row,
+  retains all 21,133 source-classified equities without a market-cap cutoff,
+  records exact exclusions, and refuses to assign provisional stable identities
+  or tradability;
 - a replay-verified trailing-liquidity materializer that computes exact median
   traded value, volume, and available delivery percentage from sealed EOD
   sessions, while refusing to treat traded-row-only coverage as zero-volume or
@@ -146,6 +150,7 @@ The promotion stages and corporate-action boundary are documented in
 `docs/PROMOTION.md` and `docs/CORPORATE_ACTIONS.md`.
 The security-master tick-size boundary is documented in `docs/TICK_SIZES.md`.
 The trailing-liquidity collection boundary is documented in `docs/LIQUIDITY.md`.
+The broad collection-universe boundary is documented in `docs/UNIVERSE.md`.
 The cross-vintage identity boundary is documented in
 `docs/IDENTITY_REGISTRY.md`.
 The explicit daily orchestration and predecessor boundary is documented in
