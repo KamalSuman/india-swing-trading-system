@@ -32,5 +32,8 @@ var/trial_registry/
 input_drop/
 tmp/
 
+# Local dispatcher runtime state, transcripts, lock, and attempt claims
+agent-control/dispatcher/logs/
+
 # Quarantined fabricated/tampering artifacts — never commit
 quarantine_do_not_deploy/

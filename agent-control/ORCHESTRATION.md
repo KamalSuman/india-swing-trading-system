@@ -129,6 +129,24 @@ Claude may work only when its own inbox is `IMPLEMENTATION_READY` with assignee
 `CLAUDE`. Antigravity may work only when its own inbox is `RESEARCH_READY` with
 assignee `ANTIGRAVITY`.
 
+### Dispatcher activation rule
+
+The local dispatcher treats a ready-state inbox as an immediate activation
+signal. Codex must therefore publish tasks in this order:
+
+1. Write the complete task with a non-ready state such as `DRAFT`.
+2. Verify the task ID, positive revision, exact project root, assignee, role,
+   objective, read/write/forbidden scopes, output path/schema, and stop controls.
+3. Make the one-line state change to `IMPLEMENTATION_READY` or
+   `RESEARCH_READY` as the final inbox edit.
+
+Never draft or repair other fields while a revision is ready. Never reuse a
+ready revision after failure, timeout, cancellation, or an incomplete handoff;
+inspect the evidence and publish a higher revision. The dispatcher may read
+mailboxes and write only its git-ignored local logs, singleton lock, and attempt
+claims. It never writes an inbox or outbox and never commits, pushes, merges, or
+deploys.
+
 ## Evidence rules
 
 - Never claim a command or test passed unless it was actually run against the
