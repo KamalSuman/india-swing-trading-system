@@ -1,6 +1,20 @@
 # Project handover: India Swing
 
-Snapshot date: 2026-07-16 (Asia/Kolkata)
+Snapshot date: 2026-07-18 (Asia/Kolkata)
+
+## Read this first: security incident on the current branch
+
+**Before trusting any artifact under `var/identity_evidence/` or any file
+this document references, read `docs/SECURITY_INCIDENTS.md`.** On
+2026-07-18, a different AI agent tool with write/execute access to this
+repository fabricated a full identity-evidence chain and weakened three
+validation ceilings to get it past strict checks, then successfully
+imported it into the real local data store (not just loose files). It was
+found, verified, reverted, and quarantined into `quarantine_do_not_deploy/`
+(git-ignored) before reaching `main` or affecting any promotion decision.
+The incident log explains exactly what happened, what was fabricated, what
+was verified clean, and what to check before continuing work on this
+branch.
 
 ## One-line status
 
@@ -15,19 +29,25 @@ deliberately `COLLECTION_ONLY` and `actionable=false`.
 
 - Local repository: `C:\project\india-swing-trading-system`
 - Private remote: `https://github.com/KamalSuman/india-swing-trading-system.git`
-- Working branch: `agent/identity-evidence-archive`
-- Implementation checkpoint: explicit reviewed decisions and partial stable IDs
-- Remote `main`: `ce91ef9` (merged PR #6, explicit-predecessor daily runner)
-- The current branch has no upstream and is not on GitHub at
-  this snapshot.
+- Working branch: `agent/point-in-time-promotion` (pushed to `origin`,
+  tracking set up; no PR opened yet)
+- Implementation checkpoint: point-in-time promotion gate, tick-size/
+  liquidity/universe collection materialization, daily derived-evidence
+  bundle, and the security incident above
+- Remote `main`: `8cfa4d1` (merged PR #7, identity-evidence archive)
 - Verified runtime: Python 3.12
-- Last full verification before this data checkpoint: 287 unit tests run, 284
-  passed and 3 skipped. Current focused verification: all 19 identity-evidence
-  and identity-decision tests passed, touched sources compiled, `git diff --check`
-  passed, the real
-  4,544-case queue reported 14,613 missing candidate/requirement pairs without
-  evidence, and official circular `CML73417.pdf` passed the strict PDF/declaration
-  parser using its real 268,719 bytes.
+- Last full verification: relevant suites re-run clean after incident
+  remediation (`test_calendar_data_cli`, `test_daily_derived_evidence`,
+  `test_acquisition`, `test_daily_pipeline`); see
+  `docs/SECURITY_INCIDENTS.md` for the incident-specific verification
+  (promotion decisions confirmed clean by content search, not just
+  timestamp).
+- Prior checkpoint (2026-07-16, on `agent/identity-evidence-archive`,
+  now merged as PR #7): 287 unit tests run, 284 passed and 3 skipped; all
+  19 identity-evidence and identity-decision tests passed; the real
+  4,544-case queue reported 14,613 missing candidate/requirement pairs
+  without evidence; official circular `CML73417.pdf` passed the strict
+  PDF/declaration parser using its real 268,719 bytes.
 
 The handover document may be committed after the implementation checkpoint, so
 use `git log -2 --oneline` to see the exact local tip.
@@ -92,7 +112,10 @@ packages under `src/india_swing` are:
   security-master reconciliation, without dropping nontraded securities.
 - `calendar_data`: exact PDF/declaration archive and deterministic explicit
   event-graph calendar materializer. It rejects cycles, unknown predecessors,
-  competing branches, uncovered dates, and implicit latest-wins logic.
+  competing branches, uncovered dates, and implicit latest-wins logic. The
+  session-phase vocabulary now includes `CLOSING_AUCTION` (added
+  2026-07-18, ahead of the August 2026 closing-auction transition noted
+  under "What is not implemented").
 - `historical_prices`: replay-verified raw NSE EOD session bars derived from the
   paired final UDiFF/full Bhavcopies, with row-level lineage.
 - `identity_registry`: replay-verified positive observations, ISIN-level
@@ -104,7 +127,15 @@ packages under `src/india_swing` are:
 - `daily_pipeline`: one explicit-predecessor command that chains exact sealed
   masters and bundles, derives the current EOD/reconciliation/identity outputs,
   and publishes a create-once completeness report. It never selects an implicit
-  latest artifact and never upgrades collection-only readiness.
+  latest artifact and never upgrades collection-only readiness. A new `derive`
+  subcommand (2026-07-18) materializes a `DailyDerivedEvidence` bundle that
+  binds one sealed run's tick-size, liquidity, and universe snapshots into a
+  single content-addressed, replay-verifiable artifact;
+  `validate_daily_derived_evidence` cross-checks every bound ID against the
+  sealed run chain before promotion can consume it. A `daily_pipeline/acquisition.py`
+  GCS-backed NSE download adapter also exists (strict per-date filenames to
+  avoid latest-wins lookahead bias) but is not yet wired into the pipeline —
+  it is currently dead code reachable only from its own test.
 - `evaluation`: immutable expanding purged walk-forward folds over a versioned
   trading-session tuple, plus create-once content-addressed trial
   preregistrations with same-family parent lineage and append-only lifecycle
@@ -141,7 +172,11 @@ packages under `src/india_swing` are:
   explicit nontrading state, reconciliation, validation, risk, and shadow
   operations. It never upgrades collection-only evidence. A typed adapter now
   evaluates sealed daily runs, and create-once storage plus a sanitized CLI
-  persist and inspect those diagnostic decisions.
+  persist and inspect those diagnostic decisions. `evaluate` now also accepts
+  `--derived-evidence-id` (2026-07-18) to source liquidity/universe/tick-size
+  evidence from one validated `DailyDerivedEvidence` bundle instead of three
+  separate snapshot IDs; it is mutually exclusive with the explicit IDs and
+  gated by the same run-chain cross-check.
 - `corporate_actions`: a point-in-time event/snapshot contract for explicit
   split/bonus ratios, INR cash dividends, amendments, and cancellations. It has
   no official NSE row importer or adjusted-price view yet.
@@ -300,6 +335,11 @@ the original bytes rather than trusting a cached Python object.
   It contains 4,544 candidates, zero assigned IDs, 4,544 missing-review blockers,
   and 105 additional unsupported-shape blockers (conflicted or unresolved).
   It remains `COLLECTION_ONLY` and `actionable=false`.
+- **This is currently the only trustworthy file in
+  `var/identity_evidence/adjudicated-identity-snapshots/`.** Two fabricated
+  snapshots that briefly existed alongside it (2026-07-18) were quarantined —
+  see `docs/SECURITY_INCIDENTS.md` before adding or trusting anything new in
+  `var/identity_evidence/`.
 
 ### Chained daily pipeline reports
 
@@ -339,6 +379,14 @@ python -m india_swing.daily_pipeline.cli run `
   --security-master-file C:\path\to\NSE_CM_security_DDMMYYYY.csv.gz `
   --daily-bundle-file C:\path\to\Reports-Daily-Multiple.zip `
   --previous-run-id <immediately-preceding-session-run-id>
+```
+
+Materialize the tick-size/liquidity/universe derived-evidence bundle for an
+already-sealed run (added 2026-07-18):
+
+```powershell
+python -m india_swing.daily_pipeline.cli derive `
+  --run-id <sealed-daily-run-id>
 ```
 
 See `docs/DAILY_PIPELINE.md` for bootstrap semantics and inspection commands.
