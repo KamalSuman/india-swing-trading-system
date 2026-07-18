@@ -1,8 +1,19 @@
 # Low-cost GCP MVP
 
-Status: architecture design only. This repository does not yet contain a
-container image, deployable Cloud Run entry point, infrastructure-as-code, cloud
-persistence, or a notification adapter.
+Status (updated 2026-07-18): a first deployment pass exists — see
+`Dockerfile`, `deploy.sh`, and `DEPLOYMENT_HANDOVER.md` at the repository
+root for the actual current state of the `indian-swing-trading-bot` GCP
+project. This document below remains the target architecture; where it
+differs from `DEPLOYMENT_HANDOVER.md`, the handover doc reflects reality.
+
+Notably still true: the `rss-collector` service described below has **no
+real application logic or entrypoint yet** — its Cloud Run deployment step
+is currently disabled in `deploy.sh` rather than shipped with a placeholder
+`python -m http.server` (an earlier version of the script did this; it was
+removed as insufficiently secure even behind Cloud Run authentication). The
+`eod-swing` Cloud Run Job and its scheduler are deployed and configured.
+There is still no cloud persistence of real trading data, and no
+notification adapter.
 
 This deployment is for an end-of-day Indian equity swing-alert system. It collects official events continuously, runs one batch analysis after the market closes, and sends a recommendation for manual review. It does **not** place, modify, or cancel broker orders.
 
