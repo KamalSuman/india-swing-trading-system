@@ -98,7 +98,7 @@ class CalendarDataCliTests(unittest.TestCase):
                                 "--coverage-end",
                                 "2026-07-19",
                                 "--cutoff",
-                                "2026-07-17T16:00:00+00:00",
+                                "2027-01-01T16:00:00+00:00",
                             ]
                         ),
                         0,

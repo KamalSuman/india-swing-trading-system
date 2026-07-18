@@ -7,6 +7,12 @@ from datetime import date
 from typing import Sequence
 
 from india_swing.daily_pipeline.config import DailyPipelineConfig
+from india_swing.daily_pipeline.derived_evidence import (
+    validate_daily_derived_evidence,
+)
+from india_swing.daily_pipeline.derived_evidence_store import (
+    LocalDailyDerivedEvidenceStore,
+)
 from india_swing.daily_pipeline.store import LocalDailyPipelineRunStore
 from india_swing.historical_prices.config import HistoricalPricesConfig
 from india_swing.liquidity import (
@@ -64,6 +70,7 @@ def parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--tick-size-snapshot-id")
     evaluate.add_argument("--liquidity-snapshot-id")
     evaluate.add_argument("--universe-snapshot-id")
+    evaluate.add_argument("--derived-evidence-id")
     show = commands.add_parser("show", help="show one promotion decision")
     show.add_argument("--decision-id", required=True)
     commands.add_parser("list", help="list promotion decisions")
@@ -99,10 +106,57 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = parser().parse_args(argv)
         store = LocalPromotionDecisionStore(PromotionConfig.from_env().data_root)
         if args.command == "evaluate-daily-run":
-            run = LocalDailyPipelineRunStore(
-                DailyPipelineConfig.from_env().data_root
-            ).get(args.run_id)
+            daily_config = DailyPipelineConfig.from_env()
+            run_store = LocalDailyPipelineRunStore(daily_config.data_root)
+            run = run_store.get(args.run_id)
             evidence = list(promotion_evidence_from_daily_run(run))
+            explicit_snapshot_ids = (
+                args.tick_size_snapshot_id,
+                args.liquidity_snapshot_id,
+                args.universe_snapshot_id,
+            )
+            if args.derived_evidence_id is not None and any(explicit_snapshot_ids):
+                raise PromotionArgumentError("invalid promotion arguments")
+            if args.derived_evidence_id is not None:
+                derived = LocalDailyDerivedEvidenceStore(
+                    daily_config.data_root
+                ).get(args.derived_evidence_id)
+                validate_daily_derived_evidence(
+                    derived,
+                    run=run,
+                    run_store=run_store,
+                )
+                historical_config = HistoricalPricesConfig.from_env()
+                liquidity_snapshot = LocalLiquiditySnapshotStore(
+                    LiquidityConfig.from_env().data_root,
+                    historical_config.data_root,
+                    historical_config.daily_reports_root,
+                ).get(derived.liquidity_snapshot_id)
+                universe_snapshot = LocalCollectionUniverseSnapshotStore(
+                    CollectionUniverseConfig.from_env().data_root,
+                    ReferenceDataConfig.from_env().data_root,
+                ).get(derived.universe_snapshot_id)
+                tick_snapshot = LocalTickSizeSnapshotStore(
+                    TickSizeConfig.from_env().data_root,
+                    ReferenceDataConfig.from_env().data_root,
+                ).get(derived.tick_size_snapshot_id)
+                derived_capabilities = {
+                    PromotionCapability.LIQUIDITY,
+                    PromotionCapability.TICK_SIZES,
+                    PromotionCapability.UNIVERSE,
+                }
+                evidence = [
+                    value
+                    for value in evidence
+                    if value.capability not in derived_capabilities
+                ]
+                evidence.extend(
+                    (
+                        liquidity_promotion_evidence(liquidity_snapshot),
+                        universe_promotion_evidence(universe_snapshot),
+                        tick_size_promotion_evidence(tick_snapshot),
+                    )
+                )
             if args.liquidity_snapshot_id is not None:
                 historical_config = HistoricalPricesConfig.from_env()
                 liquidity_snapshot = LocalLiquiditySnapshotStore(

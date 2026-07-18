@@ -16,10 +16,22 @@ from india_swing.historical_prices.config import HistoricalPricesConfig
 from india_swing.identity_registry.adjudication_store import LocalIdentityAdjudicationQueueStore
 from india_swing.identity_registry.artifact_store import LocalIdentityRegistryStore
 from india_swing.identity_registry.config import IdentityRegistryConfig
+from india_swing.liquidity import LiquidityConfig, LocalLiquiditySnapshotStore
 from india_swing.reference_data.artifact_store import LocalReferenceArtifactStore
 from india_swing.reference_data.config import ReferenceDataConfig
+from india_swing.tick_sizes import LocalTickSizeSnapshotStore, TickSizeConfig
+from india_swing.universe import (
+    CollectionUniverseConfig,
+    LocalCollectionUniverseSnapshotStore,
+)
 
 from .config import DailyPipelineConfig
+from .derived_evidence import (
+    DailyDerivedEvidence,
+    daily_run_chain,
+    materialize_daily_derived_evidence,
+)
+from .derived_evidence_store import LocalDailyDerivedEvidenceStore
 from .models import DailyPipelineRun
 from .runner import run_daily_pipeline
 from .store import LocalDailyPipelineRunStore
@@ -63,6 +75,13 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--security-master-file", type=Path, required=True)
     run.add_argument("--daily-bundle-file", type=Path, required=True)
     run.add_argument("--previous-run-id")
+    run.add_argument("--minimum-history-sessions", type=int, default=120)
+    derive = commands.add_parser(
+        "derive",
+        help="materialize tick, liquidity, and universe evidence for one run",
+    )
+    derive.add_argument("--run-id", required=True)
+    derive.add_argument("--minimum-history-sessions", type=int, default=120)
     show = commands.add_parser("show", help="show one persisted daily run")
     show.add_argument("--run-id", required=True)
     commands.add_parser("list", help="list persisted daily runs")
@@ -90,6 +109,59 @@ def _summary(run: DailyPipelineRun) -> dict[str, object]:
         "actionable": run.actionable,
         "stable_identity_assigned": run.stable_identity_assigned,
     }
+
+
+def _derived_summary(value: DailyDerivedEvidence) -> dict[str, object]:
+    if type(value) is not DailyDerivedEvidence:
+        raise TypeError("derived summary requires exact evidence")
+    value.verify_content_identity()
+    return {
+        "derived_evidence_id": value.evidence_id,
+        "tick_size_snapshot_id": value.tick_size_snapshot_id,
+        "liquidity_snapshot_id": value.liquidity_snapshot_id,
+        "universe_snapshot_id": value.universe_snapshot_id,
+        "liquidity_source_session_count": len(value.historical_price_artifact_ids),
+        "minimum_history_sessions": value.minimum_history_sessions,
+        "reason_codes": list(value.reason_codes),
+    }
+
+
+def _derive(
+    *,
+    run: DailyPipelineRun,
+    run_store: LocalDailyPipelineRunStore,
+    reference_store: LocalReferenceArtifactStore,
+    historical_store: LocalHistoricalPriceArtifactStore,
+    pipeline_root: Path,
+    minimum_history_sessions: int,
+) -> DailyDerivedEvidence:
+    if type(minimum_history_sessions) is not int or minimum_history_sessions <= 0:
+        raise DailyPipelineArgumentError("invalid daily-pipeline arguments")
+    reference_root = ReferenceDataConfig.from_env().data_root
+    historical_config = HistoricalPricesConfig.from_env()
+    tick_store = LocalTickSizeSnapshotStore(
+        TickSizeConfig.from_env().data_root,
+        reference_root,
+    )
+    liquidity_store = LocalLiquiditySnapshotStore(
+        LiquidityConfig.from_env().data_root,
+        historical_config.data_root,
+        historical_config.daily_reports_root,
+    )
+    universe_store = LocalCollectionUniverseSnapshotStore(
+        CollectionUniverseConfig.from_env().data_root,
+        reference_root,
+    )
+    value = materialize_daily_derived_evidence(
+        runs=daily_run_chain(run, run_store=run_store),
+        reference_store=reference_store,
+        historical_store=historical_store,
+        tick_store=tick_store,
+        liquidity_store=liquidity_store,
+        universe_store=universe_store,
+        minimum_history_sessions=minimum_history_sessions,
+    )
+    return LocalDailyDerivedEvidenceStore(pipeline_root).publish(value)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -134,7 +206,42 @@ def main(argv: Sequence[str] | None = None) -> int:
                 adjudication_store=adjudication_store,
                 run_store=run_store,
             )
-            response = {"status": "COMPLETE", "kind": "DAILY_PIPELINE_RUN", **_summary(value)}
+            derived = _derive(
+                run=value,
+                run_store=run_store,
+                reference_store=reference_store,
+                historical_store=historical_store,
+                pipeline_root=DailyPipelineConfig.from_env().data_root,
+                minimum_history_sessions=args.minimum_history_sessions,
+            )
+            response = {
+                "status": "COMPLETE",
+                "kind": "DAILY_PIPELINE_RUN",
+                **_summary(value),
+                **_derived_summary(derived),
+            }
+        elif args.command == "derive":
+            reference_config = ReferenceDataConfig.from_env()
+            historical_config = HistoricalPricesConfig.from_env()
+            reference_store = LocalReferenceArtifactStore(reference_config.data_root)
+            historical_store = LocalHistoricalPriceArtifactStore(
+                historical_config.data_root,
+                historical_config.daily_reports_root,
+            )
+            run = run_store.get(args.run_id)
+            derived = _derive(
+                run=run,
+                run_store=run_store,
+                reference_store=reference_store,
+                historical_store=historical_store,
+                pipeline_root=DailyPipelineConfig.from_env().data_root,
+                minimum_history_sessions=args.minimum_history_sessions,
+            )
+            response = {
+                "status": "COMPLETE",
+                "kind": "DAILY_DERIVED_EVIDENCE",
+                **_derived_summary(derived),
+            }
         elif args.command == "show":
             response = {
                 "status": "COMPLETE",
