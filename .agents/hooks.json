@@ -1,0 +1,32 @@
+{
+  "antigravity-read-only-gate": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "replace_file_content|multi_replace_file_content|run_command|manage_task|schedule|ask_permission|invoke_subagent|define_subagent|send_message|manage_subagents|generate_image",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .agents/hooks/deny-mutation.ps1",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "antigravity-exact-outbox-gate": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "write_to_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File .agents/hooks/gate-antigravity-outbox.ps1",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
