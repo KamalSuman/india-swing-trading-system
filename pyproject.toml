@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Bias-aware Indian equity swing-trade research and alert pipeline"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["google-cloud-storage==3.13.0"]
 
 [project.optional-dependencies]
 kite = ["kiteconnect==5.2.0"]
