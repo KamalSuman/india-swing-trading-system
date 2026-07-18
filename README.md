@@ -29,6 +29,25 @@ The current vertical slice implements:
   that require gap-free versioned sessions, one universe snapshot per session,
   adjudicated stable listing/ISIN identity, exact missing-row evidence, and
   effective-dated tick sizes before producing baseline inputs;
+- a content-bound promotion gate that independently reports research, backtest,
+  and alert blockers for missing, partial, synthetic, future-known, or
+  collection-only evidence instead of laundering ingestion into readiness,
+  plus create-once storage and a sanitized CLI for daily-run diagnostics;
+- a point-in-time corporate-action ledger contract that preserves amendments
+  and cancellations, supports explicit split/bonus ratios and cash dividends,
+  and refuses unsafe automatic factors for complex actions;
+- a replay-verified collection-only tick-size materializer sourced from the NSE
+  security master's paise-denominated `BidIntrvl`, with exact Decimal conversion,
+  reserved-field change detection, create-once storage, CLI, and promotion
+  evidence;
+- a replay-verified collection universe that audits every security-master row,
+  retains all 21,133 source-classified equities without a market-cap cutoff,
+  records exact exclusions, and refuses to assign provisional stable identities
+  or tradability;
+- a replay-verified trailing-liquidity materializer that computes exact median
+  traded value, volume, and available delivery percentage from sealed EOD
+  sessions, while refusing to treat traded-row-only coverage as zero-volume or
+  point-in-time universe evidence;
 - evidence-based post-trade reviews that preserve unresolved causes;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually
@@ -127,6 +146,11 @@ The positive-date and all-row diagnostic boundary is documented in
 `docs/EVIDENCE_RECONCILIATION.md`.
 The event-sourced schedule boundary is documented in `docs/CALENDAR_DATA.md`.
 The raw historical-price boundary is documented in `docs/HISTORICAL_PRICES.md`.
+The promotion stages and corporate-action boundary are documented in
+`docs/PROMOTION.md` and `docs/CORPORATE_ACTIONS.md`.
+The security-master tick-size boundary is documented in `docs/TICK_SIZES.md`.
+The trailing-liquidity collection boundary is documented in `docs/LIQUIDITY.md`.
+The broad collection-universe boundary is documented in `docs/UNIVERSE.md`.
 The cross-vintage identity boundary is documented in
 `docs/IDENTITY_REGISTRY.md`.
 The explicit daily orchestration and predecessor boundary is documented in
@@ -232,7 +256,7 @@ same-session EOD finality contract, stable listing/universe lineage, main-board
 eligibility, deterministic
 risk gates, provider-output identity binding, explicit lineage, and local audit
 integrity. An authenticated point-in-time NSE calendar, historical security-master
-and lifecycle vintages, corporate-action
+and lifecycle vintages, an official corporate-action importer and verified
 vintages, historical Indian charge schedules, engine-generated evaluation metrics, trial
 registry, immutable cloud storage, and live adapters remain required before any
 real alert.

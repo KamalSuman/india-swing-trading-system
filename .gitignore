@@ -24,6 +24,13 @@ var/historical_prices/
 var/identity_registry/
 var/identity_evidence/
 var/daily_pipeline/
+var/promotion/
+var/tick_sizes/
+var/liquidity/
+var/universe/
 var/trial_registry/
 input_drop/
 tmp/
+
+# Quarantined fabricated/tampering artifacts — never commit
+quarantine_do_not_deploy/

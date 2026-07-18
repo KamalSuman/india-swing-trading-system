@@ -135,6 +135,28 @@ packages under `src/india_swing` are:
   synthetic/verified-data trial performance.
 - Synthetic demo adapters for Kronos, signals, and TradingAgents. These prove
   contracts only; they are not real models or performance evidence.
+- `promotion`: a content-bound, fail-closed gate that reports independent
+  research, backtest, and alert blockers across calendar, stable identity,
+  universe, prices, corporate actions, liquidity, surveillance, tick sizes,
+  explicit nontrading state, reconciliation, validation, risk, and shadow
+  operations. It never upgrades collection-only evidence. A typed adapter now
+  evaluates sealed daily runs, and create-once storage plus a sanitized CLI
+  persist and inspect those diagnostic decisions.
+- `corporate_actions`: a point-in-time event/snapshot contract for explicit
+  split/bonus ratios, INR cash dividends, amendments, and cancellations. It has
+  no official NSE row importer or adjusted-price view yet.
+- `tick_sizes`: collection-only observations derived from the security-master
+  `BidIntrvl` paise field, with exact Decimal conversion, reserved `TickSz`
+  change detection, source-replay storage, sanitized CLI, and promotion
+  evidence. Stable-identity effective intervals are not yet available.
+- `liquidity`: collection-only trailing medians derived from sealed raw EOD
+  sessions, with exact Decimal arithmetic, source-replay storage, a sanitized
+  CLI, and promotion evidence. Missing traded-only rows are never interpreted
+  as zero volume, and candidate keys are not promoted as stable identities.
+- `universe`: a collection-only, no-market-cap-cutoff audit of every sealed
+  security-master row. It retains the full source-classified equity scope,
+  records all exclusions and raw normal-market flags, and never invents stable
+  identity, board, listing-state, suspension, or surveillance facts.
 
 See `README.md`, `docs/BIAS_INVARIANTS.md`, `docs/CALENDAR_DATA.md`,
 `docs/DAILY_PIPELINE.md`, `docs/HISTORICAL_PRICES.md`, and
@@ -211,6 +233,42 @@ the original bytes rather than trusting a cached Python object.
 - Price basis: `RAW_UNADJUSTED`
 - Coverage: `TRADED_ROWS_ONLY`
 - Readiness: `COLLECTION_ONLY`; actionable: false
+
+### Collection tick-size snapshots
+
+- 2026-07-15 snapshot:
+  `a7af0ef8ec7d5d6222f7b23224a6fdb909fdbb31723ad280c505871dc178499b`
+- 2026-07-16 snapshot:
+  `c7ea519186419a7145be09ff736e66ac55187ba60b72e664b58d1fc8e2eb8cb8`
+- Each contains 21,133 retained equity observations sourced from `BidIntrvl`.
+- Observed paise values are 1, 5, 10, 25, 50, 100, and 500.
+- Both remain `COLLECTION_ONLY`, non-actionable, and unresolved to stable
+  listing identities.
+
+### Collection liquidity snapshot
+
+- Snapshot ID:
+  `b1b9cf5ca6b9edfda61ee0e0cb0365c8852914ac9de9a85f189da2bde97637ea`
+- Sources: sealed 15 and 16 July raw EOD artifacts, 6,848 total traded rows.
+- Candidate `(validated ISIN, series)` groups: 3,574.
+- Required minimum history: 120 observed sessions; candidates meeting it: zero.
+- Coverage is only `TRADED_ROWS_ONLY`; calendar continuity and stable identity
+  remain unverified, so the snapshot is `COLLECTION_ONLY` and non-actionable.
+- Promotion decision with this snapshot and the 16 July tick snapshot:
+  `b644426b912521a375fae13d30cf3d6d48eee673c4cd4c8745d2b00488a94500`.
+
+### Broad collection-universe snapshot
+
+- Snapshot ID:
+  `f9dca3a8233f2249aee8455032c080cb670f8f1376cdd2fc747ecde3fdf05b48`
+- Source rows audited: 36,062.
+- In-scope unverified equities: 21,133; market-cap cutoff: none.
+- Exact exclusions: 14,906 non-equities and 23 test securities.
+- It binds calendar snapshot `1457b00b...5771f`, but both calendar provenance
+  and the manual master's report date remain unverified.
+- It is `COLLECTION_ONLY`, non-actionable, and assigns no stable identities.
+- Promotion decision binding universe, liquidity, and tick-size diagnostics:
+  `8c15742e40bdb3c5eaa3b3c757055a43c0439877e2bbde440c1fa0a6533d0634`.
 
 ### Cross-vintage identity baseline
 
@@ -432,10 +490,19 @@ python -m india_swing.identity_decisions.cli materialize `
    it. This remains the key survivorship-bias boundary before backtesting.
 6. Build audited promotion/import paths for point-in-time verified calendars,
    daily universes, stable listing identities, explicit nontrading state, and
-   effective-dated tick sizes. Feed them to the implemented sealed dataset
-   assembler. The current two-session real archive remains ineligible.
-7. Extend the archived corporate-action CSV source into normalized, effective-
-   dated adjustment events using real archived rows and explicit amendment rules.
+   effective-dated tick sizes. Collection tick-size snapshots now exist, but
+   still require stable-identity intervals and verified provenance. The
+   broad collection-universe now preserves all source-classified equities with
+   no market-cap cutoff, but still requires adjudicated stable identities and
+   verified board/listing/surveillance facts. The trailing-liquidity materializer
+   also exists, but requires at least 120
+   verified sessions, complete calendar/nontrading coverage, and stable listing
+   identity before promotion. Feed the promoted artifacts to the implemented
+   sealed dataset assembler. The current two-session real archive remains
+   ineligible.
+7. Connect the implemented corporate-action event/snapshot contract to an
+   official NSE CSV importer, then create separately versioned, cutoff-specific
+   adjustment views using real archived rows and explicit amendment rules.
 8. Evaluate the implemented deterministic baseline on point-in-time verified
    history with realistic Indian costs, slippage, liquidity, delistings, and
    registered trials.
