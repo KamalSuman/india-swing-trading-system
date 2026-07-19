@@ -793,6 +793,132 @@ class LandingLineageManifestReverificationSanitizationTests(unittest.TestCase):
         self.assertNotIn(secret_bucket, str(ctx.exception))
 
 
+class LandingLineageContentIdentityVerificationTests(unittest.TestCase):
+    """Regression coverage for the revision-11 review finding: a
+    LandingInputLineage whose frozen fields or lineage_id were mutated via
+    object.__setattr__ after construction must be rejected by
+    verify_content_identity() with a static sanitized LandingLineageError,
+    never a raw TypeError/AttributeError or a value-bearing message.
+    """
+
+    def _valid_lineage(self) -> LandingInputLineage:
+        return LandingInputLineage(
+            schema_version=LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+            manifest_sha256=hashlib.sha256(b"manifest").hexdigest(),
+            manifest_knowledge_time=datetime(2026, 7, 16, 13, 30, 0, tzinfo=timezone.utc),
+            binding_not_before=_NOT_BEFORE,
+            binding_cutoff=_CUTOFF,
+            target_session=_TARGET_SESSION,
+            security_master=_valid_object_lineage(AcquisitionFileType.SECURITY_MASTER),
+            daily_bundle=_valid_object_lineage(AcquisitionFileType.DAILY_BUNDLE),
+        )
+
+    def test_unmutated_lineage_verifies(self) -> None:
+        self._valid_lineage().verify_content_identity()
+
+    def test_verification_performs_no_mutation(self) -> None:
+        lineage = self._valid_lineage()
+        before = {f.name: getattr(lineage, f.name) for f in dataclasses.fields(lineage)}
+        lineage.verify_content_identity()
+        after = {f.name: getattr(lineage, f.name) for f in dataclasses.fields(lineage)}
+        self.assertEqual(before, after)
+
+    def test_rejects_mutated_lineage_id(self) -> None:
+        lineage = self._valid_lineage()
+        object.__setattr__(lineage, "lineage_id", "0" * 64)
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_malformed_lineage_id(self) -> None:
+        for bad_lineage_id in ("not-a-hash", "0" * 63, "A" * 64, None, 12345):
+            lineage = self._valid_lineage()
+            object.__setattr__(lineage, "lineage_id", bad_lineage_id)
+            with self.assertRaises(LandingLineageError):
+                lineage.verify_content_identity()
+
+    def test_rejects_mutated_nested_generation(self) -> None:
+        # Otherwise-valid primitive: still a positive int64 generation.
+        lineage = self._valid_lineage()
+        object.__setattr__(lineage.security_master, "generation", 999)
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_mutated_nested_hash(self) -> None:
+        lineage = self._valid_lineage()
+        other_hash = hashlib.sha256(b"attacker-content").hexdigest()
+        object.__setattr__(lineage.daily_bundle, "sha256_hash", other_hash)
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_swapped_nested_role(self) -> None:
+        lineage = self._valid_lineage()
+        object.__setattr__(lineage.security_master, "file_type", AcquisitionFileType.DAILY_BUNDLE)
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_mutated_nested_path(self) -> None:
+        lineage = self._valid_lineage()
+        object.__setattr__(
+            lineage.security_master, "object_name", "landing/../secrets/NSE_CM_security_16072026.csv.gz"
+        )
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_mutated_nested_session(self) -> None:
+        lineage = self._valid_lineage()
+        object.__setattr__(lineage.security_master, "target_session", date(2026, 7, 17))
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_wrong_type_nested_object(self) -> None:
+        lineage = self._valid_lineage()
+        object.__setattr__(lineage, "security_master", "not-a-lineage-object")
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_non_datetime_binding_cutoff(self) -> None:
+        lineage = self._valid_lineage()
+        object.__setattr__(lineage, "binding_cutoff", "2026-07-16T23:59:59Z")
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_naive_manifest_knowledge_time(self) -> None:
+        lineage = self._valid_lineage()
+        object.__setattr__(lineage, "manifest_knowledge_time", datetime(2026, 7, 16, 13, 30, 0))
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_mutated_schema_version(self) -> None:
+        lineage = self._valid_lineage()
+        object.__setattr__(lineage, "schema_version", "nse-cm-landing-input-lineage/v2")
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_injected_secret_bucket_never_appears_in_error(self) -> None:
+        lineage = self._valid_lineage()
+        secret = "secret-mutated-bucket-do-not-leak-8e1d"
+        object.__setattr__(lineage.security_master, "bucket", secret)
+        with self.assertRaises(LandingLineageError) as ctx:
+            lineage.verify_content_identity()
+        self.assertNotIn(secret, str(ctx.exception))
+
+    def test_injected_secret_hash_never_appears_in_error(self) -> None:
+        lineage = self._valid_lineage()
+        secret = hashlib.sha256(b"SECRET-MUTATED-CONTENT-DO-NOT-LEAK").hexdigest()
+        object.__setattr__(lineage, "manifest_sha256", secret)
+        with self.assertRaises(LandingLineageError) as ctx:
+            lineage.verify_content_identity()
+        self.assertNotIn(secret, str(ctx.exception))
+
+    def test_injected_secret_wrong_type_value_never_appears_in_error(self) -> None:
+        lineage = self._valid_lineage()
+        secret = "SECRET-WRONG-TYPE-VALUE-DO-NOT-LEAK-5c7f"
+        object.__setattr__(lineage, "binding_not_before", secret)
+        with self.assertRaises(LandingLineageError) as ctx:
+            lineage.verify_content_identity()
+        self.assertNotIn(secret, str(ctx.exception))
+
+
 class LandingLineageCapabilityTests(unittest.TestCase):
     def test_no_listing_or_latest_shaped_capability_exists(self) -> None:
         for candidate in (LandingObjectLineage, LandingInputLineage):

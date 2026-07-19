@@ -96,7 +96,8 @@ def daily_run() -> DailyPipelineRun:
         adjudication_queue_id="c" * 64,
         adjudication_case_count=2,
         adjudication_requirement_counts=(("OFFICIAL_LISTING_STATUS", 2),),
-        completeness_issues=("COLLECTION_ONLY_INPUTS",),
+        completeness_issues=("COLLECTION_ONLY_INPUTS", "VERIFIED_LANDING_LINEAGE_UNAVAILABLE"),
+        landing_input_lineage=None,
     )
 
 

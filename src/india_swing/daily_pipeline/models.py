@@ -7,8 +7,11 @@ from datetime import date, datetime, timezone
 from india_swing.identity import content_id
 from india_swing.reference.models import ReferenceReadiness
 
+from .landing_lineage import LandingInputLineage, LandingLineageError
 
-DAILY_PIPELINE_RUN_SCHEMA_VERSION = "nse-cm-daily-pipeline-run/v1"
+
+DAILY_PIPELINE_RUN_SCHEMA_VERSION = "nse-cm-daily-pipeline-run/v2"
+VERIFIED_LANDING_LINEAGE_UNAVAILABLE = "VERIFIED_LANDING_LINEAGE_UNAVAILABLE"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _REASON = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 
@@ -70,6 +73,7 @@ class DailyPipelineRun:
     adjudication_case_count: int
     adjudication_requirement_counts: tuple[tuple[str, int], ...]
     completeness_issues: tuple[str, ...]
+    landing_input_lineage: LandingInputLineage | None
     readiness: ReferenceReadiness = ReferenceReadiness.COLLECTION_ONLY
     actionable: bool = False
     stable_identity_assigned: bool = False
@@ -201,6 +205,42 @@ class DailyPipelineRun:
                     "adjudication requirement counts must be positive"
                 )
 
+        if self.landing_input_lineage is None:
+            if VERIFIED_LANDING_LINEAGE_UNAVAILABLE not in self.completeness_issues:
+                raise DailyPipelineIntegrityError(
+                    "runs without landing_input_lineage must declare it unavailable"
+                )
+        else:
+            if type(self.landing_input_lineage) is not LandingInputLineage:
+                raise DailyPipelineIntegrityError(
+                    "landing_input_lineage must be exact when present"
+                )
+            # The lineage may have been mutated via object.__setattr__ after
+            # its own __post_init__ ran, so its target_session and
+            # binding_cutoff cannot be trusted until its content identity is
+            # independently reverified.
+            try:
+                self.landing_input_lineage.verify_content_identity()
+            except LandingLineageError:
+                raise DailyPipelineIntegrityError(
+                    "landing_input_lineage content identity verification failed"
+                ) from None
+            if VERIFIED_LANDING_LINEAGE_UNAVAILABLE in self.completeness_issues:
+                raise DailyPipelineIntegrityError(
+                    "landing_input_lineage is present but declared unavailable"
+                )
+            if self.landing_input_lineage.target_session != self.market_session:
+                raise DailyPipelineIntegrityError(
+                    "landing_input_lineage target session does not match the market session"
+                )
+            if (
+                type(self.landing_input_lineage.binding_cutoff) is not datetime
+                or self.landing_input_lineage.binding_cutoff > self.cutoff
+            ):
+                raise DailyPipelineIntegrityError(
+                    "landing_input_lineage binding cutoff must not follow the run cutoff"
+                )
+
         object.__setattr__(self, "run_id", self._calculated_run_id())
 
     def _identity_material(self) -> dict[str, object]:
@@ -214,6 +254,18 @@ class DailyPipelineRun:
         return content_id(self._identity_material(), length=64)
 
     def verify_content_identity(self) -> None:
+        lineage = self.landing_input_lineage
+        if lineage is not None:
+            if type(lineage) is not LandingInputLineage:
+                raise DailyPipelineIntegrityError(
+                    "landing_input_lineage must be exact when present"
+                )
+            try:
+                lineage.verify_content_identity()
+            except LandingLineageError:
+                raise DailyPipelineIntegrityError(
+                    "landing_input_lineage content identity verification failed"
+                ) from None
         if self.run_id != self._calculated_run_id():
             raise DailyPipelineIntegrityError(
                 "daily-pipeline run content identity verification failed"
