@@ -81,6 +81,35 @@ python -m india_swing.daily_pipeline.cli list
 CLI failures expose only a sanitized exception type. No partial daily-run report
 is published when an upstream stage fails.
 
+## Internal verified-landing-inputs entry point
+
+`run_daily_pipeline_from_landing_inputs` (in `daily_pipeline/runner.py`) is a
+second, internal entry point alongside `run_daily_pipeline`. It consumes an
+exact, already-verified `VerifiedLandingInputs` value instead of caller-
+supplied filesystem paths.
+
+Before any artifact-store mutation it independently re-verifies the supplied
+`VerifiedLandingInputs` (rejecting a mutated or wrong-type value), requires its
+`market_session` and `run_cutoff` to equal the requested run's session and
+cutoff, and builds the run's `LandingInputLineage` via
+`build_landing_input_lineage`. Only then does it materialize the two already-
+verified byte payloads into a private temporary directory, using the canonical
+NSE basenames taken from that freshly built lineage and exclusive file
+creation, and hand them to the same import/derive pipeline stages
+`run_daily_pipeline` uses. It never lists a bucket, selects a "latest" object,
+retries, or falls back to a second source.
+
+Runs produced this way persist the exact `LandingInputLineage` on
+`DailyPipelineRun` and omit `VERIFIED_LANDING_LINEAGE_UNAVAILABLE` from
+`completeness_issues`. `run_daily_pipeline`'s manual-file behavior is
+unchanged: `landing_input_lineage` remains `None` and the blocker remains
+present.
+
+This is an internal integration boundary only. There is no CLI command and no
+production GCS wiring yet -- constructing a real `LandingObjectReader`,
+resolving a manifest, and calling `acquire_verified_landing_inputs` from a
+command remain separate future work.
+
 ## Current limitations
 
 - The runner consumes manually downloaded, collection-only evidence.

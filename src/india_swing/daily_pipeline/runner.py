@@ -22,6 +22,8 @@ from india_swing.reconciliation.reconciler import reconcile_collection_only
 from india_swing.reference.calendar import CalendarSnapshot
 from india_swing.reference_data.artifact_store import LocalReferenceArtifactStore
 
+from .landing_inputs import VerifiedLandingInputs
+from .landing_lineage import LandingInputLineage, build_landing_input_lineage
 from .models import (
     VERIFIED_LANDING_LINEAGE_UNAVAILABLE,
     DailyPipelineIntegrityError,
@@ -59,14 +61,48 @@ def _official_bundle_source(source: Path) -> Iterator[Path]:
         yield canonical
 
 
-def run_daily_pipeline(
+@contextmanager
+def _verified_landing_input_sources(
+    landing_inputs: VerifiedLandingInputs, lineage: LandingInputLineage
+) -> Iterator[tuple[Path, Path]]:
+    """Materializes the two already-verified landing payloads into a
+    private temporary directory using their canonical NSE basenames,
+    written with exclusive file creation.
+
+    Basenames are taken from `lineage`, not `landing_inputs`, because
+    build_landing_input_lineage has already independently reparsed and
+    re-derived them from the trusted manifest bytes; the raw payload
+    bytes come from `landing_inputs`, whose acquired-object identity
+    that same lineage build has already verified against those bytes.
+    """
+
+    security_master_name = Path(lineage.security_master.object_name).name
+    daily_bundle_name = Path(lineage.daily_bundle.object_name).name
+    with tempfile.TemporaryDirectory(prefix="india-swing-landing-inputs-") as temporary:
+        directory = Path(temporary)
+        security_master_path = directory / security_master_name
+        daily_bundle_path = directory / daily_bundle_name
+        for path, payload in (
+            (security_master_path, landing_inputs.security_master.content_bytes),
+            (daily_bundle_path, landing_inputs.daily_bundle.content_bytes),
+        ):
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+            descriptor = os.open(path, flags, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        yield security_master_path, daily_bundle_path
+
+
+def _run_pipeline_stages(
     *,
     market_session: date,
     cutoff: datetime,
     calendar_materialization_id: str,
     calendar: CalendarSnapshot,
     security_master_file: Path,
-    daily_bundle_file: Path,
+    bundle_source: Path,
     previous_run_id: str | None,
     reference_store: LocalReferenceArtifactStore,
     daily_store: LocalDailyBundleArtifactStore,
@@ -74,6 +110,7 @@ def run_daily_pipeline(
     identity_store: LocalIdentityRegistryStore,
     adjudication_store: LocalIdentityAdjudicationQueueStore,
     run_store: LocalDailyPipelineRunStore,
+    landing_input_lineage: LandingInputLineage | None,
 ) -> DailyPipelineRun:
     if type(market_session) is not date:
         raise TypeError("market_session must be a date")
@@ -102,8 +139,7 @@ def run_daily_pipeline(
         raise DailyPipelineIntegrityError(
             "security-master claimed date differs from the market session"
         )
-    with _official_bundle_source(Path(daily_bundle_file)) as bundle_source:
-        current_bundle = daily_store.import_bundle(bundle_source)
+    current_bundle = daily_store.import_bundle(bundle_source)
 
     previous_master_ids = () if previous is None else previous.security_master_artifact_ids
     previous_bundle_ids = () if previous is None else previous.daily_bundle_artifact_ids
@@ -148,13 +184,9 @@ def run_daily_pipeline(
     )
 
     issues = set(reconciliation.global_reason_codes)
-    issues.update(
-        {
-            "IDENTITY_ADJUDICATION_REQUIRED",
-            "STABLE_IDENTITY_UNAVAILABLE",
-            VERIFIED_LANDING_LINEAGE_UNAVAILABLE,
-        }
-    )
+    issues.update({"IDENTITY_ADJUDICATION_REQUIRED", "STABLE_IDENTITY_UNAVAILABLE"})
+    if landing_input_lineage is None:
+        issues.add(VERIFIED_LANDING_LINEAGE_UNAVAILABLE)
     if previous is None:
         issues.add("NO_PREVIOUS_DAILY_RUN")
 
@@ -192,6 +224,135 @@ def run_daily_pipeline(
         adjudication_case_count=len(queue.cases),
         adjudication_requirement_counts=queue.requirement_counts,
         completeness_issues=tuple(sorted(issues)),
-        landing_input_lineage=None,
+        landing_input_lineage=landing_input_lineage,
     )
     return run_store.publish(report)
+
+
+def run_daily_pipeline(
+    *,
+    market_session: date,
+    cutoff: datetime,
+    calendar_materialization_id: str,
+    calendar: CalendarSnapshot,
+    security_master_file: Path,
+    daily_bundle_file: Path,
+    previous_run_id: str | None,
+    reference_store: LocalReferenceArtifactStore,
+    daily_store: LocalDailyBundleArtifactStore,
+    historical_store: LocalHistoricalPriceArtifactStore,
+    identity_store: LocalIdentityRegistryStore,
+    adjudication_store: LocalIdentityAdjudicationQueueStore,
+    run_store: LocalDailyPipelineRunStore,
+) -> DailyPipelineRun:
+    with _official_bundle_source(Path(daily_bundle_file)) as bundle_source:
+        return _run_pipeline_stages(
+            market_session=market_session,
+            cutoff=cutoff,
+            calendar_materialization_id=calendar_materialization_id,
+            calendar=calendar,
+            security_master_file=security_master_file,
+            bundle_source=bundle_source,
+            previous_run_id=previous_run_id,
+            reference_store=reference_store,
+            daily_store=daily_store,
+            historical_store=historical_store,
+            identity_store=identity_store,
+            adjudication_store=adjudication_store,
+            run_store=run_store,
+            landing_input_lineage=None,
+        )
+
+
+def run_daily_pipeline_from_landing_inputs(
+    *,
+    landing_inputs: VerifiedLandingInputs,
+    market_session: date,
+    cutoff: datetime,
+    calendar_materialization_id: str,
+    calendar: CalendarSnapshot,
+    previous_run_id: str | None,
+    reference_store: LocalReferenceArtifactStore,
+    daily_store: LocalDailyBundleArtifactStore,
+    historical_store: LocalHistoricalPriceArtifactStore,
+    identity_store: LocalIdentityRegistryStore,
+    adjudication_store: LocalIdentityAdjudicationQueueStore,
+    run_store: LocalDailyPipelineRunStore,
+) -> DailyPipelineRun:
+    """Runs the daily pipeline from an exact, already-verified
+    VerifiedLandingInputs value instead of caller-supplied filesystem paths.
+
+    This is an internal integration boundary only: it consumes an
+    already-acquired, already-verified value and never lists a bucket,
+    selects a "latest" object, retries, or falls back to a second source.
+    CLI wiring and production GCS acquisition (constructing a real reader,
+    resolving a manifest, calling acquire_verified_landing_inputs from a
+    command) remain separate future work.
+    """
+
+    if type(landing_inputs) is not VerifiedLandingInputs:
+        raise DailyPipelineIntegrityError("landing inputs must be exact")
+
+    try:
+        VerifiedLandingInputs(
+            manifest=landing_inputs.manifest,
+            market_session=landing_inputs.market_session,
+            run_cutoff=landing_inputs.run_cutoff,
+            security_master=landing_inputs.security_master,
+            daily_bundle=landing_inputs.daily_bundle,
+        )
+    except Exception:
+        # A mutated nested field (e.g. manifest.knowledge_time set to a
+        # non-datetime) can make __post_init__ raise TypeError,
+        # AttributeError, or similar instead of LandingInputError; collapse
+        # every failure here to one static, sanitized error rather than
+        # leaking nested exception text or input values.
+        raise DailyPipelineIntegrityError(
+            "landing inputs failed independent verification"
+        ) from None
+
+    if type(market_session) is not date or landing_inputs.market_session != market_session:
+        raise DailyPipelineIntegrityError(
+            "landing inputs market session does not match the requested run session"
+        )
+    if (
+        not isinstance(cutoff, datetime)
+        or cutoff.tzinfo is None
+        or cutoff.utcoffset() is None
+        or landing_inputs.run_cutoff != cutoff
+    ):
+        raise DailyPipelineIntegrityError(
+            "landing inputs run cutoff does not match the requested run cutoff"
+        )
+
+    try:
+        lineage = build_landing_input_lineage(landing_inputs)
+    except Exception:
+        # A mutated nested manifest/binding field can make lineage
+        # rebuilding raise something other than LandingLineageError;
+        # collapse every failure here to one static, sanitized error
+        # rather than leaking nested exception text or input values.
+        raise DailyPipelineIntegrityError(
+            "landing inputs lineage could not be independently verified"
+        ) from None
+
+    with _verified_landing_input_sources(landing_inputs, lineage) as (
+        security_master_path,
+        bundle_source,
+    ):
+        return _run_pipeline_stages(
+            market_session=market_session,
+            cutoff=cutoff,
+            calendar_materialization_id=calendar_materialization_id,
+            calendar=calendar,
+            security_master_file=security_master_path,
+            bundle_source=bundle_source,
+            previous_run_id=previous_run_id,
+            reference_store=reference_store,
+            daily_store=daily_store,
+            historical_store=historical_store,
+            identity_store=identity_store,
+            adjudication_store=adjudication_store,
+            run_store=run_store,
+            landing_input_lineage=lineage,
+        )

@@ -4,7 +4,7 @@ from .models import (
     DailyPipelineIntegrityError,
     DailyPipelineRun,
 )
-from .runner import run_daily_pipeline
+from .runner import run_daily_pipeline, run_daily_pipeline_from_landing_inputs
 from .store import (
     DailyPipelineRunConflict,
     DailyPipelineRunNotFound,
@@ -20,4 +20,5 @@ __all__ = [
     "DailyPipelineRunNotFound",
     "LocalDailyPipelineRunStore",
     "run_daily_pipeline",
+    "run_daily_pipeline_from_landing_inputs",
 ]
