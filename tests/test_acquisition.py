@@ -19,6 +19,12 @@ from india_swing.daily_pipeline.acquisition import (
 _SECURITY_MASTER_MAXIMUM_BYTES = 32 * 1024 * 1024
 _DAILY_BUNDLE_MAXIMUM_BYTES = 128 * 1024 * 1024
 
+# Distinguishable from the real SDK's own retry default (a Retry object) and
+# from the disabled-retry value the production code must pass explicitly, so
+# an omitted `retry` keyword shows up in a recorded call as this sentinel
+# rather than silently reading as None.
+_UNSET_RETRY = object()
+
 
 class FakeGCSObjectReader:
     """Fake GCSObjectReader. Never contacts GCP; records every call made."""
@@ -61,10 +67,20 @@ class FakeBlob:
         self.download_calls: list[dict[str, object]] = []
 
     def download_as_bytes(
-        self, *, end=None, raw_download: bool = False, if_generation_match=None
+        self,
+        *,
+        end=None,
+        raw_download: bool = False,
+        if_generation_match=None,
+        retry=_UNSET_RETRY,
     ) -> bytes:
         self.download_calls.append(
-            {"end": end, "raw_download": raw_download, "if_generation_match": if_generation_match}
+            {
+                "end": end,
+                "raw_download": raw_download,
+                "if_generation_match": if_generation_match,
+                "retry": retry,
+            }
         )
         self.generation = self._observed_generation
         if end is None:
@@ -96,16 +112,61 @@ class ContentEncodingAwareFakeBlob:
         self.download_calls: list[dict[str, object]] = []
 
     def download_as_bytes(
-        self, *, end=None, raw_download: bool = False, if_generation_match=None
+        self,
+        *,
+        end=None,
+        raw_download: bool = False,
+        if_generation_match=None,
+        retry=_UNSET_RETRY,
     ) -> bytes:
         self.download_calls.append(
-            {"end": end, "raw_download": raw_download, "if_generation_match": if_generation_match}
+            {
+                "end": end,
+                "raw_download": raw_download,
+                "if_generation_match": if_generation_match,
+                "retry": retry,
+            }
         )
         self.generation = self._observed_generation
         content = self._stored_bytes if raw_download else self._expanded_bytes
         if end is None:
             return content
         return content[: end + 1]
+
+
+class RaisingFakeBlob:
+    """Stand-in blob whose download_as_bytes always raises a caller-supplied
+    ordinary exception. Records every call, so a test can prove exactly one
+    attempt was made and no hidden application-layer retry followed the
+    failure.
+    """
+
+    def __init__(
+        self, object_name: str, requested_generation: object, *, error: BaseException
+    ) -> None:
+        self.name = object_name
+        self.requested_generation = requested_generation
+        self.generation = None
+        self._error = error
+        self.download_calls: list[dict[str, object]] = []
+
+    def download_as_bytes(
+        self,
+        *,
+        end=None,
+        raw_download: bool = False,
+        if_generation_match=None,
+        retry=_UNSET_RETRY,
+    ) -> bytes:
+        self.download_calls.append(
+            {
+                "end": end,
+                "raw_download": raw_download,
+                "if_generation_match": if_generation_match,
+                "retry": retry,
+            }
+        )
+        raise self._error
 
 
 class FakeBucket:
@@ -581,7 +642,7 @@ class GoogleCloudStorageObjectReaderTests(unittest.TestCase):
 
         self.assertEqual(client.buckets[0].blob_calls[0][1], 42)
 
-    def test_download_as_bytes_receives_exact_end_raw_download_and_if_generation_match(
+    def test_download_as_bytes_receives_exact_end_raw_download_if_generation_match_and_retry(
         self,
     ) -> None:
         client = FakeStorageClient(observed_generation=100, content_bytes=b"abc")
@@ -599,9 +660,30 @@ class GoogleCloudStorageObjectReaderTests(unittest.TestCase):
                     "end": _SECURITY_MASTER_MAXIMUM_BYTES,
                     "raw_download": True,
                     "if_generation_match": 100,
+                    "retry": None,
                 }
             ],
         )
+
+    def test_download_failure_propagates_after_exactly_one_attempt_with_no_hidden_retry(
+        self,
+    ) -> None:
+        sentinel_error = RuntimeError("sentinel-download-failure")
+
+        def blob_factory(object_name: str, generation: object) -> RaisingFakeBlob:
+            return RaisingFakeBlob(object_name, generation, error=sentinel_error)
+
+        client = FakeStorageClient(blob_factory=blob_factory)
+        reader = GoogleCloudStorageObjectReader(client=client)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            reader.read_generation(
+                bucket="b", object_name="o", generation=100, maximum_bytes=10
+            )
+
+        self.assertIs(ctx.exception, sentinel_error)
+        blob = client.buckets[0].blobs[0]
+        self.assertEqual(len(blob.download_calls), 1)
 
     def test_raw_download_true_prevents_content_encoding_expansion(self) -> None:
         target_session = date(2026, 7, 15)

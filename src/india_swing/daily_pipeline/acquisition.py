@@ -166,7 +166,10 @@ class GoogleCloudStorageObjectReader:
             )
         blob = self._client.bucket(bucket).blob(object_name, generation=generation)
         content_bytes = blob.download_as_bytes(
-            end=maximum_bytes, raw_download=True, if_generation_match=generation
+            end=maximum_bytes,
+            raw_download=True,
+            if_generation_match=generation,
+            retry=None,
         )
         observed_generation = blob.generation
         if observed_generation is None:
