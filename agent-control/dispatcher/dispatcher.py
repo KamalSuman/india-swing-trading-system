@@ -58,6 +58,11 @@ CLAUDE_TIMEOUT_SECONDS = 60 * 60  # kill + escalate a run that exceeds this
 CLAUDE_PROMPT = "continue"
 CLAUDE_ARGS = [
     "-p", CLAUDE_PROMPT,
+    "--model", "sonnet",
+    "--effort", "medium",
+    "--output-format", "json",
+    "--no-session-persistence",
+    "--tools", "Bash,Read,Edit,Write",
     "--permission-mode", "acceptEdits",
     "--allowedTools", "Bash(rtk:*)",
 ]

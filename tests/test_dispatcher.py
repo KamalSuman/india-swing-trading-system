@@ -16,6 +16,31 @@ dispatcher = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(dispatcher)
 
 
+class DispatcherClaudeInvocationTests(unittest.TestCase):
+    def test_claude_invocation_pins_efficient_model_and_usage_output(self) -> None:
+        self.assertEqual(dispatcher.CLAUDE_ARGS[:2], ["-p", "continue"])
+        self.assertIn("--model", dispatcher.CLAUDE_ARGS)
+        self.assertEqual(
+            dispatcher.CLAUDE_ARGS[dispatcher.CLAUDE_ARGS.index("--model") + 1],
+            "sonnet",
+        )
+        self.assertEqual(
+            dispatcher.CLAUDE_ARGS[dispatcher.CLAUDE_ARGS.index("--effort") + 1],
+            "medium",
+        )
+        self.assertEqual(
+            dispatcher.CLAUDE_ARGS[dispatcher.CLAUDE_ARGS.index("--output-format") + 1],
+            "json",
+        )
+        self.assertIn("--no-session-persistence", dispatcher.CLAUDE_ARGS)
+        self.assertEqual(
+            dispatcher.CLAUDE_ARGS[dispatcher.CLAUDE_ARGS.index("--tools") + 1],
+            "Bash,Read,Edit,Write",
+        )
+        self.assertNotIn("Grep", dispatcher.CLAUDE_ARGS)
+        self.assertNotIn("Glob", dispatcher.CLAUDE_ARGS)
+
+
 def valid_task(worker: dict) -> dict:
     return {
         "schema_version": 1,
