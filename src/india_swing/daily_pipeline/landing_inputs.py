@@ -6,8 +6,13 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Protocol
 
-from .acquisition import AcquiredFile, LandingObjectRequest
-from .landing_manifest import VerifiedLandingManifest
+from .acquisition import AcquiredFile, LandingManifestObjectRequest, LandingObjectRequest
+from .landing_manifest import (
+    LandingManifestVerifier,
+    TrustedLandingManifestBinding,
+    VerifiedLandingManifest,
+)
+from .landing_manifest_acquisition import AcquiredLandingManifest
 
 
 class LandingInputError(ValueError):
@@ -24,6 +29,10 @@ _ERR_CUTOFF_ORDER = "landing input run cutoff precedes the manifest knowledge ti
 _ERR_ACQUIRED_SHAPE = "landing input acquired object is invalid"
 _ERR_ACQUIRED_MISMATCH = "landing input acquired object does not match its manifest request"
 _ERR_ACQUIRED_CONTENT = "landing input acquired object content could not be verified"
+_ERR_MANIFEST_ACQUISITION = "landing input manifest acquisition is invalid"
+_ERR_MANIFEST_ACQUISITION_MISMATCH = (
+    "landing input manifest acquisition does not match the verified manifest"
+)
 
 
 class LandingObjectReader(Protocol):
@@ -73,6 +82,95 @@ def _verify_acquired_matches_request(
         raise LandingInputError(_ERR_ACQUIRED_CONTENT)
 
 
+def _verify_manifest_acquisition(
+    manifest_acquisition: AcquiredLandingManifest | None, manifest: VerifiedLandingManifest
+) -> AcquiredLandingManifest | None:
+    """Independently reconstructs and reverifies an optional manifest
+    acquisition record, returning a defensively rebuilt snapshot decoupled
+    from the caller's original object (or None when omitted).
+
+    Duplicated deliberately rather than trusting AcquiredLandingManifest's
+    own prior __post_init__ validation, since a frozen dataclass can be
+    mutated after construction via object.__setattr__. The acquisition's
+    own retained binding must be exactly TrustedLandingManifestBinding --
+    not a subclass, proxy, or equality-poisoned impostor carrying the same
+    attribute names -- before any of its fields are read at all, so a
+    shaped impostor whose __eq__ always returns True cannot be laundered
+    into a real binding by reconstruction and then accepted by value
+    comparison. The request and (now type-verified) binding are both
+    reconstructed from their primitive fields before the manifest is
+    reverified from manifest_bytes against that reconstructed binding, so a
+    malformed nested binding field (wrong type, poisoned comparison,
+    missing attribute) is caught by TrustedLandingManifestBinding's own
+    validation instead of reaching an unguarded comparison inside
+    LandingManifestVerifier.verify.
+
+    Every ordinary failure along this path (never BaseException) collapses
+    to one static, sanitized error; the only exception is the final,
+    distinct mismatch raised when a well-formed, independently reverified
+    acquisition simply belongs to a different outer manifest.
+    """
+
+    if manifest_acquisition is None:
+        return None
+
+    try:
+        if type(manifest_acquisition) is not AcquiredLandingManifest:
+            raise ValueError("acquisition must be exact")
+
+        request = manifest_acquisition.request
+        acquired_manifest = manifest_acquisition.manifest
+        if type(request) is not LandingManifestObjectRequest:
+            raise ValueError("acquisition request must be exact")
+        if type(acquired_manifest) is not VerifiedLandingManifest:
+            raise ValueError("acquisition manifest must be exact")
+
+        request_snapshot = LandingManifestObjectRequest(
+            bucket=request.bucket,
+            object_name=request.object_name,
+            generation=request.generation,
+            target_session=request.target_session,
+        )
+
+        binding = acquired_manifest.binding
+        if type(binding) is not TrustedLandingManifestBinding:
+            raise ValueError("acquisition manifest binding must be exact")
+        binding_snapshot = TrustedLandingManifestBinding(
+            expected_manifest_sha256=binding.expected_manifest_sha256,
+            allowed_bucket=binding.allowed_bucket,
+            target_session=binding.target_session,
+            not_before=binding.not_before,
+            cutoff=binding.cutoff,
+        )
+
+        manifest_snapshot = LandingManifestVerifier().verify(
+            acquired_manifest.manifest_bytes, binding_snapshot
+        )
+
+        # Fail closed rather than silently repair: if the acquisition's own
+        # manifest attribute no longer agrees with a fresh reverification of
+        # its own trusted bytes and reconstructed binding, treat it as
+        # corrupted instead of proceeding on the (correct) reverified value
+        # while acquired_manifest itself stays tampered.
+        if acquired_manifest != manifest_snapshot:
+            raise ValueError("acquisition manifest does not match its own reverified content")
+        if request_snapshot.bucket != manifest_snapshot.binding.allowed_bucket:
+            raise ValueError("acquisition request bucket does not match the manifest")
+        if request_snapshot.target_session != manifest_snapshot.target_session:
+            raise ValueError("acquisition request target session does not match the manifest")
+
+        acquisition_snapshot = AcquiredLandingManifest(
+            request=request_snapshot, manifest=manifest_snapshot
+        )
+    except Exception:
+        raise LandingInputError(_ERR_MANIFEST_ACQUISITION) from None
+
+    if manifest_snapshot != manifest:
+        raise LandingInputError(_ERR_MANIFEST_ACQUISITION_MISMATCH)
+
+    return acquisition_snapshot
+
+
 def _verify_temporal_bounds(
     manifest: VerifiedLandingManifest, market_session: date, run_cutoff: datetime
 ) -> None:
@@ -109,11 +207,16 @@ class VerifiedLandingInputs:
     run_cutoff: datetime
     security_master: AcquiredFile
     daily_bundle: AcquiredFile
+    manifest_acquisition: AcquiredLandingManifest | None = None
 
     def __post_init__(self) -> None:
         _verify_temporal_bounds(self.manifest, self.market_session, self.run_cutoff)
         _verify_acquired_matches_request(self.security_master, self.manifest.security_master)
         _verify_acquired_matches_request(self.daily_bundle, self.manifest.daily_bundle)
+        manifest_acquisition_snapshot = _verify_manifest_acquisition(
+            self.manifest_acquisition, self.manifest
+        )
+        object.__setattr__(self, "manifest_acquisition", manifest_acquisition_snapshot)
 
 
 def acquire_verified_landing_inputs(
@@ -122,6 +225,7 @@ def acquire_verified_landing_inputs(
     market_session: date,
     run_cutoff: datetime,
     reader: LandingObjectReader,
+    manifest_acquisition: AcquiredLandingManifest | None = None,
 ) -> VerifiedLandingInputs:
     """Reads exactly the two objects named by an already-verified manifest.
 
@@ -129,9 +233,16 @@ def acquire_verified_landing_inputs(
     falls back, or substitutes a second source. A reader failure on
     either read propagates unchanged; the second read is only ever
     attempted after the first one succeeds.
+
+    When manifest_acquisition is supplied, it is independently validated
+    against manifest before either data-object read (so an invalid or
+    mismatched acquisition record never reaches the reader), and only a
+    defensively reconstructed snapshot of it -- decoupled from the
+    caller's original object -- is retained on the returned value.
     """
 
     _verify_temporal_bounds(manifest, market_session, run_cutoff)
+    manifest_acquisition_snapshot = _verify_manifest_acquisition(manifest_acquisition, manifest)
 
     security_master = reader.read(manifest.security_master)
     _verify_acquired_matches_request(security_master, manifest.security_master)
@@ -145,4 +256,5 @@ def acquire_verified_landing_inputs(
         run_cutoff=run_cutoff,
         security_master=security_master,
         daily_bundle=daily_bundle,
+        manifest_acquisition=manifest_acquisition_snapshot,
     )

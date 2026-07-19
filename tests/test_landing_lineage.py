@@ -6,12 +6,19 @@ import json
 import unittest
 from datetime import date, datetime, timedelta, timezone
 
-from india_swing.daily_pipeline.acquisition import AcquiredFile, AcquisitionFileType, LandingObjectRequest
+from india_swing.daily_pipeline.acquisition import (
+    AcquiredFile,
+    AcquisitionFileType,
+    LandingManifestObjectRequest,
+    LandingObjectRequest,
+)
 from india_swing.daily_pipeline.landing_inputs import VerifiedLandingInputs
 from india_swing.daily_pipeline.landing_lineage import (
     LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+    LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
     LandingInputLineage,
     LandingLineageError,
+    LandingManifestSourceLineage,
     LandingObjectLineage,
     build_landing_input_lineage,
 )
@@ -20,6 +27,7 @@ from india_swing.daily_pipeline.landing_manifest import (
     TrustedLandingManifestBinding,
     VerifiedLandingManifest,
 )
+from india_swing.daily_pipeline.landing_manifest_acquisition import AcquiredLandingManifest
 
 _TARGET_SESSION = date(2026, 7, 16)
 _BUCKET = "trusted-bucket"
@@ -98,7 +106,10 @@ def _acquired_for(request: LandingObjectRequest, *, content_bytes: bytes) -> Acq
 
 
 def _valid_inputs(
-    *, manifest: VerifiedLandingManifest | None = None, run_cutoff: datetime = _CUTOFF
+    *,
+    manifest: VerifiedLandingManifest | None = None,
+    run_cutoff: datetime = _CUTOFF,
+    manifest_acquisition: AcquiredLandingManifest | None = None,
 ) -> VerifiedLandingInputs:
     manifest = manifest if manifest is not None else _verified_manifest()
     sm_acquired = _acquired_for(manifest.security_master, content_bytes=b"security-master-content")
@@ -109,6 +120,59 @@ def _valid_inputs(
         run_cutoff=run_cutoff,
         security_master=sm_acquired,
         daily_bundle=db_acquired,
+        manifest_acquisition=manifest_acquisition,
+    )
+
+
+def _manifest_source_object_name(target_session: date = _TARGET_SESSION) -> str:
+    return f"landing/{target_session.isoformat()}/landing-manifest.json"
+
+
+def _acquired_landing_manifest(
+    manifest: VerifiedLandingManifest | None = None, *, generation: int = 999
+) -> AcquiredLandingManifest:
+    manifest = manifest if manifest is not None else _verified_manifest()
+    request = LandingManifestObjectRequest(
+        bucket=_BUCKET,
+        object_name=_manifest_source_object_name(manifest.target_session),
+        generation=generation,
+        target_session=manifest.target_session,
+    )
+    return AcquiredLandingManifest(request=request, manifest=manifest)
+
+
+class _ShapedBindingImpostor:
+    """Carries the same five attribute names as TrustedLandingManifestBinding
+    with genuinely valid-looking values, but is not that type and its
+    __eq__ always returns True -- simulating an equality-poisoned impostor
+    that could fool a defense relying on value comparison instead of an
+    exact type check.
+    """
+
+    def __init__(
+        self, *, expected_manifest_sha256, allowed_bucket, target_session, not_before, cutoff
+    ) -> None:
+        self.expected_manifest_sha256 = expected_manifest_sha256
+        self.allowed_bucket = allowed_bucket
+        self.target_session = target_session
+        self.not_before = not_before
+        self.cutoff = cutoff
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __hash__(self) -> int:
+        return 0
+
+
+def _shaped_binding_impostor_for(manifest: VerifiedLandingManifest) -> _ShapedBindingImpostor:
+    real_binding = manifest.binding
+    return _ShapedBindingImpostor(
+        expected_manifest_sha256=real_binding.expected_manifest_sha256,
+        allowed_bucket=real_binding.allowed_bucket,
+        target_session=real_binding.target_session,
+        not_before=real_binding.not_before,
+        cutoff=real_binding.cutoff,
     )
 
 
@@ -139,7 +203,8 @@ class LandingLineageAcceptanceTests(unittest.TestCase):
         lineage = build_landing_input_lineage(inputs)
 
         self.assertIsInstance(lineage, LandingInputLineage)
-        self.assertEqual(lineage.schema_version, LANDING_INPUT_LINEAGE_SCHEMA_VERSION)
+        self.assertEqual(lineage.schema_version, LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION)
+        self.assertIsNone(lineage.manifest_source)
         self.assertEqual(lineage.manifest_sha256, inputs.manifest.manifest_sha256)
         self.assertEqual(lineage.manifest_knowledge_time, inputs.manifest.knowledge_time)
         self.assertEqual(lineage.binding_not_before, inputs.manifest.binding.not_before)
@@ -187,6 +252,254 @@ class LandingLineageAcceptanceTests(unittest.TestCase):
             self.assertNotIsInstance(getattr(lineage, name), bytes)
         for name in object_field_names:
             self.assertNotIsInstance(getattr(lineage.security_master, name), bytes)
+
+
+class LandingLineageManifestSourceAcceptanceTests(unittest.TestCase):
+    def test_valid_acquisition_produces_v2_lineage_with_exact_source(self) -> None:
+        manifest = _verified_manifest()
+        acquisition = _acquired_landing_manifest(manifest, generation=999)
+        inputs = _valid_inputs(manifest=manifest, manifest_acquisition=acquisition)
+
+        lineage = build_landing_input_lineage(inputs)
+
+        self.assertEqual(lineage.schema_version, LANDING_INPUT_LINEAGE_SCHEMA_VERSION)
+        self.assertIsInstance(lineage.manifest_source, LandingManifestSourceLineage)
+        self.assertEqual(lineage.manifest_source.bucket, _BUCKET)
+        self.assertEqual(lineage.manifest_source.object_name, _manifest_source_object_name())
+        self.assertEqual(lineage.manifest_source.generation, 999)
+        self.assertEqual(lineage.manifest_source.target_session, _TARGET_SESSION)
+
+    def test_omitted_acquisition_still_produces_legacy_v1_lineage(self) -> None:
+        inputs = _valid_inputs()
+
+        lineage = build_landing_input_lineage(inputs)
+
+        self.assertEqual(lineage.schema_version, LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION)
+        self.assertIsNone(lineage.manifest_source)
+
+    def test_v2_lineage_id_differs_from_legacy_for_otherwise_identical_inputs(self) -> None:
+        manifest = _verified_manifest()
+        legacy_inputs = _valid_inputs(manifest=manifest)
+        v2_inputs = _valid_inputs(
+            manifest=manifest, manifest_acquisition=_acquired_landing_manifest(manifest)
+        )
+
+        legacy_lineage = build_landing_input_lineage(legacy_inputs)
+        v2_lineage = build_landing_input_lineage(v2_inputs)
+
+        self.assertNotEqual(legacy_lineage.lineage_id, v2_lineage.lineage_id)
+
+    def test_v2_lineage_id_changes_with_manifest_source_generation(self) -> None:
+        manifest = _verified_manifest()
+        inputs_a = _valid_inputs(
+            manifest=manifest,
+            manifest_acquisition=_acquired_landing_manifest(manifest, generation=111),
+        )
+        inputs_b = _valid_inputs(
+            manifest=manifest,
+            manifest_acquisition=_acquired_landing_manifest(manifest, generation=222),
+        )
+
+        lineage_a = build_landing_input_lineage(inputs_a)
+        lineage_b = build_landing_input_lineage(inputs_b)
+
+        self.assertNotEqual(lineage_a.lineage_id, lineage_b.lineage_id)
+
+
+class LandingLineageManifestSourceHardeningTests(unittest.TestCase):
+    def test_rejects_wrong_type_manifest_acquisition(self) -> None:
+        inputs = _valid_inputs()
+        object.__setattr__(inputs, "manifest_acquisition", "not-an-acquisition")
+        with self.assertRaises(LandingLineageError):
+            build_landing_input_lineage(inputs)
+
+    def test_rejects_mutated_acquisition_request_bucket(self) -> None:
+        manifest = _verified_manifest()
+        acquisition = _acquired_landing_manifest(manifest)
+        inputs = _valid_inputs(manifest=manifest, manifest_acquisition=acquisition)
+        object.__setattr__(
+            inputs.manifest_acquisition.request, "bucket", "another-syntactically-valid-bucket"
+        )
+        with self.assertRaises(LandingLineageError):
+            build_landing_input_lineage(inputs)
+
+    def test_rejects_mutated_acquisition_request_generation_to_bool(self) -> None:
+        manifest = _verified_manifest()
+        acquisition = _acquired_landing_manifest(manifest)
+        inputs = _valid_inputs(manifest=manifest, manifest_acquisition=acquisition)
+        object.__setattr__(inputs.manifest_acquisition.request, "generation", True)
+        with self.assertRaises(LandingLineageError):
+            build_landing_input_lineage(inputs)
+
+    def test_rejects_mutated_acquisition_request_target_session(self) -> None:
+        manifest = _verified_manifest()
+        acquisition = _acquired_landing_manifest(manifest)
+        inputs = _valid_inputs(manifest=manifest, manifest_acquisition=acquisition)
+        object.__setattr__(
+            inputs.manifest_acquisition.request, "target_session", date(2026, 7, 17)
+        )
+        with self.assertRaises(LandingLineageError):
+            build_landing_input_lineage(inputs)
+
+    def test_rejects_acquisition_manifest_not_matching_inputs_manifest(self) -> None:
+        # VerifiedLandingInputs.__post_init__ already rejects a mismatched
+        # manifest_acquisition at construction time, so this simulates a
+        # frozen instance tampered with after construction (the same
+        # pattern every other hardening test in this class uses) to prove
+        # build_landing_input_lineage independently re-checks it too rather
+        # than trusting that prior validation still holds.
+        manifest = _verified_manifest()
+        inputs = _valid_inputs(manifest=manifest)
+        other_manifest = _verified_manifest(knowledge_time="2026-07-16T14:00:00Z")
+        other_acquisition = _acquired_landing_manifest(other_manifest)
+        object.__setattr__(inputs, "manifest_acquisition", other_acquisition)
+        with self.assertRaises(LandingLineageError):
+            build_landing_input_lineage(inputs)
+
+    def test_rejects_mutated_acquisition_manifest_field(self) -> None:
+        manifest = _verified_manifest()
+        # A distinct-but-equal manifest object for the acquisition, so
+        # mutating it does not also corrupt `inputs.manifest` itself, which
+        # would isolate an earlier, unrelated check instead.
+        acquisition = _acquired_landing_manifest(_verified_manifest())
+        inputs = _valid_inputs(manifest=manifest, manifest_acquisition=acquisition)
+        object.__setattr__(inputs.manifest_acquisition.manifest, "knowledge_time", "not-a-datetime")
+        with self.assertRaises(LandingLineageError):
+            build_landing_input_lineage(inputs)
+
+    def test_rejects_acquisition_bucket_not_matching_data_object_bucket(self) -> None:
+        manifest = _verified_manifest()
+        acquisition = _acquired_landing_manifest(manifest)
+        inputs = _valid_inputs(manifest=manifest, manifest_acquisition=acquisition)
+        object.__setattr__(
+            inputs.security_master, "bucket", "another-syntactically-valid-bucket"
+        )
+        with self.assertRaises(LandingLineageError):
+            build_landing_input_lineage(inputs)
+
+    def test_rejects_mutated_acquisition_binding_not_before_without_leaking_raw_exception(
+        self,
+    ) -> None:
+        manifest = _verified_manifest()
+        acquisition = _acquired_landing_manifest(_verified_manifest())
+        inputs = _valid_inputs(manifest=manifest, manifest_acquisition=acquisition)
+        secret = "SECRET-MUTATED-TIME-DO-NOT-LEAK"
+        object.__setattr__(inputs.manifest_acquisition.manifest.binding, "not_before", secret)
+
+        with self.assertRaises(LandingLineageError) as ctx:
+            build_landing_input_lineage(inputs)
+        self.assertNotIn(secret, str(ctx.exception))
+
+    def test_rejects_mutated_acquisition_binding_cutoff_wrong_type_without_leaking_raw_exception(
+        self,
+    ) -> None:
+        manifest = _verified_manifest()
+        acquisition = _acquired_landing_manifest(_verified_manifest())
+        inputs = _valid_inputs(manifest=manifest, manifest_acquisition=acquisition)
+        object.__setattr__(inputs.manifest_acquisition.manifest.binding, "cutoff", 12345)
+
+        with self.assertRaises(LandingLineageError):
+            build_landing_input_lineage(inputs)
+
+    def test_rejects_acquisition_binding_replaced_by_plain_object(self) -> None:
+        manifest = _verified_manifest()
+        acquisition = _acquired_landing_manifest(_verified_manifest())
+        inputs = _valid_inputs(manifest=manifest, manifest_acquisition=acquisition)
+        object.__setattr__(inputs.manifest_acquisition.manifest, "binding", object())
+
+        with self.assertRaises(LandingLineageError):
+            build_landing_input_lineage(inputs)
+
+    def test_rejects_shaped_binding_impostor_with_poisoned_equality(self) -> None:
+        # Every field is genuinely valid and __eq__ always returns True, so
+        # a defense that reconstructs-then-compares-by-value (rather than
+        # requiring the exact type first) would be fooled into treating
+        # this impostor as a real TrustedLandingManifestBinding and
+        # silently repairing/projecting it instead of rejecting it.
+        manifest = _verified_manifest()
+        acquisition = _acquired_landing_manifest(_verified_manifest())
+        inputs = _valid_inputs(manifest=manifest, manifest_acquisition=acquisition)
+        impostor = _shaped_binding_impostor_for(inputs.manifest_acquisition.manifest)
+        object.__setattr__(inputs.manifest_acquisition.manifest, "binding", impostor)
+
+        with self.assertRaises(LandingLineageError) as ctx:
+            build_landing_input_lineage(inputs)
+
+        self.assertEqual(
+            str(ctx.exception), "landing lineage inputs could not be independently verified"
+        )
+
+    def test_valid_inputs_still_build_after_manifest_source_hardening(self) -> None:
+        manifest = _verified_manifest()
+        inputs = _valid_inputs(
+            manifest=manifest, manifest_acquisition=_acquired_landing_manifest(manifest)
+        )
+        lineage = build_landing_input_lineage(inputs)
+        self.assertIsInstance(lineage.manifest_source, LandingManifestSourceLineage)
+
+
+class LandingLineageManifestSourceSanitizationTests(unittest.TestCase):
+    def test_injected_secret_in_acquisition_bucket_never_appears_in_error(self) -> None:
+        manifest = _verified_manifest()
+        acquisition = _acquired_landing_manifest(manifest)
+        inputs = _valid_inputs(manifest=manifest, manifest_acquisition=acquisition)
+        secret = "secret-acquisition-bucket-do-not-leak-6b3a"
+        object.__setattr__(inputs.manifest_acquisition.request, "bucket", secret)
+        with self.assertRaises(LandingLineageError) as ctx:
+            build_landing_input_lineage(inputs)
+        self.assertNotIn(secret, str(ctx.exception))
+
+
+class LandingManifestSourceLineageDirectConstructionTests(unittest.TestCase):
+    def test_valid_construction_succeeds(self) -> None:
+        source = LandingManifestSourceLineage(
+            bucket=_BUCKET,
+            object_name=_manifest_source_object_name(),
+            generation=999,
+            target_session=_TARGET_SESSION,
+        )
+        self.assertEqual(source.generation, 999)
+
+    def test_rejects_bool_generation(self) -> None:
+        with self.assertRaises(LandingLineageError):
+            LandingManifestSourceLineage(
+                bucket=_BUCKET,
+                object_name=_manifest_source_object_name(),
+                generation=True,
+                target_session=_TARGET_SESSION,
+            )
+
+    def test_rejects_nonpositive_generation(self) -> None:
+        for bad_generation in (0, -1):
+            with self.assertRaises(LandingLineageError):
+                LandingManifestSourceLineage(
+                    bucket=_BUCKET,
+                    object_name=_manifest_source_object_name(),
+                    generation=bad_generation,
+                    target_session=_TARGET_SESSION,
+                )
+
+    def test_rejects_noncanonical_object_path(self) -> None:
+        for bad_object_name in (
+            "landing/2026-07-17/landing-manifest.json",  # wrong session prefix
+            "landing/../secrets/landing-manifest.json",  # traversal
+        ):
+            with self.assertRaises(LandingLineageError):
+                LandingManifestSourceLineage(
+                    bucket=_BUCKET,
+                    object_name=bad_object_name,
+                    generation=999,
+                    target_session=_TARGET_SESSION,
+                )
+
+    def test_rejects_invalid_bucket(self) -> None:
+        with self.assertRaises(LandingLineageError):
+            LandingManifestSourceLineage(
+                bucket="Bad_Bucket!",
+                object_name=_manifest_source_object_name(),
+                generation=999,
+                target_session=_TARGET_SESSION,
+            )
 
 
 class LandingObjectLineageDirectConstructionTests(unittest.TestCase):
@@ -317,7 +630,7 @@ class LandingObjectLineageDirectConstructionTests(unittest.TestCase):
 class LandingInputLineageDirectConstructionTests(unittest.TestCase):
     def _kwargs(self, **overrides: object) -> dict[str, object]:
         base = dict(
-            schema_version=LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+            schema_version=LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
             manifest_sha256=hashlib.sha256(b"manifest").hexdigest(),
             manifest_knowledge_time=datetime(2026, 7, 16, 13, 30, 0, tzinfo=timezone.utc),
             binding_not_before=_NOT_BEFORE,
@@ -325,6 +638,7 @@ class LandingInputLineageDirectConstructionTests(unittest.TestCase):
             target_session=_TARGET_SESSION,
             security_master=_valid_object_lineage(AcquisitionFileType.SECURITY_MASTER),
             daily_bundle=_valid_object_lineage(AcquisitionFileType.DAILY_BUNDLE),
+            manifest_source=None,
         )
         base.update(overrides)
         return base
@@ -335,7 +649,7 @@ class LandingInputLineageDirectConstructionTests(unittest.TestCase):
 
     def test_rejects_wrong_schema_version(self) -> None:
         with self.assertRaises(LandingLineageError):
-            LandingInputLineage(**self._kwargs(schema_version="nse-cm-landing-input-lineage/v2"))
+            LandingInputLineage(**self._kwargs(schema_version="nse-cm-landing-input-lineage/v3"))
 
     def test_rejects_malformed_manifest_hash(self) -> None:
         with self.assertRaises(LandingLineageError):
@@ -388,6 +702,78 @@ class LandingInputLineageDirectConstructionTests(unittest.TestCase):
     def test_rejects_non_date_target_session(self) -> None:
         with self.assertRaises(LandingLineageError):
             LandingInputLineage(**self._kwargs(target_session="2026-07-16"))
+
+    def test_rejects_manifest_source_present_on_legacy_v1(self) -> None:
+        with self.assertRaises(LandingLineageError):
+            LandingInputLineage(
+                **self._kwargs(
+                    manifest_source=LandingManifestSourceLineage(
+                        bucket=_BUCKET,
+                        object_name=_manifest_source_object_name(),
+                        generation=999,
+                        target_session=_TARGET_SESSION,
+                    )
+                )
+            )
+
+    def test_v2_requires_manifest_source(self) -> None:
+        with self.assertRaises(LandingLineageError):
+            LandingInputLineage(
+                **self._kwargs(
+                    schema_version=LANDING_INPUT_LINEAGE_SCHEMA_VERSION, manifest_source=None
+                )
+            )
+
+    def test_v2_rejects_wrong_type_manifest_source(self) -> None:
+        with self.assertRaises(LandingLineageError):
+            LandingInputLineage(
+                **self._kwargs(
+                    schema_version=LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+                    manifest_source="not-a-source",
+                )
+            )
+
+    def test_v2_valid_construction_succeeds(self) -> None:
+        lineage = LandingInputLineage(
+            **self._kwargs(
+                schema_version=LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+                manifest_source=LandingManifestSourceLineage(
+                    bucket=_BUCKET,
+                    object_name=_manifest_source_object_name(),
+                    generation=999,
+                    target_session=_TARGET_SESSION,
+                ),
+            )
+        )
+        self.assertRegex(lineage.lineage_id, r"\A[0-9a-f]{64}\Z")
+
+    def test_v2_rejects_manifest_source_session_mismatch(self) -> None:
+        with self.assertRaises(LandingLineageError):
+            LandingInputLineage(
+                **self._kwargs(
+                    schema_version=LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+                    manifest_source=LandingManifestSourceLineage(
+                        bucket=_BUCKET,
+                        object_name=_manifest_source_object_name(date(2026, 7, 17)),
+                        generation=999,
+                        target_session=date(2026, 7, 17),
+                    ),
+                )
+            )
+
+    def test_v2_rejects_manifest_source_bucket_mismatch(self) -> None:
+        with self.assertRaises(LandingLineageError):
+            LandingInputLineage(
+                **self._kwargs(
+                    schema_version=LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+                    manifest_source=LandingManifestSourceLineage(
+                        bucket="another-syntactically-valid-bucket",
+                        object_name=_manifest_source_object_name(),
+                        generation=999,
+                        target_session=_TARGET_SESSION,
+                    ),
+                )
+            )
 
 
 class LandingLineageBuilderTests(unittest.TestCase):
@@ -803,7 +1189,7 @@ class LandingLineageContentIdentityVerificationTests(unittest.TestCase):
 
     def _valid_lineage(self) -> LandingInputLineage:
         return LandingInputLineage(
-            schema_version=LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+            schema_version=LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
             manifest_sha256=hashlib.sha256(b"manifest").hexdigest(),
             manifest_knowledge_time=datetime(2026, 7, 16, 13, 30, 0, tzinfo=timezone.utc),
             binding_not_before=_NOT_BEFORE,
@@ -811,6 +1197,7 @@ class LandingLineageContentIdentityVerificationTests(unittest.TestCase):
             target_session=_TARGET_SESSION,
             security_master=_valid_object_lineage(AcquisitionFileType.SECURITY_MASTER),
             daily_bundle=_valid_object_lineage(AcquisitionFileType.DAILY_BUNDLE),
+            manifest_source=None,
         )
 
     def test_unmutated_lineage_verifies(self) -> None:
@@ -914,6 +1301,100 @@ class LandingLineageContentIdentityVerificationTests(unittest.TestCase):
         lineage = self._valid_lineage()
         secret = "SECRET-WRONG-TYPE-VALUE-DO-NOT-LEAK-5c7f"
         object.__setattr__(lineage, "binding_not_before", secret)
+        with self.assertRaises(LandingLineageError) as ctx:
+            lineage.verify_content_identity()
+        self.assertNotIn(secret, str(ctx.exception))
+
+
+class LandingLineageManifestSourceContentIdentityVerificationTests(unittest.TestCase):
+    """verify_content_identity must independently reconstruct manifest_source
+    for v2 (and confirm its absence for legacy v1) the same way it already
+    reconstructs security_master/daily_bundle, regardless of what a frozen
+    field was mutated to via object.__setattr__ after construction.
+    """
+
+    def _valid_v1_lineage(self) -> LandingInputLineage:
+        return LandingInputLineage(
+            schema_version=LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+            manifest_sha256=hashlib.sha256(b"manifest").hexdigest(),
+            manifest_knowledge_time=datetime(2026, 7, 16, 13, 30, 0, tzinfo=timezone.utc),
+            binding_not_before=_NOT_BEFORE,
+            binding_cutoff=_CUTOFF,
+            target_session=_TARGET_SESSION,
+            security_master=_valid_object_lineage(AcquisitionFileType.SECURITY_MASTER),
+            daily_bundle=_valid_object_lineage(AcquisitionFileType.DAILY_BUNDLE),
+            manifest_source=None,
+        )
+
+    def _valid_v2_lineage(self) -> LandingInputLineage:
+        return LandingInputLineage(
+            schema_version=LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+            manifest_sha256=hashlib.sha256(b"manifest").hexdigest(),
+            manifest_knowledge_time=datetime(2026, 7, 16, 13, 30, 0, tzinfo=timezone.utc),
+            binding_not_before=_NOT_BEFORE,
+            binding_cutoff=_CUTOFF,
+            target_session=_TARGET_SESSION,
+            security_master=_valid_object_lineage(AcquisitionFileType.SECURITY_MASTER),
+            daily_bundle=_valid_object_lineage(AcquisitionFileType.DAILY_BUNDLE),
+            manifest_source=LandingManifestSourceLineage(
+                bucket=_BUCKET,
+                object_name=_manifest_source_object_name(),
+                generation=999,
+                target_session=_TARGET_SESSION,
+            ),
+        )
+
+    def test_unmutated_v1_lineage_verifies(self) -> None:
+        self._valid_v1_lineage().verify_content_identity()
+
+    def test_unmutated_v2_lineage_verifies(self) -> None:
+        self._valid_v2_lineage().verify_content_identity()
+
+    def test_rejects_mutated_manifest_source_generation(self) -> None:
+        lineage = self._valid_v2_lineage()
+        object.__setattr__(lineage.manifest_source, "generation", 111)
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_mutated_manifest_source_bucket(self) -> None:
+        lineage = self._valid_v2_lineage()
+        object.__setattr__(
+            lineage.manifest_source, "bucket", "another-syntactically-valid-bucket"
+        )
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_wrong_type_manifest_source_on_v2(self) -> None:
+        lineage = self._valid_v2_lineage()
+        object.__setattr__(lineage, "manifest_source", "not-a-source")
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_manifest_source_appearing_on_v1(self) -> None:
+        lineage = self._valid_v1_lineage()
+        object.__setattr__(
+            lineage,
+            "manifest_source",
+            LandingManifestSourceLineage(
+                bucket=_BUCKET,
+                object_name=_manifest_source_object_name(),
+                generation=999,
+                target_session=_TARGET_SESSION,
+            ),
+        )
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_rejects_manifest_source_removed_from_v2(self) -> None:
+        lineage = self._valid_v2_lineage()
+        object.__setattr__(lineage, "manifest_source", None)
+        with self.assertRaises(LandingLineageError):
+            lineage.verify_content_identity()
+
+    def test_injected_secret_bucket_never_appears_in_error(self) -> None:
+        lineage = self._valid_v2_lineage()
+        secret = "secret-mutated-manifest-source-bucket-do-not-leak-2f6c"
+        object.__setattr__(lineage.manifest_source, "bucket", secret)
         with self.assertRaises(LandingLineageError) as ctx:
             lineage.verify_content_identity()
         self.assertNotIn(secret, str(ctx.exception))

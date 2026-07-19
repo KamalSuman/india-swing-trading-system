@@ -16,11 +16,14 @@ from india_swing.daily_pipeline import (
 )
 from india_swing.daily_pipeline.landing_lineage import (
     LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+    LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
     AcquisitionFileType,
     LandingInputLineage,
+    LandingManifestSourceLineage,
     LandingObjectLineage,
 )
 from india_swing.daily_pipeline.models import VERIFIED_LANDING_LINEAGE_UNAVAILABLE
+from india_swing.identity import content_id
 from india_swing.daily_reports.artifact_store import LocalDailyBundleArtifactStore
 from india_swing.historical_prices.artifact_store import LocalHistoricalPriceArtifactStore
 from india_swing.identity_registry.adjudication_store import LocalIdentityAdjudicationQueueStore
@@ -73,6 +76,43 @@ def _landing_input_lineage(
     *, target_session: date, binding_cutoff: datetime, sm_generation: int = 123
 ) -> LandingInputLineage:
     return LandingInputLineage(
+        schema_version=LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+        manifest_sha256=hashlib.sha256(b"trusted-manifest-bytes").hexdigest(),
+        manifest_knowledge_time=binding_cutoff,
+        binding_not_before=binding_cutoff - timedelta(hours=1),
+        binding_cutoff=binding_cutoff,
+        target_session=target_session,
+        security_master=_landing_object_lineage(
+            AcquisitionFileType.SECURITY_MASTER,
+            target_session=target_session,
+            generation=sm_generation,
+        ),
+        daily_bundle=_landing_object_lineage(
+            AcquisitionFileType.DAILY_BUNDLE, target_session=target_session
+        ),
+        manifest_source=None,
+    )
+
+
+def _landing_manifest_source_lineage(
+    *, target_session: date, generation: int = 999
+) -> LandingManifestSourceLineage:
+    return LandingManifestSourceLineage(
+        bucket="trusted-landing-bucket",
+        object_name=f"landing/{target_session.isoformat()}/landing-manifest.json",
+        generation=generation,
+        target_session=target_session,
+    )
+
+
+def _landing_input_lineage_v2(
+    *,
+    target_session: date,
+    binding_cutoff: datetime,
+    sm_generation: int = 123,
+    manifest_generation: int = 999,
+) -> LandingInputLineage:
+    return LandingInputLineage(
         schema_version=LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
         manifest_sha256=hashlib.sha256(b"trusted-manifest-bytes").hexdigest(),
         manifest_knowledge_time=binding_cutoff,
@@ -86,6 +126,9 @@ def _landing_input_lineage(
         ),
         daily_bundle=_landing_object_lineage(
             AcquisitionFileType.DAILY_BUNDLE, target_session=target_session
+        ),
+        manifest_source=_landing_manifest_source_lineage(
+            target_session=target_session, generation=manifest_generation
         ),
     )
 
@@ -284,6 +327,266 @@ class LandingInputLineagePersistenceTests(unittest.TestCase):
         value = json.loads(path.read_text(encoding="utf-8"))
         value["store_schema_version"] = "local-daily-pipeline-run/v1"
         path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaises(DailyPipelineRunConflict):
+            self.run_store.get(run.run_id)
+
+
+class LandingInputLineageLegacyCompatibilityTests(unittest.TestCase):
+    """Explicit compatibility coverage proving the v2 manifest_source
+    addition left every pre-existing legacy-v1 behavior byte-for-byte
+    unchanged: identity material, lineage_id, serialized store shape, and
+    run_id round-tripping.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.run_store = LocalDailyPipelineRunStore(Path(self.temporary.name) / "pipeline")
+        self.base_run = _promotion_daily_run()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _with_lineage(self, lineage: object, **overrides: object):
+        issues = set(self.base_run.completeness_issues) - {VERIFIED_LANDING_LINEAGE_UNAVAILABLE}
+        return replace(
+            self.base_run,
+            landing_input_lineage=lineage,
+            completeness_issues=tuple(sorted(issues)),
+            **overrides,
+        )
+
+    def test_legacy_identity_material_omits_manifest_source_and_matches_lineage_id(self) -> None:
+        lineage = _landing_input_lineage(
+            target_session=self.base_run.market_session, binding_cutoff=self.base_run.cutoff
+        )
+        expected_material = {
+            "schema_version": lineage.schema_version,
+            "manifest_sha256": lineage.manifest_sha256,
+            "manifest_knowledge_time": lineage.manifest_knowledge_time,
+            "binding_not_before": lineage.binding_not_before,
+            "binding_cutoff": lineage.binding_cutoff,
+            "target_session": lineage.target_session,
+            "security_master": lineage.security_master,
+            "daily_bundle": lineage.daily_bundle,
+        }
+        self.assertNotIn("manifest_source", expected_material)
+        self.assertEqual(lineage.lineage_id, content_id(expected_material, length=64))
+
+    def test_legacy_run_store_json_omits_manifest_source_key(self) -> None:
+        run = self._with_lineage(
+            _landing_input_lineage(
+                target_session=self.base_run.market_session, binding_cutoff=self.base_run.cutoff
+            )
+        )
+        self.run_store.publish(run)
+        path = self.run_store.path_for(run.run_id)
+        raw_text = path.read_text(encoding="utf-8")
+        self.assertNotIn("manifest_source", raw_text)
+        raw = json.loads(raw_text)
+        self.assertNotIn("manifest_source", raw["run"]["landing_input_lineage"])
+
+    def test_legacy_run_round_trips_with_the_same_run_id(self) -> None:
+        run = self._with_lineage(
+            _landing_input_lineage(
+                target_session=self.base_run.market_session, binding_cutoff=self.base_run.cutoff
+            )
+        )
+        self.run_store.publish(run)
+        reloaded = self.run_store.get(run.run_id)
+        self.assertEqual(reloaded.run_id, run.run_id)
+        self.assertIsNone(reloaded.landing_input_lineage.manifest_source)
+
+    # Golden values independently reproduced by Codex against this exact
+    # deterministic fixture (_promotion_daily_run() + _landing_input_lineage
+    # with no overrides). A change to any upstream identity input, field
+    # ordering, or serialization detail that shifts these values is a
+    # backward-compatibility break for every legacy-v1 run/lineage already
+    # persisted on disk, not just a test update.
+    _GOLDEN_LEGACY_LINEAGE_ID = (
+        "aabac53e1ff31393e42499cee7e898d930dfb7c3499dcbcd5c355fd9c0d6fbaf"
+    )
+    _GOLDEN_LEGACY_RUN_ID = "ac8f2aa361b7244c028df8c61afb43773b211600d05a2df3f6fad553684c143b"
+    _GOLDEN_LEGACY_PAYLOAD_BYTE_LENGTH = 3236
+    _GOLDEN_LEGACY_PAYLOAD_SHA256 = (
+        "0103155520e264b68feedc2d750e189b8a273b6d84e06b2f139e1a881a93cdb3"
+    )
+
+    def test_legacy_run_matches_exact_golden_lineage_id_run_id_and_store_bytes(self) -> None:
+        lineage = _landing_input_lineage(
+            target_session=self.base_run.market_session, binding_cutoff=self.base_run.cutoff
+        )
+        self.assertEqual(lineage.lineage_id, self._GOLDEN_LEGACY_LINEAGE_ID)
+
+        run = self._with_lineage(lineage)
+        self.assertEqual(run.run_id, self._GOLDEN_LEGACY_RUN_ID)
+
+        self.run_store.publish(run)
+        payload = self.run_store.path_for(run.run_id).read_bytes()
+        self.assertEqual(len(payload), self._GOLDEN_LEGACY_PAYLOAD_BYTE_LENGTH)
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), self._GOLDEN_LEGACY_PAYLOAD_SHA256)
+
+
+class LandingInputLineageV2PersistenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.run_store = LocalDailyPipelineRunStore(Path(self.temporary.name) / "pipeline")
+        self.base_run = _promotion_daily_run()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _with_lineage(self, lineage: object, **overrides: object):
+        issues = set(self.base_run.completeness_issues) - {VERIFIED_LANDING_LINEAGE_UNAVAILABLE}
+        return replace(
+            self.base_run,
+            landing_input_lineage=lineage,
+            completeness_issues=tuple(sorted(issues)),
+            **overrides,
+        )
+
+    def _valid_v2_lineage(self, **overrides: object) -> LandingInputLineage:
+        kwargs = dict(
+            target_session=self.base_run.market_session, binding_cutoff=self.base_run.cutoff
+        )
+        kwargs.update(overrides)
+        return _landing_input_lineage_v2(**kwargs)
+
+    def test_v2_run_persists_and_reloads_with_manifest_source(self) -> None:
+        lineage = self._valid_v2_lineage()
+        run = self._with_lineage(lineage)
+        self.run_store.publish(run)
+        reloaded = self.run_store.get(run.run_id)
+        self.assertEqual(reloaded, run)
+        self.assertEqual(reloaded.landing_input_lineage.manifest_source, lineage.manifest_source)
+        self.assertEqual(reloaded.landing_input_lineage.schema_version, LANDING_INPUT_LINEAGE_SCHEMA_VERSION)
+
+    def test_v2_run_store_json_includes_manifest_source_object(self) -> None:
+        run = self._with_lineage(self._valid_v2_lineage())
+        self.run_store.publish(run)
+        path = self.run_store.path_for(run.run_id)
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("manifest_source", raw["run"]["landing_input_lineage"])
+
+    def test_v2_manifest_source_affects_lineage_id_and_run_id(self) -> None:
+        lineage_a = self._valid_v2_lineage(manifest_generation=999)
+        lineage_b = self._valid_v2_lineage(manifest_generation=111)
+        self.assertNotEqual(lineage_a.lineage_id, lineage_b.lineage_id)
+        run_a = self._with_lineage(lineage_a)
+        run_b = self._with_lineage(lineage_b)
+        self.assertNotEqual(run_a.run_id, run_b.run_id)
+
+
+class LandingInputLineageStoreFieldSetTests(unittest.TestCase):
+    """Exact store field-set coverage: v1 must reject an added
+    manifest_source key, v2 must reject a missing/extra/malformed source
+    key, duplicate keys remain rejected, and neither shape can be silently
+    reinterpreted as the other.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.run_store = LocalDailyPipelineRunStore(Path(self.temporary.name) / "pipeline")
+        self.base_run = _promotion_daily_run()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _publish(self, lineage: object):
+        issues = set(self.base_run.completeness_issues) - {VERIFIED_LANDING_LINEAGE_UNAVAILABLE}
+        run = replace(
+            self.base_run, landing_input_lineage=lineage, completeness_issues=tuple(sorted(issues))
+        )
+        self.run_store.publish(run)
+        return run
+
+    def _tamper(self, run, mutate) -> None:
+        path = self.run_store.path_for(run.run_id)
+        value = json.loads(path.read_text(encoding="utf-8"))
+        mutate(value["run"]["landing_input_lineage"])
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+    def test_v1_stored_record_with_added_manifest_source_key_fails_closed(self) -> None:
+        run = self._publish(
+            _landing_input_lineage(
+                target_session=self.base_run.market_session, binding_cutoff=self.base_run.cutoff
+            )
+        )
+        self._tamper(
+            run,
+            lambda lineage: lineage.update(
+                {
+                    "manifest_source": {
+                        "bucket": "trusted-landing-bucket",
+                        "object_name": f"landing/{self.base_run.market_session.isoformat()}/landing-manifest.json",
+                        "generation": 999,
+                        "target_session": self.base_run.market_session.isoformat(),
+                    }
+                }
+            ),
+        )
+        with self.assertRaises(DailyPipelineRunConflict):
+            self.run_store.get(run.run_id)
+
+    def test_v2_stored_record_missing_manifest_source_key_fails_closed(self) -> None:
+        run = self._publish(
+            _landing_input_lineage_v2(
+                target_session=self.base_run.market_session, binding_cutoff=self.base_run.cutoff
+            )
+        )
+        self._tamper(run, lambda lineage: lineage.pop("manifest_source"))
+        with self.assertRaises(DailyPipelineRunConflict):
+            self.run_store.get(run.run_id)
+
+    def test_v2_stored_record_with_extra_key_on_manifest_source_fails_closed(self) -> None:
+        run = self._publish(
+            _landing_input_lineage_v2(
+                target_session=self.base_run.market_session, binding_cutoff=self.base_run.cutoff
+            )
+        )
+        self._tamper(run, lambda lineage: lineage["manifest_source"].update({"extra_field": "x"}))
+        with self.assertRaises(DailyPipelineRunConflict):
+            self.run_store.get(run.run_id)
+
+    def test_v2_stored_record_with_malformed_manifest_source_generation_fails_closed(self) -> None:
+        run = self._publish(
+            _landing_input_lineage_v2(
+                target_session=self.base_run.market_session, binding_cutoff=self.base_run.cutoff
+            )
+        )
+        self._tamper(run, lambda lineage: lineage["manifest_source"].update({"generation": True}))
+        with self.assertRaises(DailyPipelineRunConflict):
+            self.run_store.get(run.run_id)
+
+    def test_v2_stored_record_reinterpreted_as_v1_fails_closed(self) -> None:
+        # A v2 schema_version whose field set has been trimmed down to the
+        # v1 shape (manifest_source removed) must not be silently accepted
+        # as a legacy record.
+        run = self._publish(
+            _landing_input_lineage_v2(
+                target_session=self.base_run.market_session, binding_cutoff=self.base_run.cutoff
+            )
+        )
+        self._tamper(run, lambda lineage: lineage.pop("manifest_source"))
+        with self.assertRaises(DailyPipelineRunConflict):
+            self.run_store.get(run.run_id)
+
+    def test_duplicate_key_within_manifest_source_fails_closed(self) -> None:
+        run = self._publish(
+            _landing_input_lineage_v2(
+                target_session=self.base_run.market_session, binding_cutoff=self.base_run.cutoff
+            )
+        )
+        path = self.run_store.path_for(run.run_id)
+        text = path.read_text(encoding="utf-8")
+        needle = (
+            '"generation":999,"object_name":'
+            f'"landing/{self.base_run.market_session.isoformat()}/landing-manifest.json"'
+        )
+        replacement = '"generation":999,' + needle
+        self.assertIn(needle, text)
+        tampered = text.replace(needle, replacement, 1)
+        self.assertNotEqual(text, tampered)
+        path.write_text(tampered, encoding="utf-8")
         with self.assertRaises(DailyPipelineRunConflict):
             self.run_store.get(run.run_id)
 

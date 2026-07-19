@@ -110,6 +110,59 @@ production GCS wiring yet -- constructing a real `LandingObjectReader`,
 resolving a manifest, and calling `acquire_verified_landing_inputs` from a
 command remain separate future work.
 
+## Landing-input lineage versioning: legacy v1 and manifest-source v2
+
+`LandingInputLineage` (in `daily_pipeline/landing_lineage.py`) has two
+schema-version shapes, both still readable and both still produced depending
+on the exact inputs supplied:
+
+- **Legacy v1** (`LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION`, the same
+  `"nse-cm-landing-input-lineage/v1"` string this schema has always used).
+  `manifest_source` is required to be `None` on a v1 record, is excluded
+  entirely from both the content-identity hash material and the serialized
+  store JSON (the key is absent, not `null`), and every existing v1
+  `lineage_id`/`run_id` computation is therefore byte-for-byte unchanged by
+  this addition. `build_landing_input_lineage` still produces v1 whenever
+  `VerifiedLandingInputs.manifest_acquisition` is `None` -- which is every
+  case today, since neither the manual-file runner nor the
+  caller-supplied-manifest job composes a real `AcquiredLandingManifest` yet.
+- **V2** (`LANDING_INPUT_LINEAGE_SCHEMA_VERSION`, the new
+  `"nse-cm-landing-input-lineage/v2"` string). Carries a required, non-`None`
+  `manifest_source: LandingManifestSourceLineage` -- the exact `bucket`,
+  `object_name`, `generation`, and `target_session` of the GCS manifest
+  object an `AcquiredLandingManifest` was read from. It has no hash field of
+  its own: `LandingInputLineage.manifest_sha256` remains the one retained
+  manifest hash for both versions, so `manifest_source` never duplicates or
+  becomes a second hash authority. `manifest_source` participates in the
+  content-identity hash and the serialized JSON only for v2, and its bucket
+  and session must agree with both retained data-object lineages and the
+  lineage's own `target_session`. `build_landing_input_lineage` produces v2
+  only when `VerifiedLandingInputs.manifest_acquisition` is present, after
+  independently reconstructing and reverifying that acquisition record
+  against the same trusted manifest bytes the rest of the lineage is built
+  from.
+
+`VerifiedLandingInputs` gained a final, defaulted
+`manifest_acquisition: AcquiredLandingManifest | None = None` field, and
+`acquire_verified_landing_inputs` gained a matching optional keyword. When
+supplied, it is validated -- via a defensively reconstructed snapshot,
+independently re-verified against `manifest` -- before either data-object
+read, exactly like every other trust boundary in this package. Existing
+callers that omit it are completely unaffected.
+
+`LocalDailyPipelineRunStore` encodes/decodes both exact shapes: a legacy v1
+record's stored field set has no `manifest_source` key at all, while a v2
+record's field set always includes an exact nested `manifest_source` object;
+neither shape can be silently reinterpreted as the other, and `DailyPipelineRun`
+schema versions (`DAILY_PIPELINE_RUN_SCHEMA_VERSION`,
+`DAILY_PIPELINE_RUN_STORE_SCHEMA_VERSION`) are untouched by this change.
+
+This task adds only the lineage transport/storage model. It deliberately
+does not compose `acquire_verified_landing_manifest` with the daily landing
+job, add a CLI/scheduler, or construct a real GCS client -- wiring an actual
+GCS-sourced manifest acquisition into `run_daily_pipeline_from_landing_manifest`
+so a real run produces v2 lineage end-to-end remains separate future work.
+
 ## Internal landing-manifest object acquisition boundary
 
 `acquire_verified_landing_manifest` (in `daily_pipeline/landing_manifest_acquisition.py`)

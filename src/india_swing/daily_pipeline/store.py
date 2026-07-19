@@ -16,7 +16,15 @@ from india_swing._filesystem import (
 )
 from india_swing.reference.models import ReferenceReadiness
 
-from .landing_lineage import AcquisitionFileType, LandingInputLineage, LandingLineageError, LandingObjectLineage
+from .landing_lineage import (
+    LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+    LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+    AcquisitionFileType,
+    LandingInputLineage,
+    LandingLineageError,
+    LandingManifestSourceLineage,
+    LandingObjectLineage,
+)
 from .models import (
     DailyPipelineError,
     DailyPipelineRun,
@@ -30,10 +38,14 @@ _MAX_RUN_BYTES = 2 * 1024 * 1024
 _LANDING_OBJECT_LINEAGE_FIELDS = {
     "file_type", "bucket", "object_name", "generation", "target_session", "sha256_hash",
 }
-_LANDING_INPUT_LINEAGE_FIELDS = {
+_LANDING_MANIFEST_SOURCE_LINEAGE_FIELDS = {
+    "bucket", "object_name", "generation", "target_session",
+}
+_LANDING_INPUT_LINEAGE_BASE_FIELDS = {
     "schema_version", "manifest_sha256", "manifest_knowledge_time", "binding_not_before",
     "binding_cutoff", "target_session", "security_master", "daily_bundle", "lineage_id",
 }
+_LANDING_INPUT_LINEAGE_V2_FIELDS = _LANDING_INPUT_LINEAGE_BASE_FIELDS | {"manifest_source"}
 
 
 class DailyPipelineRunConflict(DailyPipelineError):
@@ -75,10 +87,19 @@ def _landing_object_lineage_data(value: LandingObjectLineage) -> dict[str, objec
     }
 
 
+def _landing_manifest_source_lineage_data(value: LandingManifestSourceLineage) -> dict[str, object]:
+    return {
+        "bucket": value.bucket,
+        "object_name": value.object_name,
+        "generation": value.generation,
+        "target_session": value.target_session.isoformat(),
+    }
+
+
 def _landing_input_lineage_data(value: LandingInputLineage | None) -> object:
     if value is None:
         return None
-    return {
+    data: dict[str, object] = {
         "schema_version": value.schema_version,
         "manifest_sha256": value.manifest_sha256,
         "manifest_knowledge_time": value.manifest_knowledge_time.isoformat(),
@@ -89,6 +110,9 @@ def _landing_input_lineage_data(value: LandingInputLineage | None) -> object:
         "daily_bundle": _landing_object_lineage_data(value.daily_bundle),
         "lineage_id": value.lineage_id,
     }
+    if value.manifest_source is not None:
+        data["manifest_source"] = _landing_manifest_source_lineage_data(value.manifest_source)
+    return data
 
 
 def _run_data(run: DailyPipelineRun) -> dict[str, object]:
@@ -200,10 +224,52 @@ def _decode_landing_object_lineage(value: object) -> LandingObjectLineage:
         raise DailyPipelineRunConflict("stored landing object lineage is invalid") from None
 
 
+def _decode_landing_manifest_source_lineage(value: object) -> LandingManifestSourceLineage:
+    if type(value) is not dict or set(value) != _LANDING_MANIFEST_SOURCE_LINEAGE_FIELDS:
+        raise DailyPipelineRunConflict("stored landing manifest source lineage has an invalid shape")
+
+    bucket = value["bucket"]
+    object_name = value["object_name"]
+    generation = value["generation"]
+    target_session_raw = value["target_session"]
+    if (
+        type(bucket) is not str
+        or type(object_name) is not str
+        or type(generation) is not int
+        or type(target_session_raw) is not str
+    ):
+        raise DailyPipelineRunConflict("stored landing manifest source lineage is invalid")
+
+    try:
+        target_session = date.fromisoformat(target_session_raw)
+    except ValueError:
+        raise DailyPipelineRunConflict("stored landing manifest source lineage is invalid") from None
+
+    try:
+        return LandingManifestSourceLineage(
+            bucket=bucket,
+            object_name=object_name,
+            generation=generation,
+            target_session=target_session,
+        )
+    except LandingLineageError:
+        raise DailyPipelineRunConflict("stored landing manifest source lineage is invalid") from None
+
+
 def _decode_landing_input_lineage(value: object) -> LandingInputLineage | None:
     if value is None:
         return None
-    if type(value) is not dict or set(value) != _LANDING_INPUT_LINEAGE_FIELDS:
+    if type(value) is not dict:
+        raise DailyPipelineRunConflict("stored landing input lineage has an invalid shape")
+
+    schema_version_raw = value.get("schema_version")
+    if schema_version_raw == LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION:
+        expected_fields = _LANDING_INPUT_LINEAGE_BASE_FIELDS
+    elif schema_version_raw == LANDING_INPUT_LINEAGE_SCHEMA_VERSION:
+        expected_fields = _LANDING_INPUT_LINEAGE_V2_FIELDS
+    else:
+        raise DailyPipelineRunConflict("stored landing input lineage has an invalid shape")
+    if set(value) != expected_fields:
         raise DailyPipelineRunConflict("stored landing input lineage has an invalid shape")
 
     schema_version = value["schema_version"]
@@ -237,6 +303,11 @@ def _decode_landing_input_lineage(value: object) -> LandingInputLineage | None:
 
     security_master = _decode_landing_object_lineage(value["security_master"])
     daily_bundle = _decode_landing_object_lineage(value["daily_bundle"])
+    manifest_source = (
+        _decode_landing_manifest_source_lineage(value["manifest_source"])
+        if "manifest_source" in value
+        else None
+    )
 
     try:
         lineage = LandingInputLineage(
@@ -248,6 +319,7 @@ def _decode_landing_input_lineage(value: object) -> LandingInputLineage | None:
             target_session=target_session,
             security_master=security_master,
             daily_bundle=daily_bundle,
+            manifest_source=manifest_source,
         )
     except LandingLineageError:
         raise DailyPipelineRunConflict("stored landing input lineage is invalid") from None

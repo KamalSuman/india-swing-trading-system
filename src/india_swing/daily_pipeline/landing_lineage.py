@@ -7,7 +7,13 @@ from datetime import date, datetime, timedelta, timezone
 
 from india_swing.identity import content_id
 
-from .acquisition import AcquiredFile, AcquisitionError, AcquisitionFileType, LandingObjectRequest
+from .acquisition import (
+    AcquiredFile,
+    AcquisitionError,
+    AcquisitionFileType,
+    LandingManifestObjectRequest,
+    LandingObjectRequest,
+)
 from .landing_inputs import VerifiedLandingInputs
 from .landing_manifest import (
     LandingManifestError,
@@ -15,13 +21,16 @@ from .landing_manifest import (
     TrustedLandingManifestBinding,
     VerifiedLandingManifest,
 )
+from .landing_manifest_acquisition import AcquiredLandingManifest
 
-LANDING_INPUT_LINEAGE_SCHEMA_VERSION = "nse-cm-landing-input-lineage/v1"
+LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION = "nse-cm-landing-input-lineage/v1"
+LANDING_INPUT_LINEAGE_SCHEMA_VERSION = "nse-cm-landing-input-lineage/v2"
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _BUCKET_NAME = re.compile(r"[a-z0-9][a-z0-9\-_.]{1,61}[a-z0-9]\Z")
 
 _ERR_OBJECT_LINEAGE = "landing lineage object could not be verified"
+_ERR_MANIFEST_SOURCE_LINEAGE = "landing lineage manifest source object could not be verified"
 _ERR_SCHEMA_VERSION = "landing lineage schema version is unsupported"
 _ERR_MANIFEST_HASH = "landing lineage manifest hash is invalid"
 _ERR_TIME = "landing lineage time is invalid"
@@ -29,6 +38,8 @@ _ERR_TIME_ORDER = "landing lineage time ordering is invalid"
 _ERR_SESSION = "landing lineage target session is invalid"
 _ERR_SESSION_MISMATCH = "landing lineage target session does not match its objects"
 _ERR_OBJECT_ROLE = "landing lineage object role is invalid"
+_ERR_MANIFEST_SOURCE_PRESENCE = "landing lineage manifest source presence does not match its schema version"
+_ERR_MANIFEST_SOURCE_MISMATCH = "landing lineage manifest source does not match its objects"
 _ERR_INPUTS = "landing lineage inputs value is invalid"
 _ERR_INPUTS_MISMATCH = "landing lineage inputs could not be independently verified"
 _ERR_IDENTITY = "landing lineage content identity could not be verified"
@@ -71,6 +82,37 @@ class LandingObjectLineage:
 
 
 @dataclass(frozen=True, slots=True)
+class LandingManifestSourceLineage:
+    """Immutable, content-addressable lineage for the exact GCS manifest
+    object an AcquiredLandingManifest was read from.
+
+    Carries exactly bucket, object_name, generation, and target_session --
+    no hash: LandingInputLineage.manifest_sha256 remains the one retained
+    hash field for the manifest. __post_init__ reconstructs an exact
+    LandingManifestObjectRequest from these fields so the canonical
+    manifest path and positive signed-int64 generation remain governed by
+    that single existing authority rather than a second, possibly-drifting
+    copy of the same rules.
+    """
+
+    bucket: str
+    object_name: str
+    generation: int
+    target_session: date
+
+    def __post_init__(self) -> None:
+        try:
+            LandingManifestObjectRequest(
+                bucket=self.bucket,
+                object_name=self.object_name,
+                generation=self.generation,
+                target_session=self.target_session,
+            )
+        except AcquisitionError:
+            raise LandingLineageError(_ERR_MANIFEST_SOURCE_LINEAGE) from None
+
+
+@dataclass(frozen=True, slots=True)
 class LandingInputLineage:
     """One immutable, content-addressed lineage projection of a
     VerifiedLandingInputs value, intended for later persistence in
@@ -86,10 +128,14 @@ class LandingInputLineage:
     target_session: date
     security_master: LandingObjectLineage
     daily_bundle: LandingObjectLineage
+    manifest_source: LandingManifestSourceLineage | None
     lineage_id: str = field(init=False)
 
     def __post_init__(self) -> None:
-        if self.schema_version != LANDING_INPUT_LINEAGE_SCHEMA_VERSION:
+        if self.schema_version not in (
+            LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+            LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+        ):
             raise LandingLineageError(_ERR_SCHEMA_VERSION)
         if not isinstance(self.manifest_sha256, str) or _SHA256.fullmatch(self.manifest_sha256) is None:
             raise LandingLineageError(_ERR_MANIFEST_HASH)
@@ -126,14 +172,31 @@ class LandingInputLineage:
         ):
             raise LandingLineageError(_ERR_SESSION_MISMATCH)
 
+        if self.schema_version == LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION:
+            if self.manifest_source is not None:
+                raise LandingLineageError(_ERR_MANIFEST_SOURCE_PRESENCE)
+        else:
+            if type(self.manifest_source) is not LandingManifestSourceLineage:
+                raise LandingLineageError(_ERR_MANIFEST_SOURCE_PRESENCE)
+            if self.manifest_source.target_session != self.target_session:
+                raise LandingLineageError(_ERR_MANIFEST_SOURCE_MISMATCH)
+            if (
+                self.manifest_source.bucket != self.security_master.bucket
+                or self.manifest_source.bucket != self.daily_bundle.bucket
+            ):
+                raise LandingLineageError(_ERR_MANIFEST_SOURCE_MISMATCH)
+
         object.__setattr__(self, "lineage_id", self._calculated_lineage_id())
 
     def _identity_material(self) -> dict[str, object]:
-        return {
+        material = {
             value.name: getattr(self, value.name)
             for value in fields(self)
-            if value.name != "lineage_id"
+            if value.name not in ("lineage_id", "manifest_source")
         }
+        if self.schema_version == LANDING_INPUT_LINEAGE_SCHEMA_VERSION:
+            material["manifest_source"] = self.manifest_source
+        return material
 
     def _calculated_lineage_id(self) -> str:
         return content_id(self._identity_material(), length=64)
@@ -163,6 +226,22 @@ class LandingInputLineage:
                 or type(daily_bundle) is not LandingObjectLineage
             ):
                 raise LandingLineageError(_ERR_IDENTITY)
+            manifest_source = self.manifest_source
+            if self.schema_version == LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION:
+                if manifest_source is not None:
+                    raise LandingLineageError(_ERR_IDENTITY)
+                fresh_manifest_source = None
+            elif self.schema_version == LANDING_INPUT_LINEAGE_SCHEMA_VERSION:
+                if type(manifest_source) is not LandingManifestSourceLineage:
+                    raise LandingLineageError(_ERR_IDENTITY)
+                fresh_manifest_source = LandingManifestSourceLineage(
+                    bucket=manifest_source.bucket,
+                    object_name=manifest_source.object_name,
+                    generation=manifest_source.generation,
+                    target_session=manifest_source.target_session,
+                )
+            else:
+                raise LandingLineageError(_ERR_IDENTITY)
             fresh = LandingInputLineage(
                 schema_version=self.schema_version,
                 manifest_sha256=self.manifest_sha256,
@@ -186,6 +265,7 @@ class LandingInputLineage:
                     target_session=daily_bundle.target_session,
                     sha256_hash=daily_bundle.sha256_hash,
                 ),
+                manifest_source=fresh_manifest_source,
             )
             lineage_id = self.lineage_id
             if type(lineage_id) is not str or _SHA256.fullmatch(lineage_id) is None:
@@ -255,6 +335,91 @@ def _object_lineage_from(request: LandingObjectRequest) -> LandingObjectLineage:
         generation=request.generation,
         target_session=request.target_session,
         sha256_hash=request.expected_sha256,
+    )
+
+
+def _manifest_source_lineage_from(
+    manifest_acquisition: AcquiredLandingManifest, reverified_manifest: VerifiedLandingManifest
+) -> LandingManifestSourceLineage:
+    """Independently reconstructs and cross-checks a manifest_acquisition
+    value, returning the LandingManifestSourceLineage projection of its
+    request.
+
+    Duplicated deliberately rather than trusting AcquiredLandingManifest's
+    own prior __post_init__ validation, since a frozen dataclass can be
+    mutated after construction via object.__setattr__: this module must not
+    assume that guarantee still holds by the time it is handed the value.
+    The acquisition's own retained binding must be exactly
+    TrustedLandingManifestBinding -- not a subclass, proxy, or
+    equality-poisoned impostor carrying the same attribute names -- before
+    any of its fields are read at all, so a shaped impostor whose __eq__
+    always returns True cannot be laundered into a real binding by
+    reconstruction and then accepted by value comparison. The request and
+    (now type-verified) binding are both reconstructed from their primitive
+    fields before the manifest is reverified from manifest_bytes against
+    that reconstructed binding, so a malformed nested binding field (wrong
+    type, poisoned comparison, missing attribute) is caught by
+    TrustedLandingManifestBinding's own validation instead of reaching an
+    unguarded comparison inside LandingManifestVerifier.verify. Every
+    ordinary failure here (never BaseException) collapses to one static,
+    sanitized LandingLineageError.
+    """
+
+    try:
+        if type(manifest_acquisition) is not AcquiredLandingManifest:
+            raise ValueError("acquisition must be exact")
+
+        request = manifest_acquisition.request
+        acquired_manifest = manifest_acquisition.manifest
+        if type(request) is not LandingManifestObjectRequest:
+            raise ValueError("acquisition request must be exact")
+        if type(acquired_manifest) is not VerifiedLandingManifest:
+            raise ValueError("acquisition manifest must be exact")
+
+        reconstructed_request = LandingManifestObjectRequest(
+            bucket=request.bucket,
+            object_name=request.object_name,
+            generation=request.generation,
+            target_session=request.target_session,
+        )
+
+        binding = acquired_manifest.binding
+        if type(binding) is not TrustedLandingManifestBinding:
+            raise ValueError("acquisition manifest binding must be exact")
+        reconstructed_binding = TrustedLandingManifestBinding(
+            expected_manifest_sha256=binding.expected_manifest_sha256,
+            allowed_bucket=binding.allowed_bucket,
+            target_session=binding.target_session,
+            not_before=binding.not_before,
+            cutoff=binding.cutoff,
+        )
+
+        reverified_acquisition_manifest = LandingManifestVerifier().verify(
+            acquired_manifest.manifest_bytes, reconstructed_binding
+        )
+
+        # The acquisition's own manifest attribute must agree with a fresh
+        # reverification of its own trusted bytes, and that reverified
+        # value must in turn agree with reverified_manifest -- the sole
+        # object-request authority already established above from this
+        # lineage's own trusted manifest_bytes -- so the acquisition record
+        # is tied to that same authority rather than trusted on its own.
+        if acquired_manifest != reverified_acquisition_manifest:
+            raise ValueError("acquisition manifest does not match its own reverified content")
+        if reconstructed_request.bucket != reverified_acquisition_manifest.binding.allowed_bucket:
+            raise ValueError("acquisition request bucket does not match the manifest")
+        if reconstructed_request.target_session != reverified_acquisition_manifest.target_session:
+            raise ValueError("acquisition request target session does not match the manifest")
+        if reverified_acquisition_manifest != reverified_manifest:
+            raise ValueError("acquisition manifest does not match the outer verified manifest")
+    except Exception:
+        raise LandingLineageError(_ERR_INPUTS_MISMATCH) from None
+
+    return LandingManifestSourceLineage(
+        bucket=reconstructed_request.bucket,
+        object_name=reconstructed_request.object_name,
+        generation=reconstructed_request.generation,
+        target_session=reconstructed_request.target_session,
     )
 
 
@@ -412,8 +577,16 @@ def build_landing_input_lineage(inputs: VerifiedLandingInputs) -> LandingInputLi
     _verify_acquired_object(inputs.security_master, security_master_request)
     _verify_acquired_object(inputs.daily_bundle, daily_bundle_request)
 
+    manifest_acquisition = inputs.manifest_acquisition
+    if manifest_acquisition is None:
+        schema_version = LEGACY_LANDING_INPUT_LINEAGE_SCHEMA_VERSION
+        manifest_source = None
+    else:
+        schema_version = LANDING_INPUT_LINEAGE_SCHEMA_VERSION
+        manifest_source = _manifest_source_lineage_from(manifest_acquisition, reverified)
+
     return LandingInputLineage(
-        schema_version=LANDING_INPUT_LINEAGE_SCHEMA_VERSION,
+        schema_version=schema_version,
         manifest_sha256=reverified.manifest_sha256,
         manifest_knowledge_time=knowledge_time,
         binding_not_before=not_before,
@@ -421,4 +594,5 @@ def build_landing_input_lineage(inputs: VerifiedLandingInputs) -> LandingInputLi
         target_session=manifest_target_session,
         security_master=_object_lineage_from(security_master_request),
         daily_bundle=_object_lineage_from(daily_bundle_request),
+        manifest_source=manifest_source,
     )

@@ -9,6 +9,7 @@ from datetime import date, datetime, timezone
 from india_swing.daily_pipeline.acquisition import (
     AcquiredFile,
     AcquisitionFileType,
+    LandingManifestObjectRequest,
     LandingObjectRequest,
 )
 from india_swing.daily_pipeline.landing_inputs import (
@@ -22,6 +23,7 @@ from india_swing.daily_pipeline.landing_manifest import (
     TrustedLandingManifestBinding,
     VerifiedLandingManifest,
 )
+from india_swing.daily_pipeline.landing_manifest_acquisition import AcquiredLandingManifest
 
 _TARGET_SESSION = date(2026, 7, 16)
 _BUCKET = "trusted-bucket"
@@ -139,6 +141,57 @@ def _valid_manifest_and_reader() -> tuple[
         }
     )
     return manifest, reader, sm_acquired, db_acquired
+
+
+def _manifest_source_object_name(target_session: date = _TARGET_SESSION) -> str:
+    return f"landing/{target_session.isoformat()}/landing-manifest.json"
+
+
+def _acquired_landing_manifest(
+    manifest: VerifiedLandingManifest, *, generation: int = 999
+) -> AcquiredLandingManifest:
+    request = LandingManifestObjectRequest(
+        bucket=manifest.binding.allowed_bucket,
+        object_name=_manifest_source_object_name(manifest.target_session),
+        generation=generation,
+        target_session=manifest.target_session,
+    )
+    return AcquiredLandingManifest(request=request, manifest=manifest)
+
+
+class _ShapedBindingImpostor:
+    """Carries the same five attribute names as TrustedLandingManifestBinding
+    with genuinely valid-looking values, but is not that type and its
+    __eq__ always returns True -- simulating an equality-poisoned impostor
+    that could fool a defense relying on value comparison instead of an
+    exact type check.
+    """
+
+    def __init__(
+        self, *, expected_manifest_sha256, allowed_bucket, target_session, not_before, cutoff
+    ) -> None:
+        self.expected_manifest_sha256 = expected_manifest_sha256
+        self.allowed_bucket = allowed_bucket
+        self.target_session = target_session
+        self.not_before = not_before
+        self.cutoff = cutoff
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __hash__(self) -> int:
+        return 0
+
+
+def _shaped_binding_impostor_for(manifest: VerifiedLandingManifest) -> _ShapedBindingImpostor:
+    real_binding = manifest.binding
+    return _ShapedBindingImpostor(
+        expected_manifest_sha256=real_binding.expected_manifest_sha256,
+        allowed_bucket=real_binding.allowed_bucket,
+        target_session=real_binding.target_session,
+        not_before=real_binding.not_before,
+        cutoff=real_binding.cutoff,
+    )
 
 
 class LandingInputsAcceptanceTests(unittest.TestCase):
@@ -474,6 +527,292 @@ class VerifiedLandingInputsDirectConstructionTests(unittest.TestCase):
                 run_cutoff=_CUTOFF,
                 security_master=tampered,
                 daily_bundle=db_acquired,
+            )
+
+
+class ManifestAcquisitionAcceptanceTests(unittest.TestCase):
+    def test_manifest_acquisition_reaches_verified_inputs_as_a_defensive_snapshot(self) -> None:
+        manifest, reader, sm_acquired, db_acquired = _valid_manifest_and_reader()
+        original_acquisition = _acquired_landing_manifest(manifest, generation=999)
+
+        result = acquire_verified_landing_inputs(
+            manifest=manifest,
+            market_session=_TARGET_SESSION,
+            run_cutoff=_CUTOFF,
+            reader=reader,
+            manifest_acquisition=original_acquisition,
+        )
+
+        self.assertIsNotNone(result.manifest_acquisition)
+        self.assertEqual(result.manifest_acquisition.request.bucket, _BUCKET)
+        self.assertEqual(result.manifest_acquisition.request.generation, 999)
+        self.assertEqual(result.manifest_acquisition.request.target_session, _TARGET_SESSION)
+        self.assertEqual(result.manifest_acquisition.manifest, manifest)
+        # A fresh, defensively-reconstructed snapshot, not the caller's
+        # original object identity.
+        self.assertIsNot(result.manifest_acquisition, original_acquisition)
+        self.assertIsNot(result.manifest_acquisition.request, original_acquisition.request)
+
+    def test_omitted_manifest_acquisition_remains_none(self) -> None:
+        manifest, reader, _, _ = _valid_manifest_and_reader()
+
+        result = acquire_verified_landing_inputs(
+            manifest=manifest, market_session=_TARGET_SESSION, run_cutoff=_CUTOFF, reader=reader
+        )
+
+        self.assertIsNone(result.manifest_acquisition)
+
+
+class ManifestAcquisitionRejectionTests(unittest.TestCase):
+    def test_mismatched_acquisition_manifest_fails_before_any_reader_call(self) -> None:
+        manifest, reader, _, _ = _valid_manifest_and_reader()
+        other_manifest = _verified_manifest(knowledge_time="2026-07-16T14:00:00Z")
+        acquisition = _acquired_landing_manifest(other_manifest)
+
+        with self.assertRaises(LandingInputError):
+            acquire_verified_landing_inputs(
+                manifest=manifest,
+                market_session=_TARGET_SESSION,
+                run_cutoff=_CUTOFF,
+                reader=reader,
+                manifest_acquisition=acquisition,
+            )
+
+        self.assertEqual(reader.calls, [])
+
+    def test_wrong_type_acquisition_fails_before_any_reader_call(self) -> None:
+        manifest, reader, _, _ = _valid_manifest_and_reader()
+
+        with self.assertRaises(LandingInputError):
+            acquire_verified_landing_inputs(
+                manifest=manifest,
+                market_session=_TARGET_SESSION,
+                run_cutoff=_CUTOFF,
+                reader=reader,
+                manifest_acquisition="not-an-acquisition",  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(reader.calls, [])
+
+    def test_acquisition_bucket_not_matching_manifest_binding_fails_before_any_reader_call(
+        self,
+    ) -> None:
+        manifest, reader, _, _ = _valid_manifest_and_reader()
+        acquisition = _acquired_landing_manifest(manifest)
+        object.__setattr__(acquisition.request, "bucket", "another-syntactically-valid-bucket")
+
+        with self.assertRaises(LandingInputError):
+            acquire_verified_landing_inputs(
+                manifest=manifest,
+                market_session=_TARGET_SESSION,
+                run_cutoff=_CUTOFF,
+                reader=reader,
+                manifest_acquisition=acquisition,
+            )
+
+        self.assertEqual(reader.calls, [])
+
+    def test_mutated_acquisition_request_generation_fails_before_any_reader_call(self) -> None:
+        manifest, reader, _, _ = _valid_manifest_and_reader()
+        acquisition = _acquired_landing_manifest(manifest)
+        object.__setattr__(acquisition.request, "generation", True)
+
+        with self.assertRaises(LandingInputError):
+            acquire_verified_landing_inputs(
+                manifest=manifest,
+                market_session=_TARGET_SESSION,
+                run_cutoff=_CUTOFF,
+                reader=reader,
+                manifest_acquisition=acquisition,
+            )
+
+        self.assertEqual(reader.calls, [])
+
+    def test_mutated_acquisition_manifest_field_fails_before_any_reader_call(self) -> None:
+        manifest, reader, _, _ = _valid_manifest_and_reader()
+        # A distinct-but-equal manifest object: mutating the acquisition's
+        # own copy must not also corrupt the `manifest` argument used
+        # directly by _verify_temporal_bounds, which would isolate the
+        # wrong check.
+        acquisition = _acquired_landing_manifest(_verified_manifest())
+        object.__setattr__(acquisition.manifest, "knowledge_time", "not-a-datetime")
+
+        with self.assertRaises(LandingInputError):
+            acquire_verified_landing_inputs(
+                manifest=manifest,
+                market_session=_TARGET_SESSION,
+                run_cutoff=_CUTOFF,
+                reader=reader,
+                manifest_acquisition=acquisition,
+            )
+
+        self.assertEqual(reader.calls, [])
+
+    def test_mutated_acquisition_binding_not_before_never_leaks_raw_exception(self) -> None:
+        manifest, reader, _, _ = _valid_manifest_and_reader()
+        acquisition = _acquired_landing_manifest(_verified_manifest())
+        secret = "SECRET-MUTATED-TIME-DO-NOT-LEAK"
+        object.__setattr__(acquisition.manifest.binding, "not_before", secret)
+
+        with self.assertRaises(LandingInputError) as ctx:
+            acquire_verified_landing_inputs(
+                manifest=manifest,
+                market_session=_TARGET_SESSION,
+                run_cutoff=_CUTOFF,
+                reader=reader,
+                manifest_acquisition=acquisition,
+            )
+
+        self.assertNotIn(secret, str(ctx.exception))
+        self.assertEqual(reader.calls, [])
+
+    def test_mutated_acquisition_binding_cutoff_wrong_type_never_leaks_raw_exception(self) -> None:
+        manifest, reader, _, _ = _valid_manifest_and_reader()
+        acquisition = _acquired_landing_manifest(_verified_manifest())
+        object.__setattr__(acquisition.manifest.binding, "cutoff", 12345)
+
+        with self.assertRaises(LandingInputError):
+            acquire_verified_landing_inputs(
+                manifest=manifest,
+                market_session=_TARGET_SESSION,
+                run_cutoff=_CUTOFF,
+                reader=reader,
+                manifest_acquisition=acquisition,
+            )
+
+        self.assertEqual(reader.calls, [])
+
+    def test_acquisition_binding_replaced_by_plain_object_never_leaks_raw_exception(self) -> None:
+        manifest, reader, _, _ = _valid_manifest_and_reader()
+        acquisition = _acquired_landing_manifest(_verified_manifest())
+        object.__setattr__(acquisition.manifest, "binding", object())
+
+        with self.assertRaises(LandingInputError):
+            acquire_verified_landing_inputs(
+                manifest=manifest,
+                market_session=_TARGET_SESSION,
+                run_cutoff=_CUTOFF,
+                reader=reader,
+                manifest_acquisition=acquisition,
+            )
+
+        self.assertEqual(reader.calls, [])
+
+    def test_shaped_binding_impostor_with_poisoned_equality_is_rejected_before_any_read(
+        self,
+    ) -> None:
+        # Every field is genuinely valid and __eq__ always returns True, so
+        # a defense that reconstructs-then-compares-by-value (rather than
+        # requiring the exact type first) would be fooled into treating
+        # this impostor as a real TrustedLandingManifestBinding.
+        manifest, reader, _, _ = _valid_manifest_and_reader()
+        acquisition = _acquired_landing_manifest(_verified_manifest())
+        impostor = _shaped_binding_impostor_for(acquisition.manifest)
+        object.__setattr__(acquisition.manifest, "binding", impostor)
+
+        with self.assertRaises(LandingInputError) as ctx:
+            acquire_verified_landing_inputs(
+                manifest=manifest,
+                market_session=_TARGET_SESSION,
+                run_cutoff=_CUTOFF,
+                reader=reader,
+                manifest_acquisition=acquisition,
+            )
+
+        self.assertEqual(str(ctx.exception), "landing input manifest acquisition is invalid")
+        self.assertEqual(reader.calls, [])
+
+
+class VerifiedLandingInputsManifestAcquisitionDirectConstructionTests(unittest.TestCase):
+    def test_valid_construction_with_manifest_acquisition_succeeds(self) -> None:
+        manifest, _, sm_acquired, db_acquired = _valid_manifest_and_reader()
+        acquisition = _acquired_landing_manifest(manifest)
+
+        result = VerifiedLandingInputs(
+            manifest=manifest,
+            market_session=_TARGET_SESSION,
+            run_cutoff=_CUTOFF,
+            security_master=sm_acquired,
+            daily_bundle=db_acquired,
+            manifest_acquisition=acquisition,
+        )
+
+        # __post_init__ replaces manifest_acquisition with a defensive
+        # snapshot, so this is value-equal but not the caller's own object.
+        self.assertEqual(result.manifest_acquisition, acquisition)
+        self.assertIsNot(result.manifest_acquisition, acquisition)
+
+    def test_direct_construction_retains_a_defensively_distinct_snapshot(self) -> None:
+        manifest, _, sm_acquired, db_acquired = _valid_manifest_and_reader()
+        acquisition = _acquired_landing_manifest(manifest)
+
+        result = VerifiedLandingInputs(
+            manifest=manifest,
+            market_session=_TARGET_SESSION,
+            run_cutoff=_CUTOFF,
+            security_master=sm_acquired,
+            daily_bundle=db_acquired,
+            manifest_acquisition=acquisition,
+        )
+
+        self.assertIsNot(result.manifest_acquisition, acquisition)
+        self.assertIsNot(result.manifest_acquisition.request, acquisition.request)
+        self.assertIsNot(result.manifest_acquisition.manifest, acquisition.manifest)
+        self.assertIsNot(
+            result.manifest_acquisition.manifest.binding, acquisition.manifest.binding
+        )
+        self.assertEqual(result.manifest_acquisition.request, acquisition.request)
+        self.assertEqual(result.manifest_acquisition.manifest, acquisition.manifest)
+        self.assertEqual(
+            result.manifest_acquisition.manifest.binding, acquisition.manifest.binding
+        )
+
+        # Mutating the caller's original objects after construction must
+        # not be able to reach back into the stored snapshot.
+        object.__setattr__(acquisition.request, "bucket", "another-syntactically-valid-bucket")
+        object.__setattr__(acquisition.manifest.binding, "allowed_bucket", "another-syntactically-valid-bucket")
+        self.assertEqual(result.manifest_acquisition.request.bucket, _BUCKET)
+        self.assertEqual(result.manifest_acquisition.manifest.binding.allowed_bucket, _BUCKET)
+
+    def test_construction_without_manifest_acquisition_still_defaults_to_none(self) -> None:
+        manifest, _, sm_acquired, db_acquired = _valid_manifest_and_reader()
+
+        result = VerifiedLandingInputs(
+            manifest=manifest,
+            market_session=_TARGET_SESSION,
+            run_cutoff=_CUTOFF,
+            security_master=sm_acquired,
+            daily_bundle=db_acquired,
+        )
+
+        self.assertIsNone(result.manifest_acquisition)
+
+    def test_construction_with_mismatched_acquisition_manifest_fails(self) -> None:
+        manifest, _, sm_acquired, db_acquired = _valid_manifest_and_reader()
+        other_manifest = _verified_manifest(knowledge_time="2026-07-16T14:00:00Z")
+        acquisition = _acquired_landing_manifest(other_manifest)
+
+        with self.assertRaises(LandingInputError):
+            VerifiedLandingInputs(
+                manifest=manifest,
+                market_session=_TARGET_SESSION,
+                run_cutoff=_CUTOFF,
+                security_master=sm_acquired,
+                daily_bundle=db_acquired,
+                manifest_acquisition=acquisition,
+            )
+
+    def test_construction_with_wrong_type_acquisition_fails(self) -> None:
+        manifest, _, sm_acquired, db_acquired = _valid_manifest_and_reader()
+
+        with self.assertRaises(LandingInputError):
+            VerifiedLandingInputs(
+                manifest=manifest,
+                market_session=_TARGET_SESSION,
+                run_cutoff=_CUTOFF,
+                security_master=sm_acquired,
+                daily_bundle=db_acquired,
+                manifest_acquisition="not-an-acquisition",  # type: ignore[arg-type]
             )
 
 
