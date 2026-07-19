@@ -16,15 +16,24 @@ from india_swing._filesystem import (
 )
 from india_swing.reference.models import ReferenceReadiness
 
+from .landing_lineage import AcquisitionFileType, LandingInputLineage, LandingLineageError, LandingObjectLineage
 from .models import (
     DailyPipelineError,
     DailyPipelineRun,
 )
 
 
-DAILY_PIPELINE_RUN_STORE_SCHEMA_VERSION = "local-daily-pipeline-run/v1"
+DAILY_PIPELINE_RUN_STORE_SCHEMA_VERSION = "local-daily-pipeline-run/v2"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_RUN_BYTES = 2 * 1024 * 1024
+
+_LANDING_OBJECT_LINEAGE_FIELDS = {
+    "file_type", "bucket", "object_name", "generation", "target_session", "sha256_hash",
+}
+_LANDING_INPUT_LINEAGE_FIELDS = {
+    "schema_version", "manifest_sha256", "manifest_knowledge_time", "binding_not_before",
+    "binding_cutoff", "target_session", "security_master", "daily_bundle", "lineage_id",
+}
 
 
 class DailyPipelineRunConflict(DailyPipelineError):
@@ -53,6 +62,33 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise DailyPipelineRunConflict("daily run contains a duplicate JSON key")
         result[key] = value
     return result
+
+
+def _landing_object_lineage_data(value: LandingObjectLineage) -> dict[str, object]:
+    return {
+        "file_type": value.file_type.value,
+        "bucket": value.bucket,
+        "object_name": value.object_name,
+        "generation": value.generation,
+        "target_session": value.target_session.isoformat(),
+        "sha256_hash": value.sha256_hash,
+    }
+
+
+def _landing_input_lineage_data(value: LandingInputLineage | None) -> object:
+    if value is None:
+        return None
+    return {
+        "schema_version": value.schema_version,
+        "manifest_sha256": value.manifest_sha256,
+        "manifest_knowledge_time": value.manifest_knowledge_time.isoformat(),
+        "binding_not_before": value.binding_not_before.isoformat(),
+        "binding_cutoff": value.binding_cutoff.isoformat(),
+        "target_session": value.target_session.isoformat(),
+        "security_master": _landing_object_lineage_data(value.security_master),
+        "daily_bundle": _landing_object_lineage_data(value.daily_bundle),
+        "lineage_id": value.lineage_id,
+    }
 
 
 def _run_data(run: DailyPipelineRun) -> dict[str, object]:
@@ -96,6 +132,7 @@ def _run_data(run: DailyPipelineRun) -> dict[str, object]:
             [name, count] for name, count in run.adjudication_requirement_counts
         ],
         "completeness_issues": list(run.completeness_issues),
+        "landing_input_lineage": _landing_input_lineage_data(run.landing_input_lineage),
         "readiness": run.readiness.value,
         "actionable": run.actionable,
         "stable_identity_assigned": run.stable_identity_assigned,
@@ -116,9 +153,107 @@ _RUN_FIELDS = {
     "identity_registry_manifest_id", "identity_observation_count",
     "identity_candidate_count", "identity_transition_count",
     "identity_conflict_count", "adjudication_queue_id", "adjudication_case_count",
-    "adjudication_requirement_counts", "completeness_issues", "readiness",
-    "actionable", "stable_identity_assigned",
+    "adjudication_requirement_counts", "completeness_issues", "landing_input_lineage",
+    "readiness", "actionable", "stable_identity_assigned",
 }
+
+
+def _decode_landing_object_lineage(value: object) -> LandingObjectLineage:
+    if type(value) is not dict or set(value) != _LANDING_OBJECT_LINEAGE_FIELDS:
+        raise DailyPipelineRunConflict("stored landing object lineage has an invalid shape")
+
+    file_type_raw = value["file_type"]
+    bucket = value["bucket"]
+    object_name = value["object_name"]
+    generation = value["generation"]
+    target_session_raw = value["target_session"]
+    sha256_hash = value["sha256_hash"]
+    if (
+        type(file_type_raw) is not str
+        or type(bucket) is not str
+        or type(object_name) is not str
+        or type(generation) is not int
+        or type(target_session_raw) is not str
+        or type(sha256_hash) is not str
+    ):
+        raise DailyPipelineRunConflict("stored landing object lineage is invalid")
+
+    try:
+        file_type = AcquisitionFileType(file_type_raw)
+    except ValueError:
+        raise DailyPipelineRunConflict("stored landing object lineage is invalid") from None
+    try:
+        target_session = date.fromisoformat(target_session_raw)
+    except ValueError:
+        raise DailyPipelineRunConflict("stored landing object lineage is invalid") from None
+
+    try:
+        return LandingObjectLineage(
+            file_type=file_type,
+            bucket=bucket,
+            object_name=object_name,
+            generation=generation,
+            target_session=target_session,
+            sha256_hash=sha256_hash,
+        )
+    except LandingLineageError:
+        raise DailyPipelineRunConflict("stored landing object lineage is invalid") from None
+
+
+def _decode_landing_input_lineage(value: object) -> LandingInputLineage | None:
+    if value is None:
+        return None
+    if type(value) is not dict or set(value) != _LANDING_INPUT_LINEAGE_FIELDS:
+        raise DailyPipelineRunConflict("stored landing input lineage has an invalid shape")
+
+    schema_version = value["schema_version"]
+    manifest_sha256 = value["manifest_sha256"]
+    manifest_knowledge_time_raw = value["manifest_knowledge_time"]
+    binding_not_before_raw = value["binding_not_before"]
+    binding_cutoff_raw = value["binding_cutoff"]
+    target_session_raw = value["target_session"]
+    stored_lineage_id = value["lineage_id"]
+    if (
+        type(schema_version) is not str
+        or type(manifest_sha256) is not str
+        or type(manifest_knowledge_time_raw) is not str
+        or type(binding_not_before_raw) is not str
+        or type(binding_cutoff_raw) is not str
+        or type(target_session_raw) is not str
+        or type(stored_lineage_id) is not str
+    ):
+        raise DailyPipelineRunConflict("stored landing input lineage is invalid")
+
+    try:
+        manifest_knowledge_time = datetime.fromisoformat(manifest_knowledge_time_raw)
+        binding_not_before = datetime.fromisoformat(binding_not_before_raw)
+        binding_cutoff = datetime.fromisoformat(binding_cutoff_raw)
+        target_session = date.fromisoformat(target_session_raw)
+    except ValueError:
+        raise DailyPipelineRunConflict("stored landing input lineage is invalid") from None
+    for candidate in (manifest_knowledge_time, binding_not_before, binding_cutoff):
+        if candidate.tzinfo is None or candidate.utcoffset() is None:
+            raise DailyPipelineRunConflict("stored landing input lineage is invalid")
+
+    security_master = _decode_landing_object_lineage(value["security_master"])
+    daily_bundle = _decode_landing_object_lineage(value["daily_bundle"])
+
+    try:
+        lineage = LandingInputLineage(
+            schema_version=schema_version,
+            manifest_sha256=manifest_sha256,
+            manifest_knowledge_time=manifest_knowledge_time,
+            binding_not_before=binding_not_before,
+            binding_cutoff=binding_cutoff,
+            target_session=target_session,
+            security_master=security_master,
+            daily_bundle=daily_bundle,
+        )
+    except LandingLineageError:
+        raise DailyPipelineRunConflict("stored landing input lineage is invalid") from None
+    if lineage.lineage_id != stored_lineage_id:
+        raise DailyPipelineRunConflict("stored landing input lineage ID differs from content")
+    return lineage
 
 
 def _decode_run(value: object) -> DailyPipelineRun:
@@ -165,6 +300,7 @@ def _decode_run(value: object) -> DailyPipelineRun:
                 (item[0], item[1]) for item in value["adjudication_requirement_counts"]
             ),
             completeness_issues=tuple(value["completeness_issues"]),
+            landing_input_lineage=_decode_landing_input_lineage(value["landing_input_lineage"]),
             readiness=ReferenceReadiness(value["readiness"]),
             actionable=value["actionable"],
             stable_identity_assigned=value["stable_identity_assigned"],

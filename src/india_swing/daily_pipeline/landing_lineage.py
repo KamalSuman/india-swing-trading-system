@@ -31,6 +31,7 @@ _ERR_SESSION_MISMATCH = "landing lineage target session does not match its objec
 _ERR_OBJECT_ROLE = "landing lineage object role is invalid"
 _ERR_INPUTS = "landing lineage inputs value is invalid"
 _ERR_INPUTS_MISMATCH = "landing lineage inputs could not be independently verified"
+_ERR_IDENTITY = "landing lineage content identity could not be verified"
 
 
 class LandingLineageError(ValueError):
@@ -136,6 +137,66 @@ class LandingInputLineage:
 
     def _calculated_lineage_id(self) -> str:
         return content_id(self._identity_material(), length=64)
+
+    def verify_content_identity(self) -> None:
+        """Fail-closed recheck that every retained field still produces the
+        stored lineage_id.
+
+        Nothing established by __post_init__ is assumed to still hold: a
+        frozen dataclass can be mutated after construction via
+        object.__setattr__. Both nested object lineages are rebuilt from
+        their current primitive fields to rerun canonical request
+        validation, the whole lineage is rebuilt from its current persisted
+        fields, and the stored lineage_id must be exact lowercase 64-hex
+        and equal the freshly recomputed identity. Performs no mutation and
+        raises only a static LandingLineageError regardless of what a
+        mutated field contains.
+        """
+
+        try:
+            if type(self) is not LandingInputLineage:
+                raise LandingLineageError(_ERR_IDENTITY)
+            security_master = self.security_master
+            daily_bundle = self.daily_bundle
+            if (
+                type(security_master) is not LandingObjectLineage
+                or type(daily_bundle) is not LandingObjectLineage
+            ):
+                raise LandingLineageError(_ERR_IDENTITY)
+            fresh = LandingInputLineage(
+                schema_version=self.schema_version,
+                manifest_sha256=self.manifest_sha256,
+                manifest_knowledge_time=self.manifest_knowledge_time,
+                binding_not_before=self.binding_not_before,
+                binding_cutoff=self.binding_cutoff,
+                target_session=self.target_session,
+                security_master=LandingObjectLineage(
+                    file_type=security_master.file_type,
+                    bucket=security_master.bucket,
+                    object_name=security_master.object_name,
+                    generation=security_master.generation,
+                    target_session=security_master.target_session,
+                    sha256_hash=security_master.sha256_hash,
+                ),
+                daily_bundle=LandingObjectLineage(
+                    file_type=daily_bundle.file_type,
+                    bucket=daily_bundle.bucket,
+                    object_name=daily_bundle.object_name,
+                    generation=daily_bundle.generation,
+                    target_session=daily_bundle.target_session,
+                    sha256_hash=daily_bundle.sha256_hash,
+                ),
+            )
+            lineage_id = self.lineage_id
+            if type(lineage_id) is not str or _SHA256.fullmatch(lineage_id) is None:
+                raise LandingLineageError(_ERR_IDENTITY)
+            if lineage_id != fresh.lineage_id:
+                raise LandingLineageError(_ERR_IDENTITY)
+        except Exception:
+            # A mutated field can make any step above raise an arbitrary
+            # exception (TypeError, AttributeError, ...) whose text may echo
+            # the mutated value; collapse every failure to one static error.
+            raise LandingLineageError(_ERR_IDENTITY) from None
 
 
 def _verify_acquired_object(acquired: AcquiredFile, request: LandingObjectRequest) -> None:

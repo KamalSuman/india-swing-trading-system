@@ -22,7 +22,11 @@ from india_swing.reconciliation.reconciler import reconcile_collection_only
 from india_swing.reference.calendar import CalendarSnapshot
 from india_swing.reference_data.artifact_store import LocalReferenceArtifactStore
 
-from .models import DailyPipelineIntegrityError, DailyPipelineRun
+from .models import (
+    VERIFIED_LANDING_LINEAGE_UNAVAILABLE,
+    DailyPipelineIntegrityError,
+    DailyPipelineRun,
+)
 from .store import LocalDailyPipelineRunStore
 
 
@@ -144,7 +148,13 @@ def run_daily_pipeline(
     )
 
     issues = set(reconciliation.global_reason_codes)
-    issues.update({"IDENTITY_ADJUDICATION_REQUIRED", "STABLE_IDENTITY_UNAVAILABLE"})
+    issues.update(
+        {
+            "IDENTITY_ADJUDICATION_REQUIRED",
+            "STABLE_IDENTITY_UNAVAILABLE",
+            VERIFIED_LANDING_LINEAGE_UNAVAILABLE,
+        }
+    )
     if previous is None:
         issues.add("NO_PREVIOUS_DAILY_RUN")
 
@@ -182,5 +192,6 @@ def run_daily_pipeline(
         adjudication_case_count=len(queue.cases),
         adjudication_requirement_counts=queue.requirement_counts,
         completeness_issues=tuple(sorted(issues)),
+        landing_input_lineage=None,
     )
     return run_store.publish(report)
