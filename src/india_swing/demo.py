@@ -44,6 +44,10 @@ from india_swing.reference.universe import (
     UniverseEntry,
     UniverseSnapshot,
 )
+from india_swing.shadow_alerts import (
+    LocalShadowNotificationOutbox,
+    build_shadow_alert,
+)
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -495,6 +499,12 @@ def build_demo():
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the synthetic India Swing vertical slice")
     parser.add_argument("--output-dir", type=Path, default=Path("var/audit"))
+    parser.add_argument(
+        "--shadow-outbox-dir",
+        type=Path,
+        default=None,
+        help="optionally publish a research-only local shadow notification",
+    )
     args = parser.parse_args(argv)
 
     pipeline, snapshot, instruments, portfolio, reference_context = build_demo()
@@ -511,6 +521,12 @@ def main(argv: list[str] | None = None) -> int:
         "result": result,
     }
     audit_path = AuditWriter().write_pipeline_result(args.output_dir, result, payload)
+    shadow_notification_path = None
+    if args.shadow_outbox_dir is not None:
+        shadow_alert = build_shadow_alert(result)
+        shadow_outbox = LocalShadowNotificationOutbox(args.shadow_outbox_dir)
+        shadow_outbox.put(shadow_alert)
+        shadow_notification_path = shadow_outbox.path_for(shadow_alert.alert_id)
     summary = {
         "mode": "SYNTHETIC_DEMO_ONLY",
         "run_status": result.status,
@@ -538,6 +554,11 @@ def main(argv: list[str] | None = None) -> int:
         "bear_case": result.decision.bear_case,
         "cancel_conditions": result.decision.cancel_conditions,
         "audit_path": str(audit_path.resolve()),
+        "shadow_notification_path": (
+            str(shadow_notification_path.resolve())
+            if shadow_notification_path is not None
+            else None
+        ),
     }
     print(json.dumps(json_value(summary), indent=2))
     return 0 if result.status.value == "COMPLETE" else 2

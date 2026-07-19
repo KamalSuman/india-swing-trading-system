@@ -49,6 +49,11 @@ The current vertical slice implements:
   sessions, while refusing to treat traded-row-only coverage as zero-volume or
   point-in-time universe evidence;
 - evidence-based post-trade reviews that preserve unresolved causes;
+- integrity-bound `RESEARCH_ONLY` shadow candidate/`NO_TRADE` messages with a
+  complete thesis and create-once local notification outbox;
+- an exact-ID, collection-only shadow scanner that ranks no observation until
+  explicit history, liquidity, delivery, universe, price, and tick-size gates
+  pass, while never producing trade levels or execution authority;
 - a pinned, read-only Kite market-data adapter and immutable local snapshot store;
 - a strict, collection-only importer and immutable raw archive for manually
   downloaded NSE CM MII security masters;
@@ -159,6 +164,10 @@ The leakage-safe evaluation split boundary is documented in
 `docs/EVALUATION.md`.
 The effective-dated delivery-cost and conservative fill policy is documented in
 `docs/COSTS_AND_EXECUTION.md`.
+The non-executable paper-notification boundary is documented in
+`docs/SHADOW_ALERTS.md`.
+The explicit-input observation scanner is documented in
+`docs/SHADOW_SCANNER.md`.
 
 Persist or inspect a family evaluation report after its registrations, runs,
 comparisons, and family aggregate have already been sealed:

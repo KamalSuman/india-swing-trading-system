@@ -30,6 +30,7 @@ india-swing-promotion = "india_swing.promotion.cli:main"
 india-swing-tick-sizes = "india_swing.tick_sizes.cli:main"
 india-swing-liquidity = "india_swing.liquidity.cli:main"
 india-swing-universe = "india_swing.universe.cli:main"
+india-swing-shadow-scan = "india_swing.shadow_scanner.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
