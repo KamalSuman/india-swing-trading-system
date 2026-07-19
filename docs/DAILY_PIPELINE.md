@@ -110,6 +110,43 @@ production GCS wiring yet -- constructing a real `LandingObjectReader`,
 resolving a manifest, and calling `acquire_verified_landing_inputs` from a
 command remain separate future work.
 
+## Internal landing-manifest job boundary
+
+`run_daily_pipeline_from_landing_manifest` (in `daily_pipeline/landing_job.py`)
+is a third, internal entry point that composes the existing trust-chain
+stages in order: `LandingManifestVerifier.verify` -> exact manifest bytes and
+an externally trusted `TrustedLandingManifestBinding` produce a
+`VerifiedLandingManifest` -> `acquire_verified_landing_inputs`, using an
+injected `LandingObjectReader`, produces a `VerifiedLandingInputs` ->
+`run_daily_pipeline_from_landing_inputs` produces the `DailyPipelineRun`.
+
+It does not reimplement manifest parsing, object acquisition, lineage
+construction, file materialization, or daily pipeline stages; it only wires
+the three existing functions together. The object reader and every
+artifact store remain caller-injected. It never constructs a GCS client,
+reads an environment variable, inspects the clock, lists objects, selects a
+"latest" object, retries, falls back, schedules work, or sends a
+notification -- session, cutoff, bucket, generation, hash, previous run, and
+calendar are always explicit caller inputs, never inferred from filesystem
+state, listings, environment variables, or current time.
+
+A manifest or binding that fails verification is rejected before
+`acquire_verified_landing_inputs` is ever called, so no object read happens
+on an invalid manifest. A landing-input acquisition failure (including a
+reader failure) is rejected before `run_daily_pipeline_from_landing_inputs` is
+ever called, so no artifact-store mutation happens on a failed acquisition.
+Ordinary failures at these two trust boundaries are each collapsed into one
+static, stage-specific `DailyLandingJobError` with chaining suppressed;
+neither manifest bytes, bucket/object names, generations, hashes, paths,
+nested exception text, nor caller-supplied sentinel values can leak through
+this boundary. Once verified landing inputs exist, this function defers
+entirely to `run_daily_pipeline_from_landing_inputs` for validation, lineage,
+persistence, and failure semantics -- it adds no rollback, cleanup, retry, or
+cross-store transactionality of its own.
+
+This is an internal integration boundary only. There is no CLI command, no
+scheduler, and no authorized-download wiring yet.
+
 ## Current limitations
 
 - The runner consumes manually downloaded, collection-only evidence.

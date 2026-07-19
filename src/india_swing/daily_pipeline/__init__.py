@@ -1,3 +1,4 @@
+from .landing_job import DailyLandingJobError, run_daily_pipeline_from_landing_manifest
 from .models import (
     DAILY_PIPELINE_RUN_SCHEMA_VERSION,
     DailyPipelineError,
@@ -13,6 +14,7 @@ from .store import (
 
 __all__ = [
     "DAILY_PIPELINE_RUN_SCHEMA_VERSION",
+    "DailyLandingJobError",
     "DailyPipelineError",
     "DailyPipelineIntegrityError",
     "DailyPipelineRun",
@@ -21,4 +23,5 @@ __all__ = [
     "LocalDailyPipelineRunStore",
     "run_daily_pipeline",
     "run_daily_pipeline_from_landing_inputs",
+    "run_daily_pipeline_from_landing_manifest",
 ]
