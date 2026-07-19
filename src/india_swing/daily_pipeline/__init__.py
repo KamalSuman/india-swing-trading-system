@@ -1,4 +1,11 @@
+from .acquisition import LandingManifestObjectRequest
 from .landing_job import DailyLandingJobError, run_daily_pipeline_from_landing_manifest
+from .landing_manifest import MAXIMUM_LANDING_MANIFEST_BYTES
+from .landing_manifest_acquisition import (
+    AcquiredLandingManifest,
+    LandingManifestAcquisitionError,
+    acquire_verified_landing_manifest,
+)
 from .models import (
     DAILY_PIPELINE_RUN_SCHEMA_VERSION,
     DailyPipelineError,
@@ -13,6 +20,7 @@ from .store import (
 )
 
 __all__ = [
+    "AcquiredLandingManifest",
     "DAILY_PIPELINE_RUN_SCHEMA_VERSION",
     "DailyLandingJobError",
     "DailyPipelineError",
@@ -20,7 +28,11 @@ __all__ = [
     "DailyPipelineRun",
     "DailyPipelineRunConflict",
     "DailyPipelineRunNotFound",
+    "LandingManifestAcquisitionError",
+    "LandingManifestObjectRequest",
     "LocalDailyPipelineRunStore",
+    "MAXIMUM_LANDING_MANIFEST_BYTES",
+    "acquire_verified_landing_manifest",
     "run_daily_pipeline",
     "run_daily_pipeline_from_landing_inputs",
     "run_daily_pipeline_from_landing_manifest",

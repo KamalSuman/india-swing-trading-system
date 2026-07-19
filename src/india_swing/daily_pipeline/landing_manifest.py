@@ -17,7 +17,7 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _BUCKET_NAME = re.compile(r"[a-z0-9][a-z0-9\-_.]{1,61}[a-z0-9]\Z")
 _CANONICAL_DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 
-_MAXIMUM_MANIFEST_BYTES = 64 * 1024
+MAXIMUM_LANDING_MANIFEST_BYTES = 64 * 1024
 
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "knowledge_time", "target_session", "objects"})
 _OBJECT_KEYS = frozenset({"file_type", "bucket", "object_name", "generation", "sha256"})
@@ -189,7 +189,7 @@ class LandingManifestVerifier:
             raise LandingManifestError(_ERR_MANIFEST_BYTES)
         if len(manifest_bytes) == 0:
             raise LandingManifestError(_ERR_MANIFEST_BYTES)
-        if len(manifest_bytes) > _MAXIMUM_MANIFEST_BYTES:
+        if len(manifest_bytes) > MAXIMUM_LANDING_MANIFEST_BYTES:
             raise LandingManifestError(_ERR_MANIFEST_BYTES)
 
         observed_manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()

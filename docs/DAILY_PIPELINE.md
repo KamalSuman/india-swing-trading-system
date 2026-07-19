@@ -110,6 +110,86 @@ production GCS wiring yet -- constructing a real `LandingObjectReader`,
 resolving a manifest, and calling `acquire_verified_landing_inputs` from a
 command remain separate future work.
 
+## Internal landing-manifest object acquisition boundary
+
+`acquire_verified_landing_manifest` (in `daily_pipeline/landing_manifest_acquisition.py`)
+reads exactly one explicit, generation-pinned GCS landing-manifest object and
+verifies it against an independently supplied `TrustedLandingManifestBinding`,
+returning an exact `AcquiredLandingManifest`. It is the acquisition-layer
+counterpart to `LandingManifestVerifier` (in `landing_manifest.py`), which
+remains the single authority for manifest schema/session/temporal validation.
+
+`AcquiredLandingManifest` is a frozen wrapper carrying exactly `request`
+(the `LandingManifestObjectRequest` that produced the manifest) and
+`manifest` (the resulting `VerifiedLandingManifest`); it duplicates none of
+their fields. It exists because `VerifiedLandingManifest` alone discards the
+manifest object's bucket, canonical object name, and pinned generation once
+verification succeeds -- without the wrapper, nothing downstream could prove
+which exact GCS generation supplied a given manifest, breaking exact source
+lineage. Its `__post_init__` independently re-derives `manifest` from its own
+retained `manifest_bytes` and `binding` and cross-checks `request` against
+that reverified manifest's bucket and session, so a mismatched pairing or a
+nested field mutated in place via `object.__setattr__` after construction is
+rejected with one static, sanitized `LandingManifestAcquisitionError`.
+
+The manifest object request is a distinct `LandingManifestObjectRequest` (in
+`acquisition.py`) -- not a widened `LandingObjectRequest` -- with exactly
+`bucket`, `object_name`, `generation`, and `target_session`; it carries no
+expected hash and no `file_type`, because `TrustedLandingManifestBinding`
+remains the single independent hash authority. The only accepted
+`object_name` is the canonical `landing/{YYYY-MM-DD}/landing-manifest.json`,
+derived from `target_session` the same way the existing security-master and
+daily-bundle paths are derived; any other path (wrong session, path
+traversal, backslash, absolute, browser-renamed, or Unicode-confusable
+variant) is rejected before it can reach a request. The shared 64 KiB
+verifier ceiling is exposed as the public `MAXIMUM_LANDING_MANIFEST_BYTES`
+constant in `landing_manifest.py`, and both the acquisition boundary's own
+payload-size check and `LandingManifestVerifier.verify`'s ceiling check use
+that same constant -- there is no second, possibly-drifting size limit.
+
+At function entry, `acquire_verified_landing_manifest` independently
+reconstructs the exact request and binding it was given into
+`request_snapshot` and `binding_snapshot` -- new, field-copied instances
+decoupled from the caller's original objects -- and requires
+`request_snapshot.bucket == binding_snapshot.allowed_bucket` and
+`request_snapshot.target_session == binding_snapshot.target_session`. Every
+subsequent step -- the reader call, the payload-generation check, the
+expected-hash check, the verifier call, and the returned wrapper -- uses only
+these snapshots and never re-reads the caller's original request or binding.
+This is deliberate, not incidental: a reader (or concurrent caller) that
+mutates the original request/binding objects in place via
+`object.__setattr__` while `read_generation` is running cannot retroactively
+change which bucket/object/generation was requested or which hash a
+downloaded payload is checked against, so a reader cannot make a tampered
+payload acceptable by mutating the original binding's expected hash during
+the read -- a validation-to-use race that a discard-only reconstruction would
+leave open.
+
+Only after the snapshots are validated does the function call the injected
+`GCSObjectReader.read_generation` exactly once, with the exact snapshot
+bucket/object name/generation and `maximum_bytes=
+MAXIMUM_LANDING_MANIFEST_BYTES`. The returned payload is independently
+re-verified -- exact `GCSObjectPayload` type, exact non-bool matching
+generation, non-empty bytes bounded by the shared limit, and SHA-256 equal to
+`binding_snapshot.expected_manifest_sha256` -- before those exact bytes, and
+only those bytes, are handed to `LandingManifestVerifier.verify`.
+
+Ordinary failures (never `BaseException`) at each of the four stages --
+request/binding validation, the reader call, payload validation, and
+manifest verification -- are collapsed into one static, stage-specific,
+chain-suppressed `LandingManifestAcquisitionError`; none of them expose
+bucket/object names, generations, hashes, manifest bytes, or nested exception
+text.
+
+This boundary never constructs a GCS/storage client, never lists a bucket,
+never selects a "latest" object, never retries, falls back, or substitutes a
+second source, and never reads an environment variable or the current clock.
+There is no CLI command, no scheduler, no IAM/Cloud Run wiring, no
+notification, and no composition with `acquire_verified_landing_inputs` or
+`run_daily_pipeline_from_landing_manifest` yet -- wiring this manifest
+acquisition boundary into the daily landing job so a manifest no longer has
+to be supplied as pre-verified bytes remains separate future work.
+
 ## Internal landing-manifest job boundary
 
 `run_daily_pipeline_from_landing_manifest` (in `daily_pipeline/landing_job.py`)

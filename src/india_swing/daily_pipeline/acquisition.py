@@ -61,6 +61,14 @@ def _expected_object_name(file_type: AcquisitionFileType, target_session: date) 
     return f"landing/{target_session.isoformat()}/{filename}"
 
 
+def _landing_manifest_filename() -> str:
+    return "landing-manifest.json"
+
+
+def _expected_manifest_object_name(target_session: date) -> str:
+    return f"landing/{target_session.isoformat()}/{_landing_manifest_filename()}"
+
+
 @dataclass(frozen=True, slots=True)
 class LandingObjectRequest:
     """One explicit, generation-pinned GCS landing object to read.
@@ -101,6 +109,43 @@ class LandingObjectRequest:
         if not isinstance(self.object_name, str) or self.object_name != expected_object_name:
             raise AcquisitionError(
                 "acquisition object name does not match the expected session-bound landing path"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class LandingManifestObjectRequest:
+    """One explicit, generation-pinned GCS landing-manifest object to read.
+
+    Unlike LandingObjectRequest, this carries no expected hash and no
+    file_type: TrustedLandingManifestBinding (in landing_manifest.py) is the
+    single independent authority for the manifest's expected hash. There is
+    no default, no bucket listing, and no "latest object" resolution
+    anywhere in this module.
+    """
+
+    bucket: str
+    object_name: str
+    generation: int
+    target_session: date
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.bucket, str) or _BUCKET_NAME.fullmatch(self.bucket) is None:
+            raise AcquisitionError("acquisition bucket name is invalid")
+        if type(self.target_session) is not date:
+            raise AcquisitionError("acquisition target session must be a date")
+        if (
+            type(self.generation) is not int
+            or self.generation <= 0
+            or self.generation > _MAXIMUM_GENERATION
+        ):
+            raise AcquisitionError(
+                "acquisition generation must be a positive integer within the supported range"
+            )
+        expected_object_name = _expected_manifest_object_name(self.target_session)
+        if not isinstance(self.object_name, str) or self.object_name != expected_object_name:
+            raise AcquisitionError(
+                "acquisition object name does not match the expected session-bound "
+                "landing-manifest path"
             )
 
 
