@@ -237,11 +237,12 @@ text.
 This boundary never constructs a GCS/storage client, never lists a bucket,
 never selects a "latest" object, never retries, falls back, or substitutes a
 second source, and never reads an environment variable or the current clock.
-There is no CLI command, no scheduler, no IAM/Cloud Run wiring, no
-notification, and no composition with `acquire_verified_landing_inputs` or
-`run_daily_pipeline_from_landing_manifest` yet -- wiring this manifest
-acquisition boundary into the daily landing job so a manifest no longer has
-to be supplied as pre-verified bytes remains separate future work.
+There is no CLI command, no scheduler, and no IAM/Cloud Run wiring or
+notification. It is composed with `acquire_verified_landing_inputs` and the
+daily pipeline stages by `run_daily_pipeline_from_pinned_gcs_manifest` (see
+below); it is deliberately not composed with
+`run_daily_pipeline_from_landing_manifest`, whose caller-supplied-bytes
+contract cannot retain manifest source provenance.
 
 ## Internal landing-manifest job boundary
 
@@ -280,9 +281,73 @@ cross-store transactionality of its own.
 This is an internal integration boundary only. There is no CLI command, no
 scheduler, and no authorized-download wiring yet.
 
+## Internal pinned-GCS landing job composition (complete)
+
+`run_daily_pipeline_from_pinned_gcs_manifest` (in
+`daily_pipeline/gcs_landing_job.py`) is the fourth, internal entry point. It
+completes the pinned-GCS reader-to-job composition: exactly one
+caller-injected `GCSObjectReader` now drives the whole chain from an
+explicit `LandingManifestObjectRequest` through to a persisted
+`DailyPipelineRun` carrying exact v2 source lineage, with no client
+construction anywhere in the path.
+
+It composes, in this exact order:
+
+1. `acquire_verified_landing_manifest(manifest_request, binding, reader)` --
+   reads and verifies the pinned landing-manifest object, returning an
+   `AcquiredLandingManifest`.
+2. The same injected `reader` wrapped as `GCSLandingObjectReader(reader)` --
+   the existing NSE-object reader in `acquisition.py` -- so only one
+   `GCSObjectReader` implementation is ever constructed by the caller.
+3. `acquire_verified_landing_inputs(manifest=acquired_manifest.manifest, ...,
+   reader=GCSLandingObjectReader(reader), manifest_acquisition=
+   acquired_manifest)` -- reads the two exact manifest-pinned NSE objects and
+   retains the manifest acquisition, so `build_landing_input_lineage`
+   produces v2 `LandingInputLineage` with an exact `manifest_source`.
+4. `run_daily_pipeline_from_landing_inputs(...)` -- materializes,
+   reconciles, and persists the run exactly as the existing verified-inputs
+   boundary already does.
+
+On a successful run this issues exactly three generation-pinned, bounded
+reads through the injected reader, in order: the manifest (bounded by
+`MAXIMUM_LANDING_MANIFEST_BYTES`), the security master (bounded by 32 MiB),
+and the daily bundle (bounded by 128 MiB). It never calls
+`run_daily_pipeline_from_landing_manifest` -- that boundary's caller-supplied
+manifest bytes cannot carry GCS source provenance and would produce
+legacy-v1 lineage instead. It never constructs a GCS/storage client, reads
+an environment variable, inspects the clock, lists objects, selects a
+"latest" object, retries, falls back to a second source, invokes a
+subprocess, notifies, or schedules/deploys anything; every store, the
+reader, and every temporal/calendar input remain caller-injected.
+
+A manifest that fails acquisition is rejected before either NSE object is
+read, so no artifact-store mutation happens on a failed manifest. A
+data-object acquisition failure (including a `market_session`/`cutoff`
+mismatch against the acquired manifest, or a reader failure on either
+object) is rejected before `run_daily_pipeline_from_landing_inputs` is ever
+called, preserving the existing security-master-before-daily-bundle read
+order and fail-before-second-read behavior. Ordinary failures at the two new
+trust boundaries each collapse into one static, stage-specific,
+chain-suppressed `PinnedGCSLandingJobError`; once verified landing inputs
+exist, `run_daily_pipeline_from_landing_inputs`'s own exceptions and
+persistence semantics are unchanged.
+
+This closes the local reader-to-job composition. What remains separate,
+unauthorized future work: constructing a real `GoogleCloudStorageObjectReader`
+against actual GCP credentials, IAM/bucket configuration, a CLI command,
+a scheduler, and any deployment wiring. Nothing in this increment touches
+any of those.
+
 ## Current limitations
 
-- The runner consumes manually downloaded, collection-only evidence.
+- The manual `run` CLI command consumes manually downloaded, collection-only
+  evidence via caller-supplied filesystem paths. `run_daily_pipeline_from_
+  pinned_gcs_manifest` (the injected pinned-GCS composition boundary
+  documented above) exists and is fully tested, but it is a Python entry
+  point only -- there is no CLI command, no real
+  `GoogleCloudStorageObjectReader` construction, no GCP credential/IAM/bucket
+  configuration, no scheduler, and no deployment wiring for it yet. Both
+  entry points remain manually invoked; neither is triggered automatically.
 - The calendar is locally observed and not point-in-time verified.
 - Independent upstream stores deliberately replay raw sources; the current real
   two-vintage run takes several minutes on the development machine.
@@ -290,4 +355,4 @@ scheduler, and no authorized-download wiring yet.
   lacks `REG1_IND150726.csv`, so 16 July effective surveillance state is not
   substituted from another date.
 - Scheduling, authorized downloading, cloud object immutability, monitoring,
-  and notifications are not implemented by this local command.
+  and notifications are not implemented by either entry point.
