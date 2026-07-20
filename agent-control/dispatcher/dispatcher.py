@@ -62,7 +62,10 @@ CLAUDE_ARGS = [
     "--effort", "medium",
     "--output-format", "json",
     "--no-session-persistence",
-    "--tools", "Bash,Read,Edit,Write",
+    # Native Read/Grep/Glob are intentionally unavailable. File reads and
+    # searches must go through the RTK-filtered Bash allow-rule below, while
+    # native Edit/Write remain available because RTK does not optimize writes.
+    "--tools", "Bash,Edit,Write",
     "--permission-mode", "acceptEdits",
     "--allowedTools", "Bash(rtk:*)",
 ]

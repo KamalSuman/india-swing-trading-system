@@ -55,11 +55,13 @@ app and which task. Commit/push remains Codex-gated per ORCHESTRATION.md.
 
 ## One-time setup
 
-Headless Claude cannot answer permission prompts. The dispatcher passes
-`--permission-mode acceptEdits --allowedTools "Bash(rtk:*)"`, which covers file
-edits and rtk-prefixed shell commands. If a run's log shows a denied tool, add
-an allow rule to `.claude/settings.local.json` in the project root instead of
-widening the dispatcher flags.
+Headless Claude cannot answer permission prompts. The dispatcher exposes only
+native `Edit`/`Write` plus Bash and passes
+`--permission-mode acceptEdits --allowedTools "Bash(rtk:*)"`. Native `Read`,
+`Grep`, and `Glob` are deliberately unavailable, so file reads use `rtk read`
+and searches use targeted `rtk proxy rg`. Native editing stays enabled because
+RTK optimizes shell output, not writes. If a run's log shows a denied tool,
+review the exact task scope before changing these fail-closed flags.
 
 Safety properties preserved from ORCHESTRATION.md:
 

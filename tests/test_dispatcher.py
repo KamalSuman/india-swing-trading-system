@@ -35,10 +35,20 @@ class DispatcherClaudeInvocationTests(unittest.TestCase):
         self.assertIn("--no-session-persistence", dispatcher.CLAUDE_ARGS)
         self.assertEqual(
             dispatcher.CLAUDE_ARGS[dispatcher.CLAUDE_ARGS.index("--tools") + 1],
-            "Bash,Read,Edit,Write",
+            "Bash,Edit,Write",
         )
-        self.assertNotIn("Grep", dispatcher.CLAUDE_ARGS)
-        self.assertNotIn("Glob", dispatcher.CLAUDE_ARGS)
+        enabled_tools = dispatcher.CLAUDE_ARGS[
+            dispatcher.CLAUDE_ARGS.index("--tools") + 1
+        ].split(",")
+        for native_read_tool in ("Read", "Grep", "Glob"):
+            with self.subTest(tool=native_read_tool):
+                self.assertNotIn(native_read_tool, enabled_tools)
+        self.assertEqual(
+            dispatcher.CLAUDE_ARGS[
+                dispatcher.CLAUDE_ARGS.index("--allowedTools") + 1
+            ],
+            "Bash(rtk:*)",
+        )
 
 
 def valid_task(worker: dict) -> dict:
