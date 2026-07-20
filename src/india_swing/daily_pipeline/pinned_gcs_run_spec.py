@@ -6,11 +6,16 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 from .acquisition import AcquisitionError, LandingManifestObjectRequest
+from .calendar_materialization_acquisition import (
+    CalendarMaterializationAcquisitionError,
+    CalendarMaterializationObjectRequest,
+)
 from .landing_manifest import LandingManifestError, TrustedLandingManifestBinding
 
 
 MAXIMUM_PINNED_GCS_RUN_SPEC_BYTES = 32 * 1024
 PINNED_GCS_RUN_SPEC_SCHEMA_VERSION = 1
+PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR = 2
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _CANONICAL_DATE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
@@ -20,9 +25,15 @@ _RFC3339 = re.compile(
 _MAXIMUM_INTEGER_DIGITS = 20  # generous headroom over the 19-digit int64 max
 
 _TOP_LEVEL_KEYS = frozenset({"schema_version", "manifest_request", "trusted_binding", "run"})
+_TOP_LEVEL_KEYS_WITH_CALENDAR = frozenset(
+    {"schema_version", "manifest_request", "trusted_binding", "calendar_request", "run"}
+)
 _MANIFEST_REQUEST_KEYS = frozenset({"bucket", "object_name", "generation", "target_session"})
 _TRUSTED_BINDING_KEYS = frozenset(
     {"expected_manifest_sha256", "allowed_bucket", "target_session", "not_before", "cutoff"}
+)
+_CALENDAR_REQUEST_KEYS = frozenset(
+    {"bucket", "object_name", "generation", "expected_sha256", "materialization_id"}
 )
 _RUN_KEYS = frozenset(
     {"market_session", "cutoff", "calendar_materialization_id", "previous_run_id"}
@@ -37,6 +48,8 @@ _ERR_TOP_LEVEL_SHAPE = "pinned gcs run spec shape is invalid"
 _ERR_SCHEMA_VERSION = "pinned gcs run spec schema version is unsupported"
 _ERR_MANIFEST_REQUEST_SHAPE = "pinned gcs run spec manifest request is invalid"
 _ERR_TRUSTED_BINDING_SHAPE = "pinned gcs run spec trusted binding is invalid"
+_ERR_CALENDAR_REQUEST_SHAPE = "pinned gcs run spec calendar request is invalid"
+_ERR_CALENDAR_REQUEST_MISMATCH = "pinned gcs run spec calendar request does not match the run"
 _ERR_RUN_SHAPE = "pinned gcs run spec run section is invalid"
 _ERR_SESSION = "pinned gcs run spec session is invalid"
 _ERR_SESSION_MISMATCH = "pinned gcs run spec sessions do not agree"
@@ -126,13 +139,17 @@ class PinnedGCSRunSpec:
     cutoff: datetime
     calendar_materialization_id: str
     previous_run_id: str | None
+    calendar_request: CalendarMaterializationObjectRequest | None = None
 
     def __post_init__(self) -> None:
-        if (
-            type(self.schema_version) is not int
-            or self.schema_version != PINNED_GCS_RUN_SPEC_SCHEMA_VERSION
+        if type(self.schema_version) is not int or self.schema_version not in (
+            PINNED_GCS_RUN_SPEC_SCHEMA_VERSION,
+            PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR,
         ):
             raise PinnedGCSRunSpecError(_ERR_SCHEMA_VERSION)
+        is_calendar_schema = (
+            self.schema_version == PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR
+        )
 
         manifest_request = self.manifest_request
         trusted_binding = self.trusted_binding
@@ -183,6 +200,33 @@ class PinnedGCSRunSpec:
         object.__setattr__(binding_snapshot, "not_before", binding_not_before_utc)
         object.__setattr__(binding_snapshot, "cutoff", binding_cutoff_utc)
 
+        calendar_request = self.calendar_request
+        if is_calendar_schema:
+            if type(calendar_request) is not CalendarMaterializationObjectRequest:
+                raise PinnedGCSRunSpecError(_ERR_CALENDAR_REQUEST_SHAPE)
+            if (
+                type(calendar_request.bucket) is not str
+                or type(calendar_request.object_name) is not str
+                or type(calendar_request.generation) is not int
+                or type(calendar_request.expected_sha256) is not str
+                or type(calendar_request.materialization_id) is not str
+            ):
+                raise PinnedGCSRunSpecError(_ERR_CALENDAR_REQUEST_SHAPE)
+            try:
+                calendar_request_snapshot = CalendarMaterializationObjectRequest(
+                    bucket=calendar_request.bucket,
+                    object_name=calendar_request.object_name,
+                    generation=calendar_request.generation,
+                    expected_sha256=calendar_request.expected_sha256,
+                    materialization_id=calendar_request.materialization_id,
+                )
+            except Exception:
+                raise PinnedGCSRunSpecError(_ERR_CALENDAR_REQUEST_SHAPE) from None
+        else:
+            if calendar_request is not None:
+                raise PinnedGCSRunSpecError(_ERR_CALENDAR_REQUEST_SHAPE)
+            calendar_request_snapshot = None
+
         if type(self.market_session) is not date:
             raise PinnedGCSRunSpecError(_ERR_SESSION)
 
@@ -218,9 +262,16 @@ class PinnedGCSRunSpec:
         if binding_snapshot.cutoff > run_cutoff_utc:
             raise PinnedGCSRunSpecError(_ERR_TIME_SEQUENCE)
 
+        if (
+            is_calendar_schema
+            and calendar_request_snapshot.materialization_id != self.calendar_materialization_id
+        ):
+            raise PinnedGCSRunSpecError(_ERR_CALENDAR_REQUEST_MISMATCH)
+
         object.__setattr__(self, "manifest_request", request_snapshot)
         object.__setattr__(self, "trusted_binding", binding_snapshot)
         object.__setattr__(self, "cutoff", run_cutoff_utc)
+        object.__setattr__(self, "calendar_request", calendar_request_snapshot)
 
 
 def parse_pinned_gcs_run_spec(spec_bytes: bytes) -> PinnedGCSRunSpec:
@@ -273,12 +324,27 @@ def parse_pinned_gcs_run_spec(spec_bytes: bytes) -> PinnedGCSRunSpec:
     except (json.JSONDecodeError, RecursionError):
         raise PinnedGCSRunSpecError(_ERR_JSON) from None
 
-    if type(raw) is not dict or set(raw) != _TOP_LEVEL_KEYS:
+    if type(raw) is not dict:
         raise PinnedGCSRunSpecError(_ERR_TOP_LEVEL_SHAPE)
-
-    schema_version = raw["schema_version"]
-    if type(schema_version) is not int or schema_version != PINNED_GCS_RUN_SPEC_SCHEMA_VERSION:
-        raise PinnedGCSRunSpecError(_ERR_SCHEMA_VERSION)
+    raw_keys = set(raw)
+    if raw_keys == _TOP_LEVEL_KEYS:
+        schema_version = raw["schema_version"]
+        if (
+            type(schema_version) is not int
+            or schema_version != PINNED_GCS_RUN_SPEC_SCHEMA_VERSION
+        ):
+            raise PinnedGCSRunSpecError(_ERR_SCHEMA_VERSION)
+        calendar_request_raw = None
+    elif raw_keys == _TOP_LEVEL_KEYS_WITH_CALENDAR:
+        schema_version = raw["schema_version"]
+        if (
+            type(schema_version) is not int
+            or schema_version != PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR
+        ):
+            raise PinnedGCSRunSpecError(_ERR_SCHEMA_VERSION)
+        calendar_request_raw = raw["calendar_request"]
+    else:
+        raise PinnedGCSRunSpecError(_ERR_TOP_LEVEL_SHAPE)
 
     manifest_request_raw = raw["manifest_request"]
     if (
@@ -340,6 +406,26 @@ def parse_pinned_gcs_run_spec(spec_bytes: bytes) -> PinnedGCSRunSpec:
     ):
         raise PinnedGCSRunSpecError(_ERR_PREVIOUS_RUN_ID)
 
+    calendar_request = None
+    if calendar_request_raw is not None:
+        if (
+            type(calendar_request_raw) is not dict
+            or set(calendar_request_raw) != _CALENDAR_REQUEST_KEYS
+        ):
+            raise PinnedGCSRunSpecError(_ERR_CALENDAR_REQUEST_SHAPE)
+        try:
+            calendar_request = CalendarMaterializationObjectRequest(
+                bucket=calendar_request_raw["bucket"],
+                object_name=calendar_request_raw["object_name"],
+                generation=calendar_request_raw["generation"],
+                expected_sha256=calendar_request_raw["expected_sha256"],
+                materialization_id=calendar_request_raw["materialization_id"],
+            )
+        except CalendarMaterializationAcquisitionError:
+            raise PinnedGCSRunSpecError(_ERR_CALENDAR_REQUEST_SHAPE) from None
+        if calendar_request.materialization_id != calendar_materialization_id:
+            raise PinnedGCSRunSpecError(_ERR_CALENDAR_REQUEST_MISMATCH)
+
     return PinnedGCSRunSpec(
         schema_version=schema_version,
         manifest_request=manifest_request,
@@ -348,4 +434,5 @@ def parse_pinned_gcs_run_spec(spec_bytes: bytes) -> PinnedGCSRunSpec:
         cutoff=run_cutoff,
         calendar_materialization_id=calendar_materialization_id,
         previous_run_id=previous_run_id,
+        calendar_request=calendar_request,
     )

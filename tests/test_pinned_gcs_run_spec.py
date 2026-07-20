@@ -7,10 +7,14 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 from india_swing.daily_pipeline.acquisition import LandingManifestObjectRequest
+from india_swing.daily_pipeline.calendar_materialization_acquisition import (
+    CalendarMaterializationObjectRequest,
+)
 from india_swing.daily_pipeline.landing_manifest import TrustedLandingManifestBinding
 from india_swing.daily_pipeline.pinned_gcs_run_spec import (
     MAXIMUM_PINNED_GCS_RUN_SPEC_BYTES,
     PINNED_GCS_RUN_SPEC_SCHEMA_VERSION,
+    PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR,
     PinnedGCSRunSpec,
     PinnedGCSRunSpecError,
     parse_pinned_gcs_run_spec,
@@ -24,6 +28,9 @@ _PREVIOUS_RUN_ID = "c" * 64
 _NOT_BEFORE = "2026-07-20T00:00:00Z"
 _BINDING_CUTOFF = "2026-07-20T14:00:00Z"
 _RUN_CUTOFF = "2026-07-20T15:00:00Z"
+_CALENDAR_BUCKET = "trusted-calendar-materialization-bucket"
+_CALENDAR_GENERATION = 555
+_CALENDAR_SHA256 = "d" * 64
 
 
 def _manifest_object_name(session: date = _SESSION) -> str:
@@ -121,6 +128,69 @@ def _valid_spec_kwargs(**overrides: object) -> dict[str, object]:
         calendar_materialization_id=_CALENDAR_ID,
         previous_run_id=None,
     )
+    base.update(overrides)
+    return base
+
+
+def _calendar_object_name(materialization_id: str = _CALENDAR_ID) -> str:
+    return f"calendar-materializations/{materialization_id}/materialization.json"
+
+
+def _valid_calendar_request_dict(
+    *,
+    bucket: object = _CALENDAR_BUCKET,
+    object_name: object = None,
+    generation: object = _CALENDAR_GENERATION,
+    expected_sha256: object = _CALENDAR_SHA256,
+    materialization_id: object = _CALENDAR_ID,
+) -> dict[str, object]:
+    resolved_object_name = (
+        object_name
+        if object_name is not None
+        else _calendar_object_name(
+            materialization_id if isinstance(materialization_id, str) else _CALENDAR_ID
+        )
+    )
+    return {
+        "bucket": bucket,
+        "object_name": resolved_object_name,
+        "generation": generation,
+        "expected_sha256": expected_sha256,
+        "materialization_id": materialization_id,
+    }
+
+
+def _valid_calendar_request(*, materialization_id: str = _CALENDAR_ID) -> CalendarMaterializationObjectRequest:
+    return CalendarMaterializationObjectRequest(
+        bucket=_CALENDAR_BUCKET,
+        object_name=_calendar_object_name(materialization_id),
+        generation=_CALENDAR_GENERATION,
+        expected_sha256=_CALENDAR_SHA256,
+        materialization_id=materialization_id,
+    )
+
+
+def _valid_spec_dict_v2(
+    *,
+    calendar_request: object = None,
+    **overrides: object,
+) -> dict[str, object]:
+    overrides.setdefault("schema_version", PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR)
+    value = _valid_spec_dict(**overrides)
+    value["calendar_request"] = (
+        calendar_request if calendar_request is not None else _valid_calendar_request_dict()
+    )
+    return value
+
+
+def _valid_spec_bytes_v2(**overrides: object) -> bytes:
+    return _encode(_valid_spec_dict_v2(**overrides))
+
+
+def _valid_spec_kwargs_v2(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = _valid_spec_kwargs()
+    base["schema_version"] = PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR
+    base["calendar_request"] = _valid_calendar_request()
     base.update(overrides)
     return base
 
@@ -651,8 +721,11 @@ class PinnedGCSRunSpecDirectConstructionTests(unittest.TestCase):
         self.assertEqual(spec.trusted_binding.allowed_bucket, _BUCKET)
 
     def test_direct_construction_failure_is_static_and_sanitized(self) -> None:
+        # schema_version=3 (not 1 or PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR
+        # == 2, which is now a legitimate, supported schema) is used here to keep
+        # exercising a genuinely unsupported version.
         with self.assertRaises(PinnedGCSRunSpecError) as ctx:
-            PinnedGCSRunSpec(**_valid_spec_kwargs(schema_version=2))
+            PinnedGCSRunSpec(**_valid_spec_kwargs(schema_version=3))
         self.assertEqual(
             str(ctx.exception), "pinned gcs run spec schema version is unsupported"
         )
@@ -743,6 +816,175 @@ class PinnedGCSRunSpecDirectConstructionTests(unittest.TestCase):
         self.assertNotIn("RuntimeError", str(ctx.exception))
 
 
+class SchemaV2ParseAcceptanceTests(unittest.TestCase):
+    def test_parses_valid_v2_document(self) -> None:
+        spec = parse_pinned_gcs_run_spec(_valid_spec_bytes_v2())
+        self.assertEqual(spec.schema_version, PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR)
+        self.assertIsInstance(spec.calendar_request, CalendarMaterializationObjectRequest)
+        self.assertEqual(spec.calendar_request.materialization_id, _CALENDAR_ID)
+        self.assertEqual(spec.calendar_request.bucket, _CALENDAR_BUCKET)
+
+    def test_v1_document_still_parses_with_none_calendar_request(self) -> None:
+        spec = parse_pinned_gcs_run_spec(_valid_spec_bytes())
+        self.assertEqual(spec.schema_version, PINNED_GCS_RUN_SPEC_SCHEMA_VERSION)
+        self.assertIsNone(spec.calendar_request)
+
+
+class SchemaV2ParseRejectionTests(unittest.TestCase):
+    def test_v1_rejects_extra_calendar_request_key(self) -> None:
+        spec_dict = _valid_spec_dict_v2()
+        spec_dict["schema_version"] = PINNED_GCS_RUN_SPEC_SCHEMA_VERSION
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_missing_calendar_request_key(self) -> None:
+        spec_dict = _valid_spec_dict()
+        spec_dict["schema_version"] = PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_extra_top_level_key(self) -> None:
+        spec_dict = _valid_spec_dict_v2()
+        spec_dict["unexpected_extra"] = "x"
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_missing_calendar_request_nested_key(self) -> None:
+        spec_dict = _valid_spec_dict_v2()
+        del spec_dict["calendar_request"]["materialization_id"]
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_extra_calendar_request_nested_key(self) -> None:
+        spec_dict = _valid_spec_dict_v2()
+        spec_dict["calendar_request"]["unexpected_extra"] = "x"
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_wrong_type_calendar_request(self) -> None:
+        spec_dict = _valid_spec_dict_v2()
+        spec_dict["calendar_request"] = "not-an-object"
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_malformed_canonical_object_name(self) -> None:
+        spec_dict = _valid_spec_dict_v2(
+            calendar_request=_valid_calendar_request_dict(object_name="wrong/path.json")
+        )
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_path_traversal_object_name(self) -> None:
+        spec_dict = _valid_spec_dict_v2(
+            calendar_request=_valid_calendar_request_dict(
+                object_name=f"calendar-materializations/{_CALENDAR_ID}/../materialization.json"
+            )
+        )
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_bool_generation(self) -> None:
+        spec_dict = _valid_spec_dict_v2(
+            calendar_request=_valid_calendar_request_dict(generation=True)
+        )
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_malformed_expected_sha256(self) -> None:
+        spec_dict = _valid_spec_dict_v2(
+            calendar_request=_valid_calendar_request_dict(expected_sha256="Z" * 64)
+        )
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_malformed_materialization_id(self) -> None:
+        spec_dict = _valid_spec_dict_v2(
+            calendar_request=_valid_calendar_request_dict(materialization_id="not-hex")
+        )
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_calendar_request_id_mismatch_with_run(self) -> None:
+        other_id = "e" * 64
+        spec_dict = _valid_spec_dict_v2(
+            calendar_request=_valid_calendar_request_dict(
+                materialization_id=other_id,
+                object_name=_calendar_object_name(other_id),
+            )
+        )
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(_encode(spec_dict))
+
+    def test_v2_rejects_duplicate_nested_calendar_request_key(self) -> None:
+        text = json.dumps(_valid_spec_dict_v2(), separators=(",", ":"))
+        needle = '"bucket":"' + _CALENDAR_BUCKET + '"'
+        self.assertEqual(text.count(needle), 1)
+        idx = text.index(needle)
+        end = idx + len(needle)
+        tampered = text[:end] + "," + needle + text[end:]
+        with self.assertRaises(PinnedGCSRunSpecError):
+            parse_pinned_gcs_run_spec(tampered.encode("utf-8"))
+
+
+class SchemaV2DirectConstructionTests(unittest.TestCase):
+    def test_valid_v2_construction_succeeds(self) -> None:
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2())
+        self.assertIsInstance(spec.calendar_request, CalendarMaterializationObjectRequest)
+
+    def test_v1_construction_rejects_non_none_calendar_request(self) -> None:
+        with self.assertRaises(PinnedGCSRunSpecError):
+            PinnedGCSRunSpec(**_valid_spec_kwargs(calendar_request=_valid_calendar_request()))
+
+    def test_v2_construction_rejects_none_calendar_request(self) -> None:
+        with self.assertRaises(PinnedGCSRunSpecError):
+            PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=None))
+
+    def test_v2_construction_rejects_wrong_type_calendar_request(self) -> None:
+        with self.assertRaises(PinnedGCSRunSpecError):
+            PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request="not-a-request"))
+
+    def test_v2_construction_rejects_calendar_request_subclass(self) -> None:
+        real = _valid_calendar_request()
+
+        class _CalendarRequestSubclass(CalendarMaterializationObjectRequest):
+            pass
+
+        subclass_instance = _CalendarRequestSubclass(
+            bucket=real.bucket,
+            object_name=real.object_name,
+            generation=real.generation,
+            expected_sha256=real.expected_sha256,
+            materialization_id=real.materialization_id,
+        )
+        with self.assertRaises(PinnedGCSRunSpecError):
+            PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=subclass_instance))
+
+    def test_v2_construction_rejects_post_construction_mutated_calendar_request(self) -> None:
+        calendar_request = _valid_calendar_request()
+        object.__setattr__(calendar_request, "materialization_id", "f" * 64)
+        with self.assertRaises(PinnedGCSRunSpecError):
+            PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+
+    def test_v2_construction_rejects_calendar_request_id_mismatch_with_run(self) -> None:
+        with self.assertRaises(PinnedGCSRunSpecError):
+            PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_materialization_id="e" * 64))
+
+    def test_v2_defensive_snapshot_identity_for_calendar_request(self) -> None:
+        calendar_request = _valid_calendar_request()
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        self.assertIsNot(spec.calendar_request, calendar_request)
+        self.assertEqual(spec.calendar_request, calendar_request)
+        object.__setattr__(calendar_request, "expected_sha256", "f" * 64)
+        self.assertEqual(spec.calendar_request.expected_sha256, _CALENDAR_SHA256)
+
+    def test_calendar_request_mismatch_failure_is_static_and_sanitized(self) -> None:
+        distinctive_id = "e" * 64
+        with self.assertRaises(PinnedGCSRunSpecError) as ctx:
+            PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_materialization_id=distinctive_id))
+        self.assertNotIn(distinctive_id, str(ctx.exception))
+        self.assertNotIn(_CALENDAR_BUCKET, str(ctx.exception))
+
+
 class SanitizationTests(unittest.TestCase):
     def test_secret_bucket_never_leaks(self) -> None:
         secret = "secret-bucket-do-not-leak-9f2a"
@@ -797,6 +1039,8 @@ _EXACT_ALLOWED_SPEC_IMPORTS = frozenset((
     (0, "datetime", "timezone", None),
     (1, "acquisition", "AcquisitionError", None),
     (1, "acquisition", "LandingManifestObjectRequest", None),
+    (1, "calendar_materialization_acquisition", "CalendarMaterializationAcquisitionError", None),
+    (1, "calendar_materialization_acquisition", "CalendarMaterializationObjectRequest", None),
     (1, "landing_manifest", "LandingManifestError", None),
     (1, "landing_manifest", "TrustedLandingManifestBinding", None),
 ))
@@ -832,6 +1076,7 @@ _EXACT_ALLOWED_SPEC_CALL_TARGETS = frozenset((
     "type",
     "LandingManifestObjectRequest",
     "TrustedLandingManifestBinding",
+    "CalendarMaterializationObjectRequest",
     "__setattr__",
     "decode",
     "loads",
