@@ -24,7 +24,17 @@ from india_swing.calendar_data.materialization_store import (
     StoredCalendarMaterialization,
 )
 from india_swing.calendar_data.models import CALENDAR_DECLARATION_SCHEMA_VERSION
-from india_swing.daily_pipeline.acquisition import LandingManifestObjectRequest
+from india_swing.daily_pipeline.acquisition import GCSObjectPayload, LandingManifestObjectRequest
+from india_swing.daily_pipeline.calendar_materialization_acquisition import (
+    AcquiredCalendarMaterialization,
+    CalendarMaterializationAcquisitionError,
+    CalendarMaterializationObjectRequest,
+    acquire_calendar_materialization,
+)
+from india_swing.calendar_data.materialization_codec import (
+    MAXIMUM_CALENDAR_MATERIALIZATION_BYTES,
+    encode_calendar_materialization,
+)
 from india_swing.daily_pipeline.landing_manifest import TrustedLandingManifestBinding
 from india_swing.daily_pipeline.pinned_gcs_run_service import (
     PinnedGCSRunServiceError,
@@ -32,6 +42,7 @@ from india_swing.daily_pipeline.pinned_gcs_run_service import (
 )
 from india_swing.daily_pipeline.pinned_gcs_run_spec import (
     PINNED_GCS_RUN_SPEC_SCHEMA_VERSION,
+    PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR,
     PinnedGCSRunSpec,
 )
 from india_swing.reference.models import ReferenceReadiness
@@ -49,8 +60,17 @@ _NOT_BEFORE = datetime(2026, 7, 20, 0, 0, 0, tzinfo=UTC)
 _BINDING_CUTOFF = datetime(2026, 7, 20, 14, 0, 0, tzinfo=UTC)
 _RUN_CUTOFF = datetime(2026, 7, 20, 15, 0, 0, tzinfo=UTC)
 _ENCODED_PLACEHOLDER = b"pinned-gcs-run-service-test-materialization-bytes"
+_CALENDAR_ACQUISITION_BUCKET = "trusted-calendar-materialization-bucket"
+_CALENDAR_ACQUISITION_GENERATION = 999
+_ERR_SPEC = "pinned gcs run service spec is invalid"
+_ERR_CALENDAR_ACQUISITION = "pinned gcs run service calendar acquisition failed"
+_ERR_CALENDAR = "pinned gcs run service calendar materialization is invalid"
+_ERR_EXECUTION = "pinned gcs run service execution failed"
 
 _SERVICE_TARGET = "india_swing.daily_pipeline.pinned_gcs_run_service.run_daily_pipeline_from_pinned_gcs_manifest"
+_ACQUIRE_TARGET = (
+    "india_swing.daily_pipeline.pinned_gcs_run_service.acquire_calendar_materialization"
+)
 
 
 def _manifest_object_name(session: date = _SESSION) -> str:
@@ -89,6 +109,50 @@ def _valid_spec_kwargs(*, calendar_materialization_id: str, **overrides: object)
     )
     base.update(overrides)
     return base
+
+
+def _valid_spec_kwargs_v2(
+    *, calendar_request: CalendarMaterializationObjectRequest, **overrides: object
+) -> dict[str, object]:
+    session = overrides.pop("_session", _SESSION)
+    base: dict[str, object] = dict(
+        schema_version=PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR,
+        manifest_request=_valid_request(session),
+        trusted_binding=_valid_binding(session),
+        market_session=session,
+        cutoff=_RUN_CUTOFF,
+        calendar_materialization_id=calendar_request.materialization_id,
+        previous_run_id=None,
+        calendar_request=calendar_request,
+    )
+    base.update(overrides)
+    return base
+
+
+def _calendar_object_name(materialization_id: str) -> str:
+    return f"calendar-materializations/{materialization_id}/materialization.json"
+
+
+class FakeGCSObjectReader:
+    """Fake GCSObjectReader. Never contacts GCP; records every call made."""
+
+    def __init__(self, *, generation: object, content_bytes: object) -> None:
+        self.generation = generation
+        self.content_bytes = content_bytes
+        self.calls: list[dict[str, object]] = []
+
+    def read_generation(
+        self, *, bucket: str, object_name: str, generation: int, maximum_bytes: int
+    ) -> GCSObjectPayload:
+        self.calls.append(
+            {
+                "bucket": bucket,
+                "object_name": object_name,
+                "generation": generation,
+                "maximum_bytes": maximum_bytes,
+            }
+        )
+        return GCSObjectPayload(content_bytes=self.content_bytes, generation=self.generation)
 
 
 def _import_base_source(calendar_root: Path, inputs_root: Path, *, document_id: str = "CMTR-BASE-2026"):
@@ -162,6 +226,39 @@ def _build_materialization(
         cutoff=cutoff,
         observed_date_artifacts=(),
     )
+
+
+def _build_v2_fixture(
+    root: Path,
+    *,
+    session: date = _SESSION,
+    cutoff: datetime = _CALENDAR_CUTOFF,
+    document_id: str = "CMTR-V2-BASE",
+    generation: int = _CALENDAR_ACQUISITION_GENERATION,
+    bucket: str = _CALENDAR_ACQUISITION_BUCKET,
+) -> tuple[
+    CollectionCalendarMaterialization,
+    bytes,
+    CalendarMaterializationObjectRequest,
+    FakeGCSObjectReader,
+]:
+    """Real, canonically-encoded materialization plus a matching
+    generation-pinned calendar_request and an injected fake reader ready
+    to serve it -- reused across every schema-v2 test in this file."""
+
+    materialization = _build_materialization(
+        root, session=session, cutoff=cutoff, document_id=document_id
+    )
+    payload = encode_calendar_materialization(materialization)
+    calendar_request = CalendarMaterializationObjectRequest(
+        bucket=bucket,
+        object_name=_calendar_object_name(materialization.materialization_id),
+        generation=generation,
+        expected_sha256=hashlib.sha256(payload).hexdigest(),
+        materialization_id=materialization.materialization_id,
+    )
+    fake_reader = FakeGCSObjectReader(generation=generation, content_bytes=payload)
+    return materialization, payload, calendar_request, fake_reader
 
 
 def _store_manifest_for(
@@ -328,6 +425,64 @@ class ServiceAcceptanceTests(PinnedGCSRunServiceTestCase):
 
         self.assertEqual(spy.calls[0]["previous_run_id"], _PREVIOUS_RUN_ID)
 
+    def test_schema_v1_never_calls_reader_read_generation(self) -> None:
+        stored = self._stored()
+        spec = self._spec(stored)
+
+        class _ReaderThatMustNotBeCalled:
+            def read_generation(self, **_kwargs: object) -> None:
+                raise AssertionError("schema v1 must never call read_generation")
+
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": _ReaderThatMustNotBeCalled()}
+
+        with patch(_SERVICE_TARGET, spy):
+            run_daily_pipeline_from_pinned_gcs_run_spec(spec, stored, **dependencies)
+
+        self.assertEqual(len(spy.calls), 1)
+
+    def test_schema_v2_success_acquires_calendar_then_delegates_exactly_once(self) -> None:
+        materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        sentinel = object()
+        spy = _JobSpy(result=sentinel)
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            result = run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(
+            fake_reader.calls,
+            [
+                {
+                    "bucket": calendar_request.bucket,
+                    "object_name": calendar_request.object_name,
+                    "generation": calendar_request.generation,
+                    "maximum_bytes": MAXIMUM_CALENDAR_MATERIALIZATION_BYTES,
+                }
+            ],
+        )
+        self.assertEqual(len(spy.calls), 1)
+        call = spy.calls[0]
+        self.assertEqual(call["manifest_request"], spec.manifest_request)
+        self.assertIsNot(call["manifest_request"], spec.manifest_request)
+        self.assertEqual(call["binding"], spec.trusted_binding)
+        self.assertIsNot(call["binding"], spec.trusted_binding)
+        self.assertIs(call["reader"], fake_reader)
+        self.assertEqual(call["market_session"], _SESSION)
+        self.assertEqual(call["cutoff"], _RUN_CUTOFF)
+        self.assertEqual(call["calendar_materialization_id"], calendar_request.materialization_id)
+        self.assertEqual(call["calendar"], materialization.calendar_snapshot)
+        self.assertIsNone(call["previous_run_id"])
+        self.assertIs(call["reference_store"], self.reference_store)
+        self.assertIs(call["daily_store"], self.daily_store)
+        self.assertIs(call["historical_store"], self.historical_store)
+        self.assertIs(call["identity_store"], self.identity_store)
+        self.assertIs(call["adjudication_store"], self.adjudication_store)
+        self.assertIs(call["run_store"], self.run_store)
+        self.assertEqual(len(call), 14)
+
 
 class ServiceSpecPreflightTests(PinnedGCSRunServiceTestCase):
     def test_wrong_spec_type_is_rejected_before_job_call(self) -> None:
@@ -434,6 +589,100 @@ class ServiceSpecPreflightTests(PinnedGCSRunServiceTestCase):
         self.assertNotIn(secret, str(ctx.exception))
         self.assertNotIn("RuntimeError", str(ctx.exception))
         self.assertEqual(spy.calls, [])
+
+    def test_v1_spec_with_calendar_request_is_rejected(self) -> None:
+        stored = self._stored()
+        spec = self._spec(stored)
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        object.__setattr__(spec, "calendar_request", calendar_request)
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError):
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, stored, **dependencies)
+
+        self.assertEqual(spy.calls, [])
+        self.assertEqual(fake_reader.calls, [])
+
+    def test_v2_spec_with_local_calendar_is_rejected(self) -> None:
+        stored = self._stored()
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError):
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, stored, **dependencies)
+
+        self.assertEqual(spy.calls, [])
+        self.assertEqual(fake_reader.calls, [])
+
+    def test_mutated_unsupported_schema_version_is_rejected(self) -> None:
+        stored = self._stored()
+        spec = self._spec(stored)
+        object.__setattr__(spec, "schema_version", 3)
+        spy = _JobSpy(result=object())
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError):
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, stored, **self._dependencies())
+
+        self.assertEqual(spy.calls, [])
+
+    def test_v2_calendar_request_subclass_is_rejected_before_any_read(self) -> None:
+        # PinnedGCSRunSpec's own __post_init__ already rejects a subclass
+        # at construction time, so a valid spec is built first and the
+        # subclass substituted afterward via object.__setattr__ -- this
+        # specifically exercises this service's own fresh_spec
+        # reconstruction (which re-runs PinnedGCSRunSpec's validation on
+        # the post-construction-substituted value) rather than the
+        # original construction call.
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+
+        class _RequestSubclass(CalendarMaterializationObjectRequest):
+            pass
+
+        subclass_instance = _RequestSubclass(
+            bucket=calendar_request.bucket,
+            object_name=calendar_request.object_name,
+            generation=calendar_request.generation,
+            expected_sha256=calendar_request.expected_sha256,
+            materialization_id=calendar_request.materialization_id,
+        )
+        object.__setattr__(spec, "calendar_request", subclass_instance)
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError):
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(spy.calls, [])
+        self.assertEqual(fake_reader.calls, [])
+
+    def test_v2_post_construction_mutated_calendar_request_is_rejected_before_any_read(
+        self,
+    ) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        # Mutating materialization_id (not generation/bucket) makes the
+        # object_name/materialization_id pairing inconsistent, so
+        # PinnedGCSRunSpec's own defensive reconstruction of calendar_request
+        # -- triggered by this service's own fresh_spec reconstruction --
+        # fails before any read is attempted.
+        object.__setattr__(spec.calendar_request, "materialization_id", "f" * 64)
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError):
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(spy.calls, [])
+        self.assertEqual(fake_reader.calls, [])
 
 
 class ServiceCalendarPreflightTests(PinnedGCSRunServiceTestCase):
@@ -647,9 +896,27 @@ class ServiceDelegationFailureTests(PinnedGCSRunServiceTestCase):
                 run_daily_pipeline_from_pinned_gcs_run_spec(spec, stored, **self._dependencies())
 
         message = str(ctx.exception)
-        self.assertEqual(message, "pinned gcs run service execution failed")
+        self.assertEqual(message, _ERR_EXECUTION)
         self.assertNotIn(secret, message)
         self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+
+    def test_injected_same_class_service_error_from_job_is_not_bare_reraised(self) -> None:
+        stored = self._stored()
+        spec = self._spec(stored)
+        secret = "SECRET-INJECTED-JOB-SERVICE-ERROR-DO-NOT-LEAK-1f9a"
+        injected = PinnedGCSRunServiceError(secret)
+        spy = _JobSpy(raises=injected)
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, stored, **self._dependencies())
+
+        self.assertIsNot(ctx.exception, injected)
+        self.assertEqual(str(ctx.exception), _ERR_EXECUTION)
+        self.assertNotIn(secret, str(ctx.exception))
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
 
     def test_base_exception_from_job_is_not_intercepted(self) -> None:
         stored = self._stored()
@@ -659,6 +926,427 @@ class ServiceDelegationFailureTests(PinnedGCSRunServiceTestCase):
         with patch(_SERVICE_TARGET, spy):
             with self.assertRaises(_MarkerBaseException):
                 run_daily_pipeline_from_pinned_gcs_run_spec(spec, stored, **self._dependencies())
+
+
+class ServiceV2CalendarAcquisitionRejectionTests(PinnedGCSRunServiceTestCase):
+    def test_rejects_wrong_payload_type_from_reader(self) -> None:
+        _materialization, _payload, calendar_request, _fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+
+        class _BadPayloadReader:
+            def read_generation(self, **_kwargs: object) -> str:
+                return "not-a-payload"
+
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": _BadPayloadReader()}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR_ACQUISITION)
+        self.assertEqual(spy.calls, [])
+
+    def test_rejects_bool_generation_from_reader(self) -> None:
+        _materialization, payload, calendar_request, _fake_reader = _build_v2_fixture(
+            self.root, generation=1
+        )
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        bad_reader = FakeGCSObjectReader(generation=True, content_bytes=payload)
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": bad_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR_ACQUISITION)
+        self.assertEqual(spy.calls, [])
+
+    def test_rejects_non_bytes_content_from_reader(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        fake_reader.content_bytes = "not-bytes"
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR_ACQUISITION)
+        self.assertEqual(spy.calls, [])
+
+    def test_rejects_empty_content_from_reader(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        fake_reader.content_bytes = b""
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR_ACQUISITION)
+        self.assertEqual(spy.calls, [])
+
+    def test_rejects_over_limit_content_via_patched_ceiling(self) -> None:
+        _materialization, payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(
+            "india_swing.daily_pipeline.calendar_materialization_acquisition."
+            "MAXIMUM_CALENDAR_MATERIALIZATION_BYTES",
+            len(payload) - 1,
+        ):
+            with patch(_SERVICE_TARGET, spy):
+                with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                    run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR_ACQUISITION)
+        self.assertEqual(spy.calls, [])
+
+    def test_rejects_stored_byte_hash_mismatch_from_reader(self) -> None:
+        _materialization, payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        fake_reader.content_bytes = payload + b"tampered"
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR_ACQUISITION)
+        self.assertEqual(spy.calls, [])
+
+    def test_rejects_malformed_noncanonical_bytes_from_reader(self) -> None:
+        materialization, _payload, _calendar_request, _fake_reader = _build_v2_fixture(self.root)
+        malformed = b"not-canonical-json-bytes"
+        calendar_request = CalendarMaterializationObjectRequest(
+            bucket=_CALENDAR_ACQUISITION_BUCKET,
+            object_name=_calendar_object_name(materialization.materialization_id),
+            generation=_CALENDAR_ACQUISITION_GENERATION,
+            expected_sha256=hashlib.sha256(malformed).hexdigest(),
+            materialization_id=materialization.materialization_id,
+        )
+        fake_reader = FakeGCSObjectReader(
+            generation=_CALENDAR_ACQUISITION_GENERATION, content_bytes=malformed
+        )
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR_ACQUISITION)
+        self.assertEqual(spy.calls, [])
+
+    def test_rejects_wrong_type_acquisition_result(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_ACQUIRE_TARGET, return_value="not-an-acquired-value"):
+            with patch(_SERVICE_TARGET, spy):
+                with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                    run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR)
+        self.assertEqual(spy.calls, [])
+
+    def test_rejects_acquisition_result_subclass(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        real_acquired = acquire_calendar_materialization(calendar_request, reader=fake_reader)
+        fake_reader.calls.clear()
+
+        class _AcquiredSubclass(AcquiredCalendarMaterialization):
+            pass
+
+        subclass_instance = _AcquiredSubclass(
+            request=real_acquired.request,
+            observed_generation=real_acquired.observed_generation,
+            observed_sha256=real_acquired.observed_sha256,
+            materialization=real_acquired.materialization,
+        )
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_ACQUIRE_TARGET, return_value=subclass_instance):
+            with patch(_SERVICE_TARGET, spy):
+                with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                    run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR)
+        self.assertEqual(spy.calls, [])
+
+    def test_rejects_post_construction_mutated_acquisition_result(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        real_acquired = acquire_calendar_materialization(calendar_request, reader=fake_reader)
+        fake_reader.calls.clear()
+        object.__setattr__(
+            real_acquired, "observed_generation", real_acquired.observed_generation + 1
+        )
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_ACQUIRE_TARGET, return_value=real_acquired):
+            with patch(_SERVICE_TARGET, spy):
+                with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                    run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR)
+        self.assertEqual(spy.calls, [])
+
+    def test_rejects_acquisition_result_for_a_different_materialization(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        (
+            _other_materialization,
+            _other_payload,
+            other_request,
+            other_reader,
+        ) = _build_v2_fixture(self.root, document_id="CMTR-V2-OTHER")
+        wrong_acquired = acquire_calendar_materialization(other_request, reader=other_reader)
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_ACQUIRE_TARGET, return_value=wrong_acquired):
+            with patch(_SERVICE_TARGET, spy):
+                with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                    run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR)
+        self.assertEqual(spy.calls, [])
+
+    def test_missing_market_session_is_rejected(self) -> None:
+        weekend = date(2026, 7, 18)  # Saturday: covered but not a session
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(
+            self.root, session=weekend
+        )
+        spec = PinnedGCSRunSpec(
+            **_valid_spec_kwargs_v2(calendar_request=calendar_request, _session=weekend)
+        )
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR)
+        self.assertNotIn(weekend.isoformat(), str(ctx.exception))
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+        self.assertEqual(spy.calls, [])
+
+    def test_future_calendar_cutoff_is_rejected(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(
+            self.root, cutoff=_RUN_CUTOFF + timedelta(hours=1)
+        )
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR)
+        self.assertEqual(spy.calls, [])
+
+    def test_calendar_cutoff_equal_to_spec_cutoff_is_accepted(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(
+            self.root, cutoff=_RUN_CUTOFF
+        )
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(len(spy.calls), 1)
+
+    def test_calendar_acquisition_failure_never_invokes_job_or_second_read(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        fake_reader.content_bytes = b""
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError):
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(len(fake_reader.calls), 1)
+        self.assertEqual(spy.calls, [])
+
+    def test_base_exception_from_calendar_acquisition_is_not_intercepted(self) -> None:
+        _materialization, _payload, calendar_request, _fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+
+        class _RaisingReader:
+            def read_generation(self, **_kwargs: object) -> None:
+                raise _MarkerBaseException("marker")
+
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": _RaisingReader()}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(_MarkerBaseException):
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(spy.calls, [])
+
+
+class ServiceV2SanitizationTests(PinnedGCSRunServiceTestCase):
+    def test_secret_bearing_reader_exception_is_sanitized(self) -> None:
+        _materialization, _payload, calendar_request, _fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        secret = "SECRET-SERVICE-READER-FAILURE-DO-NOT-LEAK-4d1a"
+
+        class _DistinctiveReaderFailure(RuntimeError):
+            pass
+
+        class _RaisingReader:
+            def read_generation(self, **_kwargs: object) -> None:
+                raise _DistinctiveReaderFailure(secret)
+
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": _RaisingReader()}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR_ACQUISITION)
+        self.assertNotIn(secret, str(ctx.exception))
+        self.assertNotIn(secret, repr(ctx.exception))
+        self.assertNotIn("_DistinctiveReaderFailure", str(ctx.exception))
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+        self.assertEqual(spy.calls, [])
+
+    def test_injected_same_class_service_error_from_reader_is_not_bare_reraised(self) -> None:
+        _materialization, _payload, calendar_request, _fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        secret = "SECRET-INJECTED-SERVICE-ERROR-DO-NOT-LEAK-8f2b"
+        injected = PinnedGCSRunServiceError(secret)
+
+        class _RaisingReader:
+            def read_generation(self, **_kwargs: object) -> None:
+                raise injected
+
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": _RaisingReader()}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertIsNot(ctx.exception, injected)
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR_ACQUISITION)
+        self.assertNotIn(secret, str(ctx.exception))
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+        self.assertEqual(spy.calls, [])
+
+    def test_injected_same_class_acquisition_error_from_reader_is_not_bare_reraised(self) -> None:
+        _materialization, _payload, calendar_request, _fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        secret = "SECRET-INJECTED-ACQUISITION-ERROR-DO-NOT-LEAK-3c7d"
+        injected = CalendarMaterializationAcquisitionError(secret)
+
+        class _RaisingReader:
+            def read_generation(self, **_kwargs: object) -> None:
+                raise injected
+
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": _RaisingReader()}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertIsNot(ctx.exception, injected)
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR_ACQUISITION)
+        self.assertNotIn(secret, str(ctx.exception))
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+        self.assertEqual(spy.calls, [])
+
+    def test_secret_bearing_acquisition_result_validation_failure_is_sanitized(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        real_acquired = acquire_calendar_materialization(calendar_request, reader=fake_reader)
+        fake_reader.calls.clear()
+        distinctive_bucket = "distinctive-mutated-bucket-do-not-leak-7e2a"
+        object.__setattr__(real_acquired.request, "bucket", distinctive_bucket)
+
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_ACQUIRE_TARGET, return_value=real_acquired):
+            with patch(_SERVICE_TARGET, spy):
+                with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                    run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR)
+        self.assertNotIn(distinctive_bucket, str(ctx.exception))
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+        self.assertEqual(spy.calls, [])
+
+    def test_content_identity_failure_after_acquisition_is_sanitized(self) -> None:
+        materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        spec = PinnedGCSRunSpec(**_valid_spec_kwargs_v2(calendar_request=calendar_request))
+        real_acquired = acquire_calendar_materialization(calendar_request, reader=fake_reader)
+        fake_reader.calls.clear()
+        object.__setattr__(real_acquired.materialization, "coverage_end", _OTHER_SESSION)
+
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_ACQUIRE_TARGET, return_value=real_acquired):
+            with patch(_SERVICE_TARGET, spy):
+                with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                    run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR)
+        self.assertNotIn(materialization.materialization_id, str(ctx.exception))
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+        self.assertEqual(spy.calls, [])
+
+    def test_secret_bearing_session_cutoff_failure_is_sanitized(self) -> None:
+        weekend = date(2026, 7, 18)
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(
+            self.root, session=weekend
+        )
+        spec = PinnedGCSRunSpec(
+            **_valid_spec_kwargs_v2(calendar_request=calendar_request, _session=weekend)
+        )
+        spy = _JobSpy(result=object())
+        dependencies = {**self._dependencies(), "reader": fake_reader}
+
+        with patch(_SERVICE_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec(spec, None, **dependencies)
+
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR)
+        self.assertNotIn(weekend.isoformat(), str(ctx.exception))
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+        self.assertEqual(spy.calls, [])
 
 
 _EXACT_ALLOWED_SERVICE_IMPORTS = frozenset((
@@ -676,8 +1364,13 @@ _EXACT_ALLOWED_SERVICE_IMPORTS = frozenset((
     (0, "india_swing.reference.calendar", "CalendarSnapshot", None),
     (0, "india_swing.reference_data.artifact_store", "LocalReferenceArtifactStore", None),
     (1, "acquisition", "GCSObjectReader", None),
+    (1, "calendar_materialization_acquisition", "AcquiredCalendarMaterialization", None),
+    (1, "calendar_materialization_acquisition", "CalendarMaterializationObjectRequest", None),
+    (1, "calendar_materialization_acquisition", "acquire_calendar_materialization", None),
     (1, "gcs_landing_job", "run_daily_pipeline_from_pinned_gcs_manifest", None),
     (1, "models", "DailyPipelineRun", None),
+    (1, "pinned_gcs_run_spec", "PINNED_GCS_RUN_SPEC_SCHEMA_VERSION", None),
+    (1, "pinned_gcs_run_spec", "PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR", None),
     (1, "pinned_gcs_run_spec", "PinnedGCSRunSpec", None),
     (1, "store", "LocalDailyPipelineRunStore", None),
 ))
@@ -697,6 +1390,8 @@ _EXACT_ALLOWED_SERVICE_CALL_TARGETS = frozenset((
     "verify_content_identity",
     "require_session",
     "run_daily_pipeline_from_pinned_gcs_manifest",
+    "AcquiredCalendarMaterialization",
+    "acquire_calendar_materialization",
 ))
 
 _FORBIDDEN_SERVICE_NAME_TOKENS = (
