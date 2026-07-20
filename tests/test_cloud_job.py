@@ -142,14 +142,19 @@ class DockerfileTests(unittest.TestCase):
         self.assertIn("india_swing.cloud_job", final_line)
 
 
+_UNUSED_LEGACY_SECRETS = (
+    "KITE_API_KEY",
+    "KITE_API_SECRET",
+    "LLM_API_KEY",
+    "NOTIFICATION_TOKEN",
+)
+
+
 class DeployScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.text = (_REPO_ROOT / "deploy.sh").read_text(encoding="utf-8")
 
-    def test_scheduler_flag_defaults_false(self) -> None:
-        self.assertIn('ENABLE_EOD_SCHEDULER="${ENABLE_EOD_SCHEDULER:-false}"', self.text)
-
-    def test_both_job_update_and_create_branches_override_command_and_args(self) -> None:
+    def _job_blocks(self) -> tuple[str, str]:
         update_start = self.text.index('gcloud run jobs update "${JOB_NAME}"')
         create_start = self.text.index('gcloud run jobs create "${JOB_NAME}"')
         self.assertLess(update_start, create_start)
@@ -158,43 +163,163 @@ class DeployScriptTests(unittest.TestCase):
         # the surrounding if/else that selects update vs. create.
         fi_after_create = self.text.index("\nfi", create_start)
         create_block = self.text[create_start:fi_after_create]
-        for block in (update_block, create_block):
-            self.assertIn("--command=python", block)
-            self.assertIn("--args=-m,india_swing.cloud_job", block)
+        return update_block, create_block
 
-    def test_eod_scheduler_create_update_reachable_only_through_true_branch(self) -> None:
-        true_branch_marker = 'if [ "${ENABLE_EOD_SCHEDULER}" = "true" ]'
-        self.assertIn(true_branch_marker, self.text)
-        if_index = self.text.index(true_branch_marker)
-        else_index = self.text.index("\nelse", if_index)
-        fi_index = self.text.index("\nfi", else_index)
-        self.assertLess(if_index, else_index)
-        self.assertLess(else_index, fi_index)
-        true_branch = self.text[if_index:else_index]
-        false_branch = self.text[else_index:fi_index]
+    def test_scheduler_flag_defaults_false(self) -> None:
+        self.assertIn('ENABLE_EOD_SCHEDULER="${ENABLE_EOD_SCHEDULER:-false}"', self.text)
 
-        self.assertIn("gcloud scheduler jobs create http eod-swing-schedule", true_branch)
-        self.assertIn("gcloud scheduler jobs update http eod-swing-schedule", true_branch)
-        self.assertNotIn("gcloud scheduler jobs create http eod-swing-schedule", false_branch)
-        self.assertNotIn("gcloud scheduler jobs update http eod-swing-schedule", false_branch)
+    def test_enable_eod_scheduler_true_fails_closed_before_any_gcloud_mutation(self) -> None:
+        reject_marker = 'if [ "${ENABLE_EOD_SCHEDULER}" = "true" ]'
+        reject_index = self.text.index(reject_marker)
+        reject_fi = self.text.index("\nfi", reject_index)
+        reject_block = self.text[reject_index:reject_fi]
+        self.assertIn("exit 1", reject_block)
+        self.assertNotIn("gcloud", reject_block)
 
+        first_services_enable = self.text.index("gcloud services enable")
+        first_job_create = self.text.index('gcloud run jobs create "${JOB_NAME}"')
+        self.assertLess(reject_index, first_services_enable)
+        self.assertLess(reject_index, first_job_create)
+
+    def test_no_reachable_eod_scheduler_create_update_resume_command(self) -> None:
         for needle in (
             "gcloud scheduler jobs create http eod-swing-schedule",
             "gcloud scheduler jobs update http eod-swing-schedule",
+            "gcloud scheduler jobs resume",
         ):
-            self.assertEqual(self.text.count(needle), 1, needle)
-            first = self.text.index(needle)
-            self.assertGreaterEqual(first, if_index)
-            self.assertLess(first, else_index)
+            self.assertNotIn(needle, self.text)
 
-    def test_false_mode_contains_pause_path(self) -> None:
-        true_branch_marker = 'if [ "${ENABLE_EOD_SCHEDULER}" = "true" ]'
-        if_index = self.text.index(true_branch_marker)
-        else_index = self.text.index("\nelse", if_index)
+    def test_eod_scheduler_section_pauses_when_present_and_reports_disabled_otherwise(
+        self,
+    ) -> None:
+        section_marker = "# B. EOD Swing Job Schedule"
+        section_index = self.text.index(section_marker)
+        pause_if_index = self.text.index(
+            'if gcloud scheduler jobs describe "eod-swing-schedule"', section_index
+        )
+        else_index = self.text.index("\nelse", pause_if_index)
         fi_index = self.text.index("\nfi", else_index)
+        true_branch = self.text[pause_if_index:else_index]
         false_branch = self.text[else_index:fi_index]
-        self.assertIn("gcloud scheduler jobs pause", false_branch)
-        self.assertIn('"eod-swing-schedule"', false_branch)
+
+        self.assertIn("gcloud scheduler jobs pause", true_branch)
+        self.assertIn('EOD_SCHEDULER_STATE="paused"', true_branch)
+        self.assertNotIn("gcloud scheduler jobs pause", false_branch)
+        self.assertIn('EOD_SCHEDULER_STATE="disabled"', false_branch)
+
+    def test_pinned_run_spec_secret_version_validated_before_build_or_job_mutation(
+        self,
+    ) -> None:
+        version_var = "PINNED_GCS_RUN_SPEC_SECRET_VERSION"
+        self.assertIn(f'{version_var}="${{{version_var}:-}}"', self.text)
+        regex_check_index = self.text.index("^[1-9][0-9]*$")
+        regex_line_start = self.text.rindex("\n", 0, regex_check_index)
+        regex_block_end = self.text.index("\nfi", regex_check_index)
+        regex_block = self.text[regex_line_start:regex_block_end]
+        self.assertIn("exit 1", regex_block)
+
+        docker_build_index = self.text.index("docker build")
+        cloud_build_index = self.text.index("gcloud builds submit")
+        job_create_index = self.text.index('gcloud run jobs create "${JOB_NAME}"')
+        job_update_index = self.text.index('gcloud run jobs update "${JOB_NAME}"')
+        self.assertLess(regex_check_index, docker_build_index)
+        self.assertLess(regex_check_index, cloud_build_index)
+        self.assertLess(regex_check_index, job_create_index)
+        self.assertLess(regex_check_index, job_update_index)
+
+    def test_pinned_run_spec_secret_never_created_seeded_or_hashed(self) -> None:
+        secret_name = "PINNED_GCS_RUN_SPEC"
+        self.assertIn(f'PINNED_RUN_SPEC_SECRET_NAME="{secret_name}"', self.text)
+        self.assertNotIn(f'gcloud secrets create "{secret_name}"', self.text)
+        self.assertNotIn(f'gcloud secrets create "${{PINNED_RUN_SPEC_SECRET_NAME}}"', self.text)
+        # The existing placeholder-seeding loop only ever iterates the four
+        # unused legacy secrets, never the pinned run-spec secret name.
+        seed_loop_start = self.text.index('for secret in "${SECRETS[@]}"; do')
+        seed_loop_end = self.text.index("\ndone", seed_loop_start)
+        seed_loop = self.text[seed_loop_start:seed_loop_end]
+        self.assertNotIn("PINNED_RUN_SPEC_SECRET_NAME", seed_loop)
+        self.assertNotIn(secret_name, seed_loop)
+        self.assertNotIn("sha256", self.text.lower())
+        self.assertIn("gcloud secrets describe \"${PINNED_RUN_SPEC_SECRET_NAME}\"", self.text)
+        self.assertIn("gcloud secrets versions describe", self.text)
+
+        iam_grant_index = self.text.index(
+            'gcloud secrets add-iam-policy-binding "${PINNED_RUN_SPEC_SECRET_NAME}"'
+        )
+        iam_grant_block_end = self.text.index("\n\n", iam_grant_index)
+        iam_grant_block = self.text[iam_grant_index:iam_grant_block_end]
+        self.assertIn("roles/secretmanager.secretAccessor", iam_grant_block)
+        for legacy_secret in _UNUSED_LEGACY_SECRETS:
+            self.assertNotIn(
+                f'gcloud secrets add-iam-policy-binding "{legacy_secret}"', self.text
+            )
+
+    def test_legacy_secret_accessor_bindings_are_revoked_before_job_mutation(
+        self,
+    ) -> None:
+        revoke_loop_start = self.text.index('for secret in "${SECRETS[@]}"; do', self.text.index("# Revoke bindings"))
+        revoke_loop_end = self.text.index("\ndone", revoke_loop_start)
+        revoke_loop = self.text[revoke_loop_start:revoke_loop_end]
+        self.assertIn('gcloud secrets remove-iam-policy-binding "${secret}"', revoke_loop)
+        self.assertIn(
+            '--member="serviceAccount:${JOB_RUNTIME_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com"',
+            revoke_loop,
+        )
+        self.assertIn('--role="roles/secretmanager.secretAccessor"', revoke_loop)
+        self.assertNotIn("|| true", revoke_loop)
+        self.assertLess(
+            revoke_loop_start,
+            self.text.index('gcloud run jobs update "${JOB_NAME}"'),
+        )
+        self.assertLess(
+            revoke_loop_start,
+            self.text.index('gcloud run jobs create "${JOB_NAME}"'),
+        )
+
+    def test_job_blocks_use_pinned_spec_file_argument_and_fixed_mount_path(self) -> None:
+        self.assertIn(
+            'PINNED_RUN_SPEC_MOUNT_PATH="/var/run/india-swing-control/pinned-run-spec.json"',
+            self.text,
+        )
+        for block in self._job_blocks():
+            self.assertIn(
+                '--args=-m,india_swing.cloud_job,--spec-file,"${PINNED_RUN_SPEC_MOUNT_PATH}"',
+                block,
+            )
+
+    def test_job_blocks_set_secrets_to_numerically_pinned_mapping_with_no_latest(
+        self,
+    ) -> None:
+        for block in self._job_blocks():
+            self.assertIn(
+                '--set-secrets="${PINNED_RUN_SPEC_MOUNT_PATH}='
+                '${PINNED_RUN_SPEC_SECRET_NAME}:${PINNED_GCS_RUN_SPEC_SECRET_VERSION}"',
+                block,
+            )
+            self.assertNotIn("latest", block)
+            for legacy_secret in _UNUSED_LEGACY_SECRETS:
+                self.assertNotIn(legacy_secret, block)
+
+    def test_job_blocks_set_distinct_ephemeral_tmp_artifact_roots(self) -> None:
+        expected_roots = {
+            "INDIA_SWING_CALENDAR_DATA_ROOT": "/tmp/india-swing/calendar_data",
+            "INDIA_SWING_IDENTITY_REGISTRY_ROOT": "/tmp/india-swing/identity_registry",
+            "INDIA_SWING_HISTORICAL_PRICES_ROOT": "/tmp/india-swing/historical_prices",
+            "INDIA_SWING_DAILY_REPORTS_ROOT": "/tmp/india-swing/daily_reports",
+            "INDIA_SWING_REFERENCE_DATA_ROOT": "/tmp/india-swing/reference_data",
+            "INDIA_SWING_DAILY_PIPELINE_ROOT": "/tmp/india-swing/daily_pipeline",
+        }
+        self.assertEqual(len(set(expected_roots.values())), len(expected_roots))
+        artifact_roots_index = self.text.index("PINNED_JOB_ARTIFACT_ROOTS=")
+        artifact_roots_line_end = self.text.index("\n", artifact_roots_index)
+        artifact_roots_line = self.text[artifact_roots_index:artifact_roots_line_end]
+        for env_name, path in expected_roots.items():
+            self.assertIn(f"{env_name}={path}", artifact_roots_line)
+            self.assertTrue(path.startswith("/tmp/india-swing/"))
+        for block in self._job_blocks():
+            self.assertIn("${PINNED_JOB_ARTIFACT_ROOTS}", block)
+        ephemeral_comment_index = self.text.index("ephemeral")
+        self.assertLess(ephemeral_comment_index, artifact_roots_index)
 
     def test_final_messages_do_not_unconditionally_claim_schedulers_active(self) -> None:
         success_index = self.text.rindex("SUCCESS:")

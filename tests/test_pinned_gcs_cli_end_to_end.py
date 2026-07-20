@@ -13,11 +13,18 @@ from unittest.mock import patch
 
 from india_swing.calendar_data.artifact_store import LocalCalendarSourceArtifactStore
 from india_swing.calendar_data.materialization import materialize_collection_calendar
+from india_swing.calendar_data.materialization_codec import (
+    MAXIMUM_CALENDAR_MATERIALIZATION_BYTES,
+    encode_calendar_materialization,
+)
 from india_swing.calendar_data.materialization_store import LocalCalendarMaterializationStore
 from india_swing.calendar_data.models import CALENDAR_DECLARATION_SCHEMA_VERSION
 from india_swing.daily_pipeline.cli import main as cli_main
 from india_swing.daily_pipeline.landing_manifest import MAXIMUM_LANDING_MANIFEST_BYTES
-from india_swing.daily_pipeline.pinned_gcs_run_spec import PINNED_GCS_RUN_SPEC_SCHEMA_VERSION
+from india_swing.daily_pipeline.pinned_gcs_run_spec import (
+    PINNED_GCS_RUN_SPEC_SCHEMA_VERSION,
+    PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR,
+)
 from india_swing.daily_pipeline.store import LocalDailyPipelineRunStore
 from india_swing.reference.models import ReferenceReadiness
 
@@ -30,6 +37,7 @@ _BUCKET = "trusted-e2e-landing-bucket"
 _MANIFEST_GENERATION = 777
 _SM_GENERATION = 111
 _DB_GENERATION = 222
+_CALENDAR_GENERATION = 555
 _CALENDAR_CUTOFF = datetime(2026, 7, 15, 9, 0, 0, tzinfo=timezone.utc)
 _NOT_BEFORE = "2026-07-15T00:00:00Z"
 _BINDING_CUTOFF = "2026-07-15T14:00:00Z"
@@ -236,6 +244,57 @@ def _build_stored_calendar(
     return store, store.put(materialization)
 
 
+def _calendar_object_name(materialization_id: str) -> str:
+    return f"calendar-materializations/{materialization_id}/materialization.json"
+
+
+def _build_v2_calendar_bytes(
+    *,
+    root: Path,
+    coverage_start: date,
+    coverage_end: date,
+    cutoff: datetime,
+    document_id: str,
+) -> tuple[bytes, str]:
+    """Real, canonically-encoded CollectionCalendarMaterialization bytes
+    built entirely OUTSIDE the CLI-configured calendar_data_root (a
+    separate root under the same TemporaryDirectory), via the real
+    committed materializer and encode_calendar_materialization -- never
+    LocalCalendarMaterializationStore.put, so the CLI's own configured
+    local calendar store never contains this materialization."""
+
+    source = _import_base_calendar_source(
+        root / "v2-calendar-source",
+        root / "v2-calendar-inputs" / document_id,
+        document_id=document_id,
+    )
+    materialization = materialize_collection_calendar(
+        sources=(source,),
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        cutoff=cutoff,
+        observed_date_artifacts=(),
+    )
+    payload = encode_calendar_materialization(materialization)
+    return payload, materialization.materialization_id
+
+
+def _calendar_request_dict(
+    materialization_id: str,
+    payload: bytes,
+    *,
+    generation: int = _CALENDAR_GENERATION,
+    bucket: str = _BUCKET,
+) -> dict:
+    return {
+        "bucket": bucket,
+        "object_name": _calendar_object_name(materialization_id),
+        "generation": generation,
+        "expected_sha256": hashlib.sha256(payload).hexdigest(),
+        "materialization_id": materialization_id,
+    }
+
+
 # --------------------------------------------------------------------------
 # Landing-manifest / run-spec fixture builders. Fixture hashes are always
 # computed inside the test from the exact bytes the fake SDK will serve;
@@ -319,6 +378,42 @@ def _run_spec_dict(
             "market_session": session.isoformat(),
             "cutoff": run_cutoff,
             "calendar_materialization_id": calendar_materialization_id,
+            "previous_run_id": previous_run_id,
+        },
+    }
+
+
+def _run_spec_dict_v2(
+    *,
+    session: date,
+    manifest_generation: int,
+    expected_manifest_sha256: str,
+    calendar_request: dict,
+    run_cutoff: str,
+    not_before: str = _NOT_BEFORE,
+    binding_cutoff: str = _BINDING_CUTOFF,
+    previous_run_id: str | None = None,
+) -> dict:
+    return {
+        "schema_version": PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR,
+        "manifest_request": {
+            "bucket": _BUCKET,
+            "object_name": _manifest_object_name(session),
+            "generation": manifest_generation,
+            "target_session": session.isoformat(),
+        },
+        "trusted_binding": {
+            "expected_manifest_sha256": expected_manifest_sha256,
+            "allowed_bucket": _BUCKET,
+            "target_session": session.isoformat(),
+            "not_before": not_before,
+            "cutoff": binding_cutoff,
+        },
+        "calendar_request": calendar_request,
+        "run": {
+            "market_session": session.isoformat(),
+            "cutoff": run_cutoff,
+            "calendar_materialization_id": calendar_request["materialization_id"],
             "previous_run_id": previous_run_id,
         },
     }
@@ -409,6 +504,25 @@ class _EndToEndFixtureTestCase(unittest.TestCase):
             cutoff=_CALENDAR_CUTOFF,
         )
         return stored_calendar.manifest.artifact_id
+
+    def _assert_calendar_id_absent_from_local_store(self, calendar_materialization_id: str) -> None:
+        store = LocalCalendarMaterializationStore(
+            root=self.calendar_data_root, daily_reports_root=self.daily_reports_root,
+        )
+        with self.assertRaises(Exception):
+            store.get(calendar_materialization_id)
+
+    @staticmethod
+    def _get_must_not_be_called(self_: object, artifact_id: str) -> None:
+        raise AssertionError(
+            "schema v2 must never call LocalCalendarMaterializationStore.get"
+        )
+
+    def _run_cli_v2(self, spec_path: Path, fake_client: _FakeStorageClient):
+        with patch.object(
+            LocalCalendarMaterializationStore, "get", self._get_must_not_be_called
+        ):
+            return self._run_cli(spec_path, fake_client)
 
 
 class HappyPathTests(_EndToEndFixtureTestCase):
@@ -513,6 +627,107 @@ class HappyPathTests(_EndToEndFixtureTestCase):
         self.assertEqual(lineage.daily_bundle.object_name, _db_object_name(session))
         self.assertEqual(lineage.daily_bundle.generation, _DB_GENERATION)
         self.assertEqual(lineage.daily_bundle.sha256_hash, hashlib.sha256(db_bytes).hexdigest())
+
+    def test_full_cli_to_persisted_run_chain_schema_v2(self) -> None:
+        session = SESSION
+        sm_bytes = _master_bytes()
+        db_bytes = _bundle_bytes()
+
+        calendar_payload, calendar_materialization_id = _build_v2_calendar_bytes(
+            root=self.root,
+            coverage_start=date(2026, 7, 14),
+            coverage_end=date(2026, 7, 15),
+            cutoff=_CALENDAR_CUTOFF,
+            document_id="CMTR-E2E-V2-BASE",
+        )
+        # The CLI's own configured local calendar store must contain no
+        # materialization for this ID, both before and after the run.
+        self._assert_calendar_id_absent_from_local_store(calendar_materialization_id)
+        calendar_request = _calendar_request_dict(calendar_materialization_id, calendar_payload)
+
+        manifest_bytes = _manifest_bytes(session, sm_bytes=sm_bytes, db_bytes=db_bytes)
+        expected_manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+
+        spec_dict = _run_spec_dict_v2(
+            session=session,
+            manifest_generation=_MANIFEST_GENERATION,
+            expected_manifest_sha256=expected_manifest_sha256,
+            calendar_request=calendar_request,
+            run_cutoff=self.run_cutoff,
+            previous_run_id=None,
+        )
+        spec_path = self._write_spec("spec-v2.json", spec_dict)
+
+        fake_client = _FakeStorageClient(
+            objects={
+                (_calendar_object_name(calendar_materialization_id), _CALENDAR_GENERATION): (
+                    _CALENDAR_GENERATION,
+                    calendar_payload,
+                ),
+                (_manifest_object_name(session), _MANIFEST_GENERATION): (
+                    _MANIFEST_GENERATION,
+                    manifest_bytes,
+                ),
+                (_sm_object_name(session), _SM_GENERATION): (_SM_GENERATION, sm_bytes),
+                (_db_object_name(session), _DB_GENERATION): (_DB_GENERATION, db_bytes),
+            }
+        )
+
+        exit_code, stdout, stderr, fake_storage = self._run_cli_v2(spec_path, fake_client)
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(stderr, "")
+        payload = json.loads(stdout)
+        self.assertEqual(payload["status"], "COMPLETE")
+        self.assertEqual(payload["kind"], "DAILY_PIPELINE_RUN")
+
+        reloaded = self._run_store().get(payload["run_id"])
+        self.assertEqual(reloaded.market_session, session)
+        self.assertEqual(reloaded.cutoff, self.run_cutoff_dt)
+        self.assertIsNone(reloaded.previous_run_id)
+        self.assertIs(reloaded.readiness, ReferenceReadiness.COLLECTION_ONLY)
+        self.assertFalse(reloaded.actionable)
+        self.assertEqual(reloaded.calendar_materialization_id, calendar_materialization_id)
+
+        self.assertEqual(fake_storage.client_construction_count, 1)
+        self.assertEqual(
+            [entry["object_name"] for entry in fake_client.download_log],
+            [
+                _calendar_object_name(calendar_materialization_id),
+                _manifest_object_name(session),
+                _sm_object_name(session),
+                _db_object_name(session),
+            ],
+        )
+        for entry in fake_client.download_log:
+            self.assertTrue(entry["raw_download"])
+            self.assertEqual(entry["if_generation_match"], entry["requested_generation"])
+            self.assertIsNone(entry["retry"])
+        self.assertEqual(
+            fake_client.download_log[0]["end"], MAXIMUM_CALENDAR_MATERIALIZATION_BYTES
+        )
+        self.assertEqual(fake_client.download_log[0]["if_generation_match"], _CALENDAR_GENERATION)
+        self.assertEqual(fake_client.download_log[1]["end"], MAXIMUM_LANDING_MANIFEST_BYTES)
+        self.assertEqual(fake_client.download_log[1]["if_generation_match"], _MANIFEST_GENERATION)
+        self.assertEqual(fake_client.download_log[2]["end"], _SECURITY_MASTER_MAXIMUM_BYTES)
+        self.assertEqual(fake_client.download_log[2]["if_generation_match"], _SM_GENERATION)
+        self.assertEqual(fake_client.download_log[3]["end"], _DAILY_BUNDLE_MAXIMUM_BYTES)
+        self.assertEqual(fake_client.download_log[3]["if_generation_match"], _DB_GENERATION)
+        for bucket_call in fake_client.bucket_calls:
+            self.assertEqual(bucket_call, _BUCKET)
+
+        lineage = reloaded.landing_input_lineage
+        self.assertIsNotNone(lineage)
+        self.assertEqual(lineage.manifest_source.bucket, _BUCKET)
+        self.assertEqual(lineage.manifest_source.object_name, _manifest_object_name(session))
+        self.assertEqual(lineage.manifest_source.generation, _MANIFEST_GENERATION)
+        self.assertEqual(lineage.manifest_source.target_session, session)
+        self.assertEqual(lineage.security_master.generation, _SM_GENERATION)
+        self.assertEqual(lineage.daily_bundle.generation, _DB_GENERATION)
+
+        # Still absent from the CLI's local calendar store after the run --
+        # v2 never wrote to it either.
+        self._assert_calendar_id_absent_from_local_store(calendar_materialization_id)
 
 
 class FailurePathTests(_EndToEndFixtureTestCase):
@@ -848,6 +1063,204 @@ class FailurePathTests(_EndToEndFixtureTestCase):
         self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
         self._assert_stderr_omits(stderr_text, secret_bucket, secret_exception_text)
         self._assert_no_pipeline_artifacts_created()
+
+    def _v2_calendar_stage_fixture(
+        self, *, calendar_payload: bytes, calendar_materialization_id: str, calendar_generation: object
+    ):
+        session = SESSION
+        sm_bytes = _master_bytes()
+        db_bytes = _bundle_bytes()
+        calendar_request = _calendar_request_dict(
+            calendar_materialization_id, calendar_payload, generation=calendar_generation
+        )
+        manifest_bytes = _manifest_bytes(session, sm_bytes=sm_bytes, db_bytes=db_bytes)
+        expected_manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        spec_dict = _run_spec_dict_v2(
+            session=session,
+            manifest_generation=_MANIFEST_GENERATION,
+            expected_manifest_sha256=expected_manifest_sha256,
+            calendar_request=calendar_request,
+            run_cutoff=self.run_cutoff,
+        )
+        spec_path = self._write_spec("spec-v2-calendar-failure.json", spec_dict)
+        return session, sm_bytes, db_bytes, manifest_bytes, spec_path, calendar_request
+
+    def test_v2_wrong_expected_calendar_sha256_downloads_only_calendar_and_publishes_nothing(
+        self,
+    ) -> None:
+        calendar_payload, calendar_materialization_id = _build_v2_calendar_bytes(
+            root=self.root,
+            coverage_start=date(2026, 7, 14),
+            coverage_end=date(2026, 7, 15),
+            cutoff=_CALENDAR_CUTOFF,
+            document_id="CMTR-E2E-V2-WRONG-HASH",
+        )
+        (
+            session,
+            sm_bytes,
+            db_bytes,
+            manifest_bytes,
+            spec_path,
+            calendar_request,
+        ) = self._v2_calendar_stage_fixture(
+            calendar_payload=calendar_payload,
+            calendar_materialization_id=calendar_materialization_id,
+            calendar_generation=_CALENDAR_GENERATION,
+        )
+        wrong_hash = hashlib.sha256(b"not-the-real-calendar-bytes").hexdigest()
+        # Overwrite the spec's own declared expected_sha256 to a value that
+        # disagrees with the bytes the fake SDK will actually serve.
+        spec_dict = json.loads(spec_path.read_text(encoding="utf-8"))
+        spec_dict["calendar_request"]["expected_sha256"] = wrong_hash
+        spec_path.write_text(json.dumps(spec_dict, separators=(",", ":")), encoding="utf-8")
+
+        fake_client = _FakeStorageClient(
+            objects={
+                (_calendar_object_name(calendar_materialization_id), _CALENDAR_GENERATION): (
+                    _CALENDAR_GENERATION,
+                    calendar_payload,
+                ),
+                (_manifest_object_name(session), _MANIFEST_GENERATION): (
+                    _MANIFEST_GENERATION,
+                    manifest_bytes,
+                ),
+                (_sm_object_name(session), _SM_GENERATION): (_SM_GENERATION, sm_bytes),
+                (_db_object_name(session), _DB_GENERATION): (_DB_GENERATION, db_bytes),
+            }
+        )
+
+        exit_code, stdout, stderr, fake_storage = self._run_cli_v2(spec_path, fake_client)
+
+        self.assertEqual(exit_code, 2)
+        payload = self._assert_sanitized_failure_envelope(stdout, stderr)
+        self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
+        self.assertEqual(
+            [entry["object_name"] for entry in fake_client.download_log],
+            [_calendar_object_name(calendar_materialization_id)],
+        )
+        self.assertEqual(fake_storage.client_construction_count, 1)
+        self._assert_stderr_omits(
+            stderr, _BUCKET, wrong_hash, calendar_materialization_id
+        )
+        self._assert_no_pipeline_artifacts_created()
+        self._assert_calendar_id_absent_from_local_store(calendar_materialization_id)
+
+    def test_v2_wrong_observed_calendar_generation_downloads_only_calendar_and_publishes_nothing(
+        self,
+    ) -> None:
+        calendar_payload, calendar_materialization_id = _build_v2_calendar_bytes(
+            root=self.root,
+            coverage_start=date(2026, 7, 14),
+            coverage_end=date(2026, 7, 15),
+            cutoff=_CALENDAR_CUTOFF,
+            document_id="CMTR-E2E-V2-WRONG-GENERATION",
+        )
+        (
+            session,
+            sm_bytes,
+            db_bytes,
+            manifest_bytes,
+            spec_path,
+            calendar_request,
+        ) = self._v2_calendar_stage_fixture(
+            calendar_payload=calendar_payload,
+            calendar_materialization_id=calendar_materialization_id,
+            calendar_generation=_CALENDAR_GENERATION,
+        )
+        wrong_observed_generation = 999999
+
+        fake_client = _FakeStorageClient(
+            objects={
+                # Registered at the requested generation, but the simulated
+                # SDK reports a mismatched post-download blob.generation.
+                (_calendar_object_name(calendar_materialization_id), _CALENDAR_GENERATION): (
+                    wrong_observed_generation,
+                    calendar_payload,
+                ),
+                (_manifest_object_name(session), _MANIFEST_GENERATION): (
+                    _MANIFEST_GENERATION,
+                    manifest_bytes,
+                ),
+                (_sm_object_name(session), _SM_GENERATION): (_SM_GENERATION, sm_bytes),
+                (_db_object_name(session), _DB_GENERATION): (_DB_GENERATION, db_bytes),
+            }
+        )
+
+        exit_code, stdout, stderr, fake_storage = self._run_cli_v2(spec_path, fake_client)
+
+        self.assertEqual(exit_code, 2)
+        payload = self._assert_sanitized_failure_envelope(stdout, stderr)
+        self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
+        self.assertEqual(
+            [entry["object_name"] for entry in fake_client.download_log],
+            [_calendar_object_name(calendar_materialization_id)],
+        )
+        self.assertEqual(fake_storage.client_construction_count, 1)
+        self._assert_stderr_omits(
+            stderr, _BUCKET, calendar_materialization_id, str(wrong_observed_generation)
+        )
+        self._assert_no_pipeline_artifacts_created()
+        self._assert_calendar_id_absent_from_local_store(calendar_materialization_id)
+
+    def test_v2_malformed_calendar_bytes_downloads_only_calendar_and_publishes_nothing(
+        self,
+    ) -> None:
+        session = SESSION
+        sm_bytes = _master_bytes()
+        db_bytes = _bundle_bytes()
+        # Well-formed-hex materialization_id that never corresponds to a
+        # real materialization; the served bytes are simply not canonical
+        # calendar-materialization JSON at all, paired with THEIR OWN exact
+        # hash, so the hash check itself passes and the strict canonical-
+        # decode check is what fails.
+        malformed_bytes = b"not-canonical-calendar-materialization-bytes"
+        fake_materialization_id = "e" * 64
+        calendar_request = {
+            "bucket": _BUCKET,
+            "object_name": _calendar_object_name(fake_materialization_id),
+            "generation": _CALENDAR_GENERATION,
+            "expected_sha256": hashlib.sha256(malformed_bytes).hexdigest(),
+            "materialization_id": fake_materialization_id,
+        }
+        manifest_bytes = _manifest_bytes(session, sm_bytes=sm_bytes, db_bytes=db_bytes)
+        expected_manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        spec_dict = _run_spec_dict_v2(
+            session=session,
+            manifest_generation=_MANIFEST_GENERATION,
+            expected_manifest_sha256=expected_manifest_sha256,
+            calendar_request=calendar_request,
+            run_cutoff=self.run_cutoff,
+        )
+        spec_path = self._write_spec("spec-v2-malformed-calendar.json", spec_dict)
+
+        fake_client = _FakeStorageClient(
+            objects={
+                (_calendar_object_name(fake_materialization_id), _CALENDAR_GENERATION): (
+                    _CALENDAR_GENERATION,
+                    malformed_bytes,
+                ),
+                (_manifest_object_name(session), _MANIFEST_GENERATION): (
+                    _MANIFEST_GENERATION,
+                    manifest_bytes,
+                ),
+                (_sm_object_name(session), _SM_GENERATION): (_SM_GENERATION, sm_bytes),
+                (_db_object_name(session), _DB_GENERATION): (_DB_GENERATION, db_bytes),
+            }
+        )
+
+        exit_code, stdout, stderr, fake_storage = self._run_cli_v2(spec_path, fake_client)
+
+        self.assertEqual(exit_code, 2)
+        payload = self._assert_sanitized_failure_envelope(stdout, stderr)
+        self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
+        self.assertEqual(
+            [entry["object_name"] for entry in fake_client.download_log],
+            [_calendar_object_name(fake_materialization_id)],
+        )
+        self.assertEqual(fake_storage.client_construction_count, 1)
+        self._assert_stderr_omits(stderr, _BUCKET, fake_materialization_id)
+        self._assert_no_pipeline_artifacts_created()
+        self._assert_calendar_id_absent_from_local_store(fake_materialization_id)
 
 
 class EnvironmentIsolationTests(_EndToEndFixtureTestCase):

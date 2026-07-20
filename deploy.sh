@@ -76,10 +76,35 @@ TAG="latest"
 BUCKET_NAME="swing-data-${PROJECT_ID}"
 FIRESTORE_DATABASE="(default)"
 
-# EOD scheduler is opt-in and paused by default: explicit operator action
-# (setting this to exactly "true") is required to activate live automated
-# scheduling of the eod-swing job.
+# EOD scheduler has no automated-activation path in this script: a single
+# static pinned run-spec targets one exact market session and previous run,
+# so scheduling it every weekday would replay stale inputs and waste cost.
+# ENABLE_EOD_SCHEDULER=true is read only to fail closed with a sanitized
+# message below; it never creates, updates, resumes, or leaves active
+# eod-swing-schedule. See Section 10.
 ENABLE_EOD_SCHEDULER="${ENABLE_EOD_SCHEDULER:-false}"
+if [ "${ENABLE_EOD_SCHEDULER}" = "true" ]; then
+  echo "Error: ENABLE_EOD_SCHEDULER=true is not supported by this deployment path. A single static pinned run-spec cannot be safely scheduled for repeated automated execution; a separately reviewed dynamic per-session control plane is required before any scheduler activation exists. This script only pauses an existing eod-swing-schedule or reports it disabled." >&2
+  exit 1
+fi
+
+# ------------------------------------------------------------------------------
+# 1a. Pinned run-spec Secret Manager mount: fixed identity, operator-supplied
+# exact version only. This control document contains independently governed
+# expected hashes; this script never synthesizes its bytes, computes a hash
+# from a fetched object, seeds a placeholder version, or selects "latest".
+# ------------------------------------------------------------------------------
+PINNED_RUN_SPEC_SECRET_NAME="PINNED_GCS_RUN_SPEC"
+PINNED_RUN_SPEC_MOUNT_PATH="/var/run/india-swing-control/pinned-run-spec.json"
+PINNED_GCS_RUN_SPEC_SECRET_VERSION="${PINNED_GCS_RUN_SPEC_SECRET_VERSION:-}"
+
+# Fail closed before any image build or job mutation: the version must be
+# an exact canonical positive decimal integer -- no "latest", no leading
+# zero, no sign, no whitespace, not empty, not zero.
+if [ -z "${PINNED_GCS_RUN_SPEC_SECRET_VERSION}" ] || ! [[ "${PINNED_GCS_RUN_SPEC_SECRET_VERSION}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: PINNED_GCS_RUN_SPEC_SECRET_VERSION must be set to an exact canonical positive decimal integer identifying an already-created, enabled Secret Manager version of '${PINNED_RUN_SPEC_SECRET_NAME}' (no 'latest', no leading zero, no sign, no whitespace, not empty, not zero)." >&2
+  exit 1
+fi
 
 # Cloud Run Names
 SERVICE_NAME="rss-collector"
@@ -100,7 +125,7 @@ echo "Storage Bucket:   gs://${BUCKET_NAME}"
 echo "Firestore Db:     ${FIRESTORE_DATABASE}"
 echo "Run Service:      ${SERVICE_NAME}"
 echo "Run Job:          ${JOB_NAME}"
-echo "EOD Scheduler:    ${ENABLE_EOD_SCHEDULER} (opt-in; paused/disabled unless exactly 'true')"
+echo "EOD Scheduler:    no automated activation supported; always paused/disabled"
 echo "==========================================================="
 
 # ------------------------------------------------------------------------------
@@ -190,6 +215,23 @@ for secret in "${SECRETS[@]}"; do
 done
 
 # ------------------------------------------------------------------------------
+# 5a. Verify the pre-existing operator-authored pinned run-spec secret
+# ------------------------------------------------------------------------------
+# This control secret is never created, seeded, or given a placeholder
+# version by this script -- it must already exist with the exact pinned
+# version enabled. This script reads neither its bytes nor a hash of them.
+echo "Verifying pinned run-spec secret '${PINNED_RUN_SPEC_SECRET_NAME}' version ${PINNED_GCS_RUN_SPEC_SECRET_VERSION}..."
+if ! gcloud secrets describe "${PINNED_RUN_SPEC_SECRET_NAME}" &>/dev/null; then
+  echo "Error: Secret Manager secret '${PINNED_RUN_SPEC_SECRET_NAME}' does not exist. Create it and add the pinned run-spec version out of band before running this script; this script never creates or seeds this control secret." >&2
+  exit 1
+fi
+PINNED_RUN_SPEC_VERSION_STATE="$(gcloud secrets versions describe "${PINNED_GCS_RUN_SPEC_SECRET_VERSION}" --secret="${PINNED_RUN_SPEC_SECRET_NAME}" --format="value(state)" 2>/dev/null || echo "")"
+if [ "${PINNED_RUN_SPEC_VERSION_STATE}" != "ENABLED" ]; then
+  echo "Error: Secret Manager secret '${PINNED_RUN_SPEC_SECRET_NAME}' version ${PINNED_GCS_RUN_SPEC_SECRET_VERSION} does not exist or is not ENABLED. This script never chooses a version automatically or falls back to 'latest'." >&2
+  exit 1
+fi
+
+# ------------------------------------------------------------------------------
 # 6. Apply IAM Role Bindings (Least Privilege)
 # ------------------------------------------------------------------------------
 echo "Applying IAM Role Bindings..."
@@ -221,11 +263,27 @@ gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${JOB_RUNTIME_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
   --role="roles/aiplatform.user"
 
-# Grant Access to Secret Manager secrets
+# Grant Access to Secret Manager secrets: least privilege. The eod-swing
+# job's cloud_job.py entrypoint reads no Kite/LLM/notification capability,
+# so KITE_API_KEY, KITE_API_SECRET, LLM_API_KEY, and NOTIFICATION_TOKEN
+# remain provisioned above for future, separately reviewed features but
+# are deliberately never granted or mounted here. The runtime service
+# account gets accessor on exactly one secret: the operator-authored
+# pinned run-spec control document.
+gcloud secrets add-iam-policy-binding "${PINNED_RUN_SPEC_SECRET_NAME}" \
+  --member="serviceAccount:${JOB_RUNTIME_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+
+# Revoke bindings that older versions of this deployment script granted to
+# the current job runtime. Merely omitting them from the new job definition
+# does not remove secret-level IAM already persisted in GCP. Fail closed if a
+# revocation cannot be applied; otherwise the job would retain an unused
+# capability contrary to the least-privilege contract above.
 for secret in "${SECRETS[@]}"; do
-  gcloud secrets add-iam-policy-binding "${secret}" \
+  gcloud secrets remove-iam-policy-binding "${secret}" \
     --member="serviceAccount:${JOB_RUNTIME_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
-    --role="roles/secretmanager.secretAccessor"
+    --role="roles/secretmanager.secretAccessor" \
+    --quiet
 done
 
 # C. Cloud Build and Compute Engine default service account permissions
@@ -327,37 +385,44 @@ fi
 # ------------------------------------------------------------------------------
 echo "Deploying Cloud Run Job: ${JOB_NAME}..."
 # Job configuration: 1 Task, 1 Retry, 2 CPU, 4GiB memory, 90 mins task timeout.
-# Mounts Secret Manager secrets as env variables.
+# The job's sole run-spec authority is the pinned Secret Manager version
+# mounted as a file at PINNED_RUN_SPEC_MOUNT_PATH and passed through
+# --spec-file; there is no environment-variable secret, GCS FUSE mount, or
+# downloaded temporary spec. Every INDIA_SWING_*_ROOT below is a distinct
+# path under the job container's own /tmp/india-swing, which is ephemeral
+# (lost when the task ends) and suitable only for a bounded manual
+# validation run until real cloud artifact-store persistence exists.
+PINNED_JOB_ARTIFACT_ROOTS="INDIA_SWING_CALENDAR_DATA_ROOT=/tmp/india-swing/calendar_data,INDIA_SWING_IDENTITY_REGISTRY_ROOT=/tmp/india-swing/identity_registry,INDIA_SWING_HISTORICAL_PRICES_ROOT=/tmp/india-swing/historical_prices,INDIA_SWING_DAILY_REPORTS_ROOT=/tmp/india-swing/daily_reports,INDIA_SWING_REFERENCE_DATA_ROOT=/tmp/india-swing/reference_data,INDIA_SWING_DAILY_PIPELINE_ROOT=/tmp/india-swing/daily_pipeline"
 if gcloud run jobs describe "${JOB_NAME}" --region="${REGION}" &>/dev/null; then
   echo "Job exists, updating..."
   gcloud run jobs update "${JOB_NAME}" \
     --image="${FULL_IMAGE_URL}" \
     --region="${REGION}" \
     --command=python \
-    --args=-m,india_swing.cloud_job \
+    --args=-m,india_swing.cloud_job,--spec-file,"${PINNED_RUN_SPEC_MOUNT_PATH}" \
     --tasks=1 \
     --max-retries=1 \
     --cpu=2 \
     --memory=4Gi \
     --task-timeout=5400s \
     --service-account="${JOB_RUNTIME_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
-    --set-env-vars="BUCKET_NAME=${BUCKET_NAME},FIRESTORE_DATABASE=${FIRESTORE_DATABASE}" \
-    --set-secrets="KITE_API_KEY=KITE_API_KEY:latest,KITE_API_SECRET=KITE_API_SECRET:latest,LLM_API_KEY=LLM_API_KEY:latest,NOTIFICATION_TOKEN=NOTIFICATION_TOKEN:latest"
+    --set-env-vars="BUCKET_NAME=${BUCKET_NAME},FIRESTORE_DATABASE=${FIRESTORE_DATABASE},${PINNED_JOB_ARTIFACT_ROOTS}" \
+    --set-secrets="${PINNED_RUN_SPEC_MOUNT_PATH}=${PINNED_RUN_SPEC_SECRET_NAME}:${PINNED_GCS_RUN_SPEC_SECRET_VERSION}"
 else
   echo "Creating new Job..."
   gcloud run jobs create "${JOB_NAME}" \
     --image="${FULL_IMAGE_URL}" \
     --region="${REGION}" \
     --command=python \
-    --args=-m,india_swing.cloud_job \
+    --args=-m,india_swing.cloud_job,--spec-file,"${PINNED_RUN_SPEC_MOUNT_PATH}" \
     --tasks=1 \
     --max-retries=1 \
     --cpu=2 \
     --memory=4Gi \
     --task-timeout=5400s \
     --service-account="${JOB_RUNTIME_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
-    --set-env-vars="BUCKET_NAME=${BUCKET_NAME},FIRESTORE_DATABASE=${FIRESTORE_DATABASE}" \
-    --set-secrets="KITE_API_KEY=KITE_API_KEY:latest,KITE_API_SECRET=KITE_API_SECRET:latest,LLM_API_KEY=LLM_API_KEY:latest,NOTIFICATION_TOKEN=NOTIFICATION_TOKEN:latest"
+    --set-env-vars="BUCKET_NAME=${BUCKET_NAME},FIRESTORE_DATABASE=${FIRESTORE_DATABASE},${PINNED_JOB_ARTIFACT_ROOTS}" \
+    --set-secrets="${PINNED_RUN_SPEC_MOUNT_PATH}=${PINNED_RUN_SPEC_SECRET_NAME}:${PINNED_GCS_RUN_SPEC_SECRET_VERSION}"
 fi
 
 # Allow Scheduler S.A. to run the job
@@ -398,45 +463,22 @@ echo "Configuring Cloud Scheduler Jobs..."
 #     --oidc-token-audience="${SERVICE_URL}/"
 # fi
 
-# B. EOD Swing Job Schedule: 20:15 IST, Monday-Friday -- opt-in and paused
-# by default. Only ENABLE_EOD_SCHEDULER=true creates/updates and leaves it
-# active; any other value pauses an existing schedule (or reports it
-# remains disabled if it was never created) instead of running the job
-# unattended.
-# Uses OAuth token to invoke the Cloud Run Job via REST API: /jobs/eod-swing:run
-JOB_RUN_URI="https://${REGION}-run.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/jobs/${JOB_NAME}:run"
-if [ "${ENABLE_EOD_SCHEDULER}" = "true" ]; then
-  if gcloud scheduler jobs describe "eod-swing-schedule" --location="${REGION}" &>/dev/null; then
-    echo "Updating existing EOD Swing Scheduler Job..."
-    gcloud scheduler jobs update http eod-swing-schedule \
-      --location="${REGION}" \
-      --schedule="15 20 * * 1-5" \
-      --time-zone="Asia/Kolkata" \
-      --uri="${JOB_RUN_URI}" \
-      --http-method=POST \
-      --oauth-service-account-email="${JOB_SCHEDULER_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
-      --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
-  else
-    echo "Creating new EOD Swing Scheduler Job..."
-    gcloud scheduler jobs create http eod-swing-schedule \
-      --location="${REGION}" \
-      --schedule="15 20 * * 1-5" \
-      --time-zone="Asia/Kolkata" \
-      --uri="${JOB_RUN_URI}" \
-      --http-method=POST \
-      --oauth-service-account-email="${JOB_SCHEDULER_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
-      --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
-  fi
-  EOD_SCHEDULER_STATE="active"
+# B. EOD Swing Job Schedule: no automated-activation path exists anywhere
+# in this script. A single static pinned run-spec targets one exact market
+# session and previous-run binding; scheduling it every weekday would
+# replay the same stale inputs unattended. ENABLE_EOD_SCHEDULER=true is
+# already rejected in Section 1 before any GCP mutation is reachable, so
+# by this point ENABLE_EOD_SCHEDULER is guaranteed not to be "true". There
+# is no gcloud scheduler jobs create/update/resume call for
+# eod-swing-schedule anywhere in this script -- only pause-if-present, or
+# report disabled otherwise.
+if gcloud scheduler jobs describe "eod-swing-schedule" --location="${REGION}" &>/dev/null; then
+  echo "Pausing the existing EOD Swing Scheduler Job (no automated activation is supported)..."
+  gcloud scheduler jobs pause "eod-swing-schedule" --location="${REGION}"
+  EOD_SCHEDULER_STATE="paused"
 else
-  if gcloud scheduler jobs describe "eod-swing-schedule" --location="${REGION}" &>/dev/null; then
-    echo "ENABLE_EOD_SCHEDULER is not 'true'; pausing the existing EOD Swing Scheduler Job..."
-    gcloud scheduler jobs pause "eod-swing-schedule" --location="${REGION}"
-    EOD_SCHEDULER_STATE="paused"
-  else
-    echo "ENABLE_EOD_SCHEDULER is not 'true'; EOD Swing Scheduler Job remains disabled (not created)."
-    EOD_SCHEDULER_STATE="disabled"
-  fi
+  echo "EOD Swing Scheduler Job remains disabled (not created)."
+  EOD_SCHEDULER_STATE="disabled"
 fi
 
 echo "=========================================================="

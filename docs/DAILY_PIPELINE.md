@@ -365,25 +365,40 @@ wiring.
 pure, strict, bounded parser and immutable value model for one JSON
 document that provides every input `run_daily_pipeline_from_pinned_gcs_manifest`
 needs: which exact GCS manifest generation to read, the independently
-trusted binding to verify it against, and the run's session/cutoff/calendar
-identity. It never reads a file, environment variable, or the current
-clock, never constructs a GCS/storage client, never lists or selects a
-"latest" object, and never infers a previous run.
+trusted binding to verify it against, the run's session/cutoff/calendar
+identity, and -- for schema v2 only -- which exact GCS calendar-
+materialization object generation to acquire. It never reads a file,
+environment variable, or the current clock, never constructs a GCS/storage
+client, never lists or selects a "latest" object, and never infers a
+previous run.
 
 **The parser cannot prove who authored this document.** Treat a parsed
 `PinnedGCSRunSpec` as operator-governed input, not self-authenticating
 evidence -- authenticity, IAM, and distribution of the underlying JSON
 remain an operational control entirely outside this module's scope. In
-particular, `trusted_binding.expected_manifest_sha256` must arrive through
-that same independently governed operator/control-plane channel; this
-parser never computes or derives it from manifest content, and no later
-stage in this codebase is permitted to either -- the whole point of the
-binding is that the expected hash is known *before* anything is fetched,
-from a source independent of what gets fetched.
+particular, `trusted_binding.expected_manifest_sha256` and (for schema v2)
+`calendar_request.expected_sha256` must each arrive through that same
+independently governed operator/control-plane channel; this parser never
+computes or derives either from fetched content, and no later stage in
+this codebase is permitted to either -- the whole point of both bindings
+is that the expected hash is known *before* anything is fetched, from a
+source independent of what gets fetched. Neither an externally pinned
+hash nor any internal content-identity hash (materialization ID, manifest
+ID, snapshot ID) is authorship or provenance evidence by itself.
 
 ### Exact JSON schema
 
-Top-level object, exactly these four keys:
+Two schema versions exist. `PINNED_GCS_RUN_SPEC_SCHEMA_VERSION` (`1`) is the
+original local-calendar shape; `PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR`
+(`2`) adds one required `calendar_request` object so the calendar itself can
+be acquired from GCS instead of a local store. A document must declare
+exactly one of the two; `parse_pinned_gcs_run_spec` determines which exact
+top-level key set is required from the document's own keys, then requires
+`schema_version` to match that shape's exact constant -- a schema-1-shaped
+document claiming `schema_version: 2`, or vice versa, is rejected, never
+silently reinterpreted.
+
+**Schema v1** top-level object, exactly these four keys:
 
 | Key | Type | Notes |
 |---|---|---|
@@ -392,7 +407,27 @@ Top-level object, exactly these four keys:
 | `trusted_binding` | object | See below. |
 | `run` | object | See below. |
 
-`manifest_request`, exactly these four keys:
+**Schema v2** top-level object, exactly these five keys:
+
+| Key | Type | Notes |
+|---|---|---|
+| `schema_version` | integer | Must be exactly `2`. |
+| `manifest_request` | object | Same shape as v1. |
+| `trusted_binding` | object | Same shape as v1. |
+| `calendar_request` | object | See below. New in v2. |
+| `run` | object | Same shape as v1. |
+
+`calendar_request` (v2 only), exactly these five keys:
+
+| Key | Type | Notes |
+|---|---|---|
+| `bucket` | string | Same strict bucket-name shape used elsewhere in this package. |
+| `object_name` | string | Must be the exact canonical `calendar-materializations/{materialization_id}/materialization.json` path derived from this same object's `materialization_id`; no alias, wildcard, or traversal. |
+| `generation` | integer | Positive signed-int64; not a bool, float, or string. |
+| `expected_sha256` | string | Exact lowercase 64-hex. Operator-supplied; never computed from fetched bytes -- the same independently-governed-hash contract `trusted_binding.expected_manifest_sha256` already follows. |
+| `materialization_id` | string | Exact lowercase 64-hex. Must equal `run.calendar_materialization_id`. |
+
+`manifest_request`, exactly these four keys (both schema versions):
 
 | Key | Type | Notes |
 |---|---|---|
@@ -417,7 +452,7 @@ Top-level object, exactly these four keys:
 |---|---|---|
 | `market_session` | string | Canonical `YYYY-MM-DD`. |
 | `cutoff` | string | RFC3339-like, must be `>=` `trusted_binding.cutoff`. |
-| `calendar_materialization_id` | string | Exact lowercase 64-hex. |
+| `calendar_materialization_id` | string | Exact lowercase 64-hex. For schema v2, must equal `calendar_request.materialization_id`. |
 | `previous_run_id` | string or `null` | Required key. `null` means a first/bootstrap run; never discovered or inferred. Otherwise exact lowercase 64-hex. |
 
 All RFC3339-like datetime strings require `T`, explicit seconds, optional
@@ -471,50 +506,80 @@ outside this repo's code.
 `run_daily_pipeline_from_pinned_gcs_run_spec` (in
 `daily_pipeline/pinned_gcs_run_service.py`) is the fifth, internal entry
 point. It is a pure, dependency-injected application-service boundary that
-binds one already-validated `PinnedGCSRunSpec` to one exact,
-replay-verified `StoredCalendarMaterialization` (from
-`calendar_data/materialization_store.py`), independently revalidates and
+binds one already-validated `PinnedGCSRunSpec` to its calendar
+materialization -- by exact schema version -- independently revalidates and
 cross-binds them, and only then delegates to
-`run_daily_pipeline_from_pinned_gcs_manifest`.
+`run_daily_pipeline_from_pinned_gcs_manifest`. Its second positional
+parameter, `calendar_materialization: StoredCalendarMaterialization | None`,
+is required for schema v1 and required to be exactly `None` for schema v2.
 
-This service does not prove authorship of `spec` or provenance of an
-arbitrarily caller-constructed `calendar_materialization`. It never reads a
-spec file, environment variable, or the current clock; never constructs
-`LocalCalendarMaterializationStore`, `GoogleCloudStorageObjectReader`, or
-any GCP client or local artifact/run store; never lists or selects a
-"latest" calendar materialization; and never infers
+This service does not prove authorship of `spec`, provenance of an
+arbitrarily caller-constructed `calendar_materialization`, or authorship of
+`spec.calendar_request`'s externally pinned hash. It never reads a spec
+file, environment variable, or the current clock; never constructs
+`LocalCalendarMaterializationStore`, a GCS/storage client, or any local
+artifact/run store; never lists or selects a "latest" calendar
+materialization or object generation; and never infers
 `calendar_materialization_id` or `previous_run_id`. The outer CLI boundary
-that reads a spec file through a bounded safe-file boundary and obtains
-`calendar_materialization` only through
-`LocalCalendarMaterializationStore.get(spec.calendar_materialization_id)`
-remains separate future work.
+that reads a spec file through a bounded safe-file boundary, and for schema
+v1 obtains `calendar_materialization` only through
+`LocalCalendarMaterializationStore.get(spec.calendar_materialization_id)`,
+remains separate future work this task's own end-to-end tests exercise
+without modifying.
 
-Preflight, in order, before any GCS read is attempted:
+Preflight, in order, before any local get, GCS read, or service call:
 
 1. `spec` must be exact `PinnedGCSRunSpec` (never a subclass or shaped
-   proxy). A fresh `PinnedGCSRunSpec` is reconstructed from all seven
-   retained fields, re-running that module's own exact-type validation, so
-   a post-construction-mutated spec (or a mutated nested
-   `manifest_request`/`trusted_binding`) cannot bypass it. Only this fresh
-   snapshot is used afterward.
-2. `calendar_materialization` must be exact `StoredCalendarMaterialization`.
-   Its `manifest`, `materialization`, and `materialization.calendar_snapshot`
-   are each required to be their exact expected types, then each
-   independently calls its own `verify_content_identity()`.
-3. `manifest.artifact_id` and `materialization.materialization_id` must both
-   exactly equal the fresh spec's `calendar_materialization_id`;
-   `manifest.calendar_snapshot_id` must exactly equal
-   `calendar_snapshot.snapshot_id`; and `manifest`/`materialization` must
-   explicitly agree on cutoff, coverage bounds, readiness/actionable state,
-   schema/policy identity, and source/observed-evidence lineage. Two
-   individually self-consistent (content-hash-valid) but mutually
-   mismatched objects are rejected here, not just objects with a broken
-   hash.
-4. The fresh spec's `market_session` must be a declared trading session on
-   `calendar_snapshot` (`calendar_snapshot.require_session(...)`), and
-   `calendar_snapshot.cutoff` must not exceed the fresh spec's `cutoff`. No
-   calendar lookup, latest selection, fallback, or inferred calendar ID
-   exists in this module.
+   proxy). A fresh `PinnedGCSRunSpec` is reconstructed from all eight
+   retained fields (including `calendar_request`), re-running that module's
+   own exact-type validation, so a post-construction-mutated spec (or a
+   mutated nested `manifest_request`/`trusted_binding`/`calendar_request`)
+   cannot bypass it. Only this fresh snapshot is used afterward.
+2. **Schema v1** (`schema_version == PINNED_GCS_RUN_SPEC_SCHEMA_VERSION`):
+   `fresh_spec.calendar_request` must be `None`, and
+   `calendar_materialization` must be exact `StoredCalendarMaterialization`.
+   Its `manifest`, `materialization`, and
+   `materialization.calendar_snapshot` are each required to be their exact
+   expected types, then each independently calls its own
+   `verify_content_identity()`; `manifest.artifact_id` and
+   `materialization.materialization_id` must both exactly equal the fresh
+   spec's `calendar_materialization_id`; `manifest.calendar_snapshot_id`
+   must exactly equal `calendar_snapshot.snapshot_id`; and
+   `manifest`/`materialization` must explicitly agree on cutoff, coverage
+   bounds, readiness/actionable state, schema/policy identity, and
+   source/observed-evidence lineage. Two individually self-consistent
+   (content-hash-valid) but mutually mismatched objects are rejected here,
+   not just objects with a broken hash. No calendar-acquisition read is
+   ever issued for v1.
+3. **Schema v2**
+   (`schema_version == PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR`):
+   `calendar_materialization` must be exactly `None`, and
+   `fresh_spec.calendar_request` must be exact
+   `CalendarMaterializationObjectRequest`. This service calls
+   `acquire_calendar_materialization(fresh_spec.calendar_request,
+   reader=reader)` exactly once, using the identical caller-injected
+   `reader` this service later passes to the delegated job -- never a
+   second reader or client. The returned `AcquiredCalendarMaterialization`
+   is independently reconstructed from its own
+   `request`/`observed_generation`/`observed_sha256`/`materialization`
+   fields before use, so a patched or mutated acquisition result cannot
+   bypass its own validation.
+4. **Common to both schemas**: the resulting `materialization` and its
+   `calendar_snapshot` must be the exact committed types, their content
+   identities are independently re-verified, `materialization.
+   materialization_id` must equal the fresh spec's
+   `calendar_materialization_id`, `calendar_snapshot` must declare the
+   fresh spec's `market_session` as a session
+   (`calendar_snapshot.require_session(...)`), and `calendar_snapshot.
+   cutoff` must not exceed the fresh spec's `cutoff`. **Schema v2
+   additionally** requires the acquired request's `materialization_id` to
+   equal the fresh spec's `calendar_materialization_id`, the acquired
+   request to equal `fresh_spec.calendar_request` by exact field values,
+   `observed_generation` to equal the pinned request generation, and
+   `observed_sha256` to equal the pinned `expected_sha256`. No calendar
+   lookup, latest selection, fallback, or inferred calendar ID exists
+   anywhere in this module for either schema; v2 never falls back to a
+   local calendar even when one happens to be available.
 
 Only after every check above passes does this function call
 `run_daily_pipeline_from_pinned_gcs_manifest` exactly once, with the fresh
@@ -523,21 +588,29 @@ spec's `manifest_request`, `trusted_binding` (as `binding`),
 `previous_run_id`; the verified `calendar_snapshot`; and the exact
 caller-supplied `reader` and stores, unchanged.
 
-Ordinary failures (never `BaseException`) collapse into one of three
-static, sanitized `PinnedGCSRunServiceError` messages -- one for spec
-reconstruction, one for calendar verification/mismatch, one for delegated-
-job execution -- with chaining suppressed, so no bucket/path/hash/ID/date
-value or nested exception text can leak through this boundary. This
+Ordinary failures (never `BaseException`) collapse into one of four static,
+sanitized `PinnedGCSRunServiceError` messages -- spec reconstruction,
+calendar acquisition (v2 only), calendar validation/mismatch, and
+delegated-job execution -- with chaining suppressed, so no bucket/path/
+hash/ID/date value or nested exception text can leak through this
+boundary. There is no same-class bare-reraise privilege anywhere in this
+function: an ordinary exception that happens to already be a
+`PinnedGCSRunServiceError` or `CalendarMaterializationAcquisitionError` --
+for example an untrusted reader or delegated job deliberately raising one
+-- is discarded and replaced with the fresh static error exactly like any
+other exception, so both `__cause__` and `__context__` on the public error
+are always exactly `None`, not merely suppressed from display. This
 function adds no retry, rollback, cleanup, alternate data source, or
 partial-success semantics of its own.
 
-This closes the spec-to-calendar binding seam. What remains separate,
-unauthorized future work: reading a spec file from disk through a bounded
-safe-file boundary, constructing a real `GoogleCloudStorageObjectReader`,
-calling `LocalCalendarMaterializationStore.get(...)` to obtain
-`calendar_materialization`, constructing real artifact/run stores, IAM/bucket
-configuration, a CLI command, a scheduler, and any deployment wiring.
-Nothing in this increment touches any of those.
+This closes the spec-to-calendar binding seam for both schema versions.
+What remains separate, unauthorized future work: reading a spec file from
+disk through a bounded safe-file boundary, constructing a real
+`GoogleCloudStorageObjectReader`, calling
+`LocalCalendarMaterializationStore.get(...)` for schema v1, constructing
+real artifact/run stores, IAM/bucket configuration, a CLI command, a
+scheduler, and any deployment wiring. Nothing in this increment touches any
+of those.
 
 ## Internal pinned-GCS run-spec file boundary
 
@@ -562,24 +635,56 @@ of its own and never truncates.
 `run_daily_pipeline_from_pinned_gcs_run_spec_file(spec_path, *,
 calendar_store, reader, reference_store, daily_store, historical_store,
 identity_store, adjudication_store, run_store)` loads the spec via
-`load_pinned_gcs_run_spec_file`, requires `calendar_store` to be exact
-`LocalCalendarMaterializationStore` (never a subclass), then calls
-`calendar_store.get(spec.calendar_materialization_id)` exactly once -- the
-only calendar lookup this function performs; there is no listing, latest
-selection, fallback, retry, or inferred ID. Only after that acquisition
-succeeds does it delegate exactly once to
-`run_daily_pipeline_from_pinned_gcs_run_spec` with the loaded spec, the
-acquired materialization, and the caller-supplied `reader`/stores
-unchanged.
+`load_pinned_gcs_run_spec_file`, requires the result to be exact
+`PinnedGCSRunSpec`, then defensively reconstructs a fresh `PinnedGCSRunSpec`
+from every one of the loaded value's retained fields (including
+`calendar_request`) before any routing decision, get call, or service call
+-- so a wrong/subclass/shaped loaded spec, or a post-construction mutation
+to any outer or nested field (including `schema_version` mutated to bool
+`True`/`False`, which would otherwise satisfy `True == 1` under ordinary
+equality), is rejected by this reconstruction alone. Only the reconstructed
+snapshot is used afterward, and its `schema_version`'s exact `int` type is
+checked before it is compared against the two committed schema constants.
+`calendar_store`'s accepted shape and this function's routing then depend
+on that exact schema version:
 
-Ordinary path/filesystem/parse failures collapse into one static,
-sanitized `PinnedGCSRunFileBoundaryError`; an ordinary calendar-store type
-or `get` failure collapses into a second, separate static sanitized
-`PinnedGCSRunFileBoundaryError`. Neither exposes path, bucket, hash, ID,
-date, or nested exception text. The delegated call to
-`run_daily_pipeline_from_pinned_gcs_run_spec` is never wrapped in
-try/except: its `PinnedGCSRunServiceError` propagates unchanged, and no
-`BaseException` is ever intercepted anywhere in this module.
+- **Schema v1**: `calendar_store` must be exact
+  `LocalCalendarMaterializationStore` (never a subclass). This function
+  calls `calendar_store.get(spec.calendar_materialization_id)` exactly
+  once -- the only calendar lookup this function performs for v1; there is
+  no listing, latest selection, fallback, retry, or inferred ID. That
+  exact returned value is passed positionally to the service.
+- **Schema v2**: `calendar_store` may be exactly `None` or exact
+  `LocalCalendarMaterializationStore` (any other value, including a
+  subclass or a shaped/poisoned-equality proxy, is rejected before the
+  service call). No member of `calendar_store` is ever read for v2 --
+  `.get()` is never called, even when the caller supplies an exact CLI-
+  constructed store instance that happens to be unused. This function
+  always passes exactly `None` as the service's `calendar_materialization`
+  positional argument for v2, so
+  `run_daily_pipeline_from_pinned_gcs_run_spec` remains the sole calendar-
+  acquisition authority and there is never dual calendar authority.
+
+Only after schema-specific routing succeeds does this function delegate
+exactly once to `run_daily_pipeline_from_pinned_gcs_run_spec` with the
+reconstructed spec, the schema-selected calendar positional value (the v1
+`StoredCalendarMaterialization` or v2's `None`), and the caller-supplied
+`reader`/stores unchanged.
+
+Ordinary failures at the file-load, reconstruction/routing, or v1
+calendar-lookup stage (never `BaseException`) -- including one that
+happens to already be a `PinnedGCSRunFileBoundaryError` -- collapse into
+one of three static, stage-specific, sanitized `PinnedGCSRunFileBoundaryError`
+messages: file loading/parsing, schema routing, and v1 calendar-store `get`
+failure. None exposes path, bucket, object name, generation, hash, ID,
+date, or nested exception text, and none retains a same-class injected
+exception -- every ordinary exception is discarded and replaced with the
+fresh static error only after the guarding try/except has fully exited, so
+both `__cause__` and `__context__` are always exactly `None`. The delegated
+call to `run_daily_pipeline_from_pinned_gcs_run_spec` is never wrapped in
+try/except: its `PinnedGCSRunServiceError` propagates unchanged for both
+schema versions, and no `BaseException` is ever intercepted anywhere in
+this module.
 
 This file boundary itself remains a Python entry point with no CLI wiring,
 no real `GoogleCloudStorageObjectReader` construction, and no local store
@@ -619,6 +724,27 @@ run/generation values from the command line. No new environment variable,
 default root, or config field was introduced; no existing subcommand,
 argument, default, response shape, or exit code was changed.
 
+This CLI branch's own code is schema-agnostic: it always constructs the
+same `calendar_store` and `reader` and passes both through unchanged,
+regardless of which schema version the loaded spec turns out to be. The
+file boundary and service underneath it are what branch on schema version
+(see above). For a schema-v1 spec, this produces exactly three
+generation-pinned, bounded reads through the injected reader, in order:
+the landing manifest, the security master, and the daily bundle. For a
+schema-v2 spec, `calendar_store` is constructed but never read from (an
+integration test proves `LocalCalendarMaterializationStore.get` is never
+called), and the run instead produces exactly four generation-pinned,
+bounded reads through the same single injected reader, in order: the
+calendar materialization (bounded by
+`MAXIMUM_CALENDAR_MATERIALIZATION_BYTES`, 256 MiB), the landing manifest
+(bounded by `MAXIMUM_LANDING_MANIFEST_BYTES`), the security master (bounded
+by 32 MiB), and the daily bundle (bounded by 128 MiB) -- one storage client
+construction total, in either case. A schema-v2 calendar failure (wrong
+expected hash, wrong observed generation, or malformed/noncanonical
+calendar bytes) is rejected after exactly the one calendar read and before
+any landing read, `calendar_store` access, retry, or artifact-store
+mutation.
+
 This closes the CLI-wiring seam this side of IAM/scheduling/deployment. What
 remains separate, unauthorized future work: provisioning real GCP
 credentials/IAM/bucket configuration for `GoogleCloudStorageObjectReader`'s
@@ -628,14 +754,22 @@ Nothing in this increment touches any of those.
 ## Current limitations
 
 - `run-pinned-gcs` (documented above) is the only pinned-GCS entry point
-  wired into the CLI; `run_daily_pipeline_from_pinned_gcs_manifest` (the
-  injected pinned-GCS composition boundary) and
+  wired into the CLI, and it now supports both schema-v1 (local-calendar)
+  and schema-v2 (GCS-pinned-calendar) specs end to end; `run_daily_pipeline_
+  from_pinned_gcs_manifest` (the injected pinned-GCS composition boundary),
   `run_daily_pipeline_from_pinned_gcs_run_spec` (the spec-to-calendar
-  service seam) remain internal Python entry points composed underneath it,
-  not separately exposed as CLI commands. Real GCP credential/IAM/bucket
-  provisioning, a scheduler, and deployment wiring do not exist yet for
-  `run-pinned-gcs` or any other command.
-- The calendar is locally observed and not point-in-time verified.
+  service seam), and `acquire_calendar_materialization` (the calendar
+  acquisition boundary) remain internal Python entry points composed
+  underneath it, not separately exposed as CLI commands. Real GCP
+  credential/IAM/bucket provisioning, a scheduler, and deployment wiring do
+  not exist yet for `run-pinned-gcs` or any other command.
+- The calendar remains locally observed and collection-only/non-actionable
+  in both schema versions -- it is not point-in-time verified, and neither
+  schema v2's externally pinned `expected_sha256`/object generation nor any
+  internal content-identity hash (materialization ID, manifest ID,
+  snapshot ID) proves who authored the underlying calendar document; those
+  remain operator-governed inputs and internal integrity checks, never
+  authorship or provenance evidence.
 - Independent upstream stores deliberately replay raw sources; the current real
   two-vintage run takes several minutes on the development machine.
 - Missing report vintages remain blockers. For example, the present archive
