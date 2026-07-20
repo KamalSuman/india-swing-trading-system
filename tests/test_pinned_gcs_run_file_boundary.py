@@ -29,6 +29,7 @@ from india_swing.daily_pipeline.calendar_materialization_acquisition import (
 from india_swing.daily_pipeline.pinned_gcs_run_file_boundary import (
     PinnedGCSRunFileBoundaryError,
     load_pinned_gcs_run_spec_file,
+    run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file,
     run_daily_pipeline_from_pinned_gcs_run_spec_file,
 )
 from india_swing.daily_pipeline.pinned_gcs_run_service import PinnedGCSRunServiceError
@@ -38,6 +39,16 @@ from india_swing.daily_pipeline.pinned_gcs_run_spec import (
     PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR,
     PinnedGCSRunSpec,
 )
+from india_swing.daily_pipeline.pinned_gcs_state_publication_service import (
+    PinnedGCSStatePublicationServiceError,
+)
+from india_swing.daily_pipeline.state_inventory import ROOT_NAMES, PipelineStateRoots
+from india_swing.daily_pipeline.store import LocalDailyPipelineRunStore
+from india_swing.daily_reports.artifact_store import LocalDailyBundleArtifactStore
+from india_swing.historical_prices.artifact_store import LocalHistoricalPriceArtifactStore
+from india_swing.identity_registry.adjudication_store import LocalIdentityAdjudicationQueueStore
+from india_swing.identity_registry.artifact_store import LocalIdentityRegistryStore
+from india_swing.reference_data.artifact_store import LocalReferenceArtifactStore
 
 
 UTC = timezone.utc
@@ -55,6 +66,7 @@ _CALENDAR_ACQUISITION_GENERATION = 999
 _ERR_LOAD = "pinned gcs run spec file could not be loaded"
 _ERR_SCHEMA = "pinned gcs run file boundary schema routing failed"
 _ERR_CALENDAR = "pinned gcs run file boundary calendar acquisition failed"
+_ERR_BINDING = "pinned gcs run file boundary publication root binding failed"
 
 _BOUNDARY_TARGET = (
     "india_swing.daily_pipeline.pinned_gcs_run_file_boundary."
@@ -62,6 +74,10 @@ _BOUNDARY_TARGET = (
 )
 _LOAD_TARGET = (
     "india_swing.daily_pipeline.pinned_gcs_run_file_boundary.load_pinned_gcs_run_spec_file"
+)
+_PUBLICATION_TARGET = (
+    "india_swing.daily_pipeline.pinned_gcs_run_file_boundary."
+    "run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec"
 )
 
 
@@ -1068,6 +1084,15 @@ _EXACT_ALLOWED_BOUNDARY_IMPORTS = frozenset((
     (1, "pinned_gcs_run_spec", "PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR", None),
     (1, "pinned_gcs_run_spec", "PinnedGCSRunSpec", None),
     (1, "pinned_gcs_run_spec", "parse_pinned_gcs_run_spec", None),
+    (1, "pinned_gcs_state_publication_service", "CompletedPinnedGCSStatePublication", None),
+    (
+        1,
+        "pinned_gcs_state_publication_service",
+        "run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec",
+        None,
+    ),
+    (1, "state_inventory", "PipelineStateRoots", None),
+    (1, "state_publication", "StateObjectWriter", None),
     (1, "store", "LocalDailyPipelineRunStore", None),
 ))
 
@@ -1093,6 +1118,11 @@ _EXACT_ALLOWED_BOUNDARY_CALL_TARGETS = frozenset((
     "PinnedGCSRunSpec",
     "get",
     "run_daily_pipeline_from_pinned_gcs_run_spec",
+    "_load_and_reconstruct_spec",
+    "_routed_calendar_materialization",
+    "PipelineStateRoots",
+    "_path_matches_exactly",
+    "run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec",
 ))
 
 _FORBIDDEN_BOUNDARY_NAME_TOKENS = (
@@ -1189,6 +1219,404 @@ class PinnedGCSRunFileBoundaryCapabilityTests(unittest.TestCase):
                 if token in candidate:
                     offenders.append(candidate)
         self.assertEqual(offenders, [])
+
+
+def _make_publication_roots(base: Path) -> PipelineStateRoots:
+    kwargs = {}
+    for name in ROOT_NAMES:
+        root_path = base / name
+        root_path.mkdir(parents=True, exist_ok=True)
+        kwargs[name] = root_path
+    return PipelineStateRoots(**kwargs)
+
+
+class PublicationFileBoundaryTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.base = Path(self.temporary.name)
+        self.roots = _make_publication_roots(self.base)
+
+        self.calendar_store = LocalCalendarMaterializationStore(
+            root=self.roots.calendar_data, daily_reports_root=self.roots.daily_reports
+        )
+        materialization = _build_materialization(
+            self.roots.calendar_data, self.base / "inputs" / "CMTR-PUB-BASE"
+        )
+        self.stored = self.calendar_store.put(materialization)
+
+        self.reference_store = LocalReferenceArtifactStore(self.roots.reference_data)
+        self.daily_store = LocalDailyBundleArtifactStore(self.roots.daily_reports)
+        self.historical_store = LocalHistoricalPriceArtifactStore(
+            self.roots.historical_prices, self.roots.daily_reports
+        )
+        self.identity_store = LocalIdentityRegistryStore(
+            self.roots.identity_registry, self.roots.reference_data
+        )
+        self.adjudication_store = LocalIdentityAdjudicationQueueStore(
+            self.roots.identity_registry, self.identity_store
+        )
+        self.run_store = LocalDailyPipelineRunStore(self.roots.daily_pipeline)
+
+        self.reader = object()
+        self.bucket = "test-publication-bucket"
+        self.writer = object()
+
+        self.other_root = self.base / "other-root"
+        self.other_root.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _dependencies(self) -> dict[str, object]:
+        return dict(
+            calendar_store=self.calendar_store,
+            reader=self.reader,
+            reference_store=self.reference_store,
+            daily_store=self.daily_store,
+            historical_store=self.historical_store,
+            identity_store=self.identity_store,
+            adjudication_store=self.adjudication_store,
+            run_store=self.run_store,
+            writer=self.writer,
+        )
+
+    def _write_spec(self, name: str = "spec.json", **kwargs: object) -> Path:
+        kwargs.setdefault("calendar_materialization_id", self.stored.manifest.artifact_id)
+        path = self.base / name
+        path.write_bytes(_spec_bytes(**kwargs))
+        return path
+
+    def _write_spec_v2(self, name: str = "spec-v2.json") -> tuple[Path, dict[str, object]]:
+        _materialization, _payload, calendar_request, _fake_reader = _build_v2_fixture(self.base)
+        path = self.base / name
+        path.write_bytes(_spec_bytes_v2(calendar_request=calendar_request))
+        return path, calendar_request
+
+
+class PublicationSuccessTests(PublicationFileBoundaryTestCase):
+    def test_success_calls_publication_service_once_never_calls_run_only_service(self) -> None:
+        path = self._write_spec()
+        sentinel = object()
+        publish_spy = _JobSpy(result=sentinel)
+        run_only_spy = _JobSpy(result=object())
+
+        with patch(_PUBLICATION_TARGET, publish_spy):
+            with patch(_BOUNDARY_TARGET, run_only_spy):
+                result = run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                    str(path), self.roots, self.bucket, **self._dependencies()
+                )
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(run_only_spy.calls, [])
+        self.assertEqual(len(publish_spy.calls), 1)
+        call = publish_spy.calls[0]
+        args = call["args"]
+        kwargs = call["kwargs"]
+        self.assertEqual(len(args), 4)
+        spec_arg, calendar_arg, roots_arg, bucket_arg = args
+        self.assertIsInstance(spec_arg, PinnedGCSRunSpec)
+        self.assertEqual(spec_arg.calendar_materialization_id, self.stored.manifest.artifact_id)
+        # calendar_store.get() independently re-reads/replays from disk
+        # rather than returning the cached self.stored reference, so this
+        # is an equality check (same content), not an identity check.
+        self.assertEqual(calendar_arg, self.stored)
+        self.assertIs(roots_arg, self.roots)
+        self.assertEqual(bucket_arg, self.bucket)
+        self.assertEqual(len(kwargs), 8)
+        self.assertIs(kwargs["reader"], self.reader)
+        self.assertIs(kwargs["reference_store"], self.reference_store)
+        self.assertIs(kwargs["daily_store"], self.daily_store)
+        self.assertIs(kwargs["historical_store"], self.historical_store)
+        self.assertIs(kwargs["identity_store"], self.identity_store)
+        self.assertIs(kwargs["adjudication_store"], self.adjudication_store)
+        self.assertIs(kwargs["run_store"], self.run_store)
+        self.assertIs(kwargs["writer"], self.writer)
+
+    def test_binding_occurs_between_reconstruction_and_get(self) -> None:
+        path = self._write_spec()
+        wrong_reference_store = LocalReferenceArtifactStore(self.other_root)
+        publish_spy = _JobSpy(result=object())
+        deps = self._dependencies()
+        deps["reference_store"] = wrong_reference_store
+
+        with patch.object(self.calendar_store, "get") as get_mock:
+            with patch(_PUBLICATION_TARGET, publish_spy):
+                with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                    run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                        str(path), self.roots, self.bucket, **deps
+                    )
+        get_mock.assert_not_called()
+        self.assertEqual(publish_spy.calls, [])
+
+    def test_publication_error_propagates_unchanged(self) -> None:
+        path = self._write_spec()
+        error = PinnedGCSStatePublicationServiceError("boom")
+
+        with patch(_PUBLICATION_TARGET, side_effect=error):
+            with self.assertRaises(PinnedGCSStatePublicationServiceError) as ctx:
+                run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                    str(path), self.roots, self.bucket, **self._dependencies()
+                )
+        self.assertIs(ctx.exception, error)
+
+    def test_base_exception_from_publication_service_is_not_intercepted(self) -> None:
+        path = self._write_spec()
+
+        with patch(_PUBLICATION_TARGET, side_effect=_MarkerBaseException()):
+            with self.assertRaises(_MarkerBaseException):
+                run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                    str(path), self.roots, self.bucket, **self._dependencies()
+                )
+
+
+class PublicationRootTypeTests(PublicationFileBoundaryTestCase):
+    def test_wrong_roots_type_rejected_before_any_binding_or_service_call(self) -> None:
+        path = self._write_spec()
+        publish_spy = _JobSpy(result=object())
+        with patch(_PUBLICATION_TARGET, publish_spy):
+            with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                    str(path), object(), self.bucket, **self._dependencies()  # type: ignore[arg-type]
+                )
+        self.assertEqual(publish_spy.calls, [])
+
+    def test_equality_poisoned_roots_field_is_rejected_before_get(self) -> None:
+        class _EqualityPoison:
+            def __eq__(self, other: object) -> bool:
+                return True
+
+        path = self._write_spec()
+        object.__setattr__(self.roots, "reference_data", _EqualityPoison())
+        publish_spy = _JobSpy(result=object())
+
+        with patch.object(self.calendar_store, "get") as get_mock:
+            with patch(_PUBLICATION_TARGET, publish_spy):
+                with self.assertRaises(PinnedGCSRunFileBoundaryError) as ctx:
+                    run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                        str(path), self.roots, self.bucket, **self._dependencies()
+                    )
+
+        self.assertEqual(str(ctx.exception), _ERR_BINDING)
+        get_mock.assert_not_called()
+        self.assertEqual(publish_spy.calls, [])
+
+
+class PublicationStoreBindingTests(PublicationFileBoundaryTestCase):
+    def _assert_binding_rejected(self, **override_deps: object) -> None:
+        path = self._write_spec()
+        publish_spy = _JobSpy(result=object())
+        deps = self._dependencies()
+        deps.update(override_deps)
+        with patch.object(self.calendar_store, "get") as get_mock:
+            with patch(_PUBLICATION_TARGET, publish_spy):
+                with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                    run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                        str(path), self.roots, self.bucket, **deps
+                    )
+        get_mock.assert_not_called()
+        self.assertEqual(publish_spy.calls, [])
+
+    def test_reference_store_root_mismatch_rejected(self) -> None:
+        self._assert_binding_rejected(reference_store=LocalReferenceArtifactStore(self.other_root))
+
+    def test_reference_store_wrong_type_rejected(self) -> None:
+        self._assert_binding_rejected(reference_store=object())
+
+    def test_reference_store_subclass_rejected(self) -> None:
+        class _ShapedReferenceStore(LocalReferenceArtifactStore):
+            pass
+
+        self._assert_binding_rejected(
+            reference_store=_ShapedReferenceStore(self.roots.reference_data)
+        )
+
+    def test_reference_store_deleted_root_field_rejected(self) -> None:
+        hostile = LocalReferenceArtifactStore(self.roots.reference_data)
+        del hostile.root
+        self._assert_binding_rejected(reference_store=hostile)
+
+    def test_equality_poisoned_reference_store_root_is_rejected(self) -> None:
+        class _EqualityPoison:
+            def __eq__(self, other: object) -> bool:
+                return True
+
+        hostile = LocalReferenceArtifactStore(self.other_root)
+        hostile.root = _EqualityPoison()  # type: ignore[assignment]
+        self._assert_binding_rejected(reference_store=hostile)
+
+    def test_daily_store_root_mismatch_rejected(self) -> None:
+        self._assert_binding_rejected(daily_store=LocalDailyBundleArtifactStore(self.other_root))
+
+    def test_historical_store_root_mismatch_rejected(self) -> None:
+        self._assert_binding_rejected(
+            historical_store=LocalHistoricalPriceArtifactStore(
+                self.other_root, self.roots.daily_reports
+            )
+        )
+
+    def test_historical_store_daily_reports_root_mismatch_rejected(self) -> None:
+        self._assert_binding_rejected(
+            historical_store=LocalHistoricalPriceArtifactStore(
+                self.roots.historical_prices, self.other_root
+            )
+        )
+
+    def test_equality_poisoned_secondary_store_root_is_rejected(self) -> None:
+        class _EqualityPoison:
+            def __eq__(self, other: object) -> bool:
+                return True
+
+        hostile = LocalHistoricalPriceArtifactStore(
+            self.roots.historical_prices, self.other_root
+        )
+        hostile.daily_reports_root = _EqualityPoison()  # type: ignore[assignment]
+        self._assert_binding_rejected(historical_store=hostile)
+
+    def test_identity_store_root_mismatch_rejected(self) -> None:
+        self._assert_binding_rejected(
+            identity_store=LocalIdentityRegistryStore(self.other_root, self.roots.reference_data)
+        )
+
+    def test_identity_store_reference_data_root_mismatch_rejected(self) -> None:
+        self._assert_binding_rejected(
+            identity_store=LocalIdentityRegistryStore(
+                self.roots.identity_registry, self.other_root
+            )
+        )
+
+    def test_adjudication_store_root_mismatch_rejected(self) -> None:
+        other_identity_store = LocalIdentityRegistryStore(
+            self.other_root, self.roots.reference_data
+        )
+        self._assert_binding_rejected(
+            adjudication_store=LocalIdentityAdjudicationQueueStore(
+                self.other_root, other_identity_store
+            ),
+            identity_store=other_identity_store,
+        )
+
+    def test_adjudication_store_registry_store_identity_mismatch_rejected(self) -> None:
+        # A different, but root-value-equal, LocalIdentityRegistryStore
+        # instance -- proves the check is genuine object identity, not
+        # equality.
+        different_identity_store = LocalIdentityRegistryStore(
+            self.roots.identity_registry, self.roots.reference_data
+        )
+        different_adjudication_store = LocalIdentityAdjudicationQueueStore(
+            self.roots.identity_registry, different_identity_store
+        )
+        self._assert_binding_rejected(adjudication_store=different_adjudication_store)
+
+    def test_run_store_root_mismatch_rejected(self) -> None:
+        self._assert_binding_rejected(run_store=LocalDailyPipelineRunStore(self.other_root))
+
+
+class PublicationCalendarBindingTests(PublicationFileBoundaryTestCase):
+    def test_v1_calendar_store_root_mismatch_rejected_before_get(self) -> None:
+        path = self._write_spec()
+        wrong_calendar_store = LocalCalendarMaterializationStore(
+            root=self.other_root, daily_reports_root=self.roots.daily_reports
+        )
+        publish_spy = _JobSpy(result=object())
+        deps = self._dependencies()
+        deps["calendar_store"] = wrong_calendar_store
+
+        with patch.object(wrong_calendar_store, "get") as get_mock:
+            with patch(_PUBLICATION_TARGET, publish_spy):
+                with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                    run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                        str(path), self.roots, self.bucket, **deps
+                    )
+        get_mock.assert_not_called()
+        self.assertEqual(publish_spy.calls, [])
+
+    def test_v1_calendar_store_daily_reports_root_mismatch_rejected_before_get(self) -> None:
+        path = self._write_spec()
+        wrong_calendar_store = LocalCalendarMaterializationStore(
+            root=self.roots.calendar_data, daily_reports_root=self.other_root
+        )
+        publish_spy = _JobSpy(result=object())
+        deps = self._dependencies()
+        deps["calendar_store"] = wrong_calendar_store
+
+        with patch.object(wrong_calendar_store, "get") as get_mock:
+            with patch(_PUBLICATION_TARGET, publish_spy):
+                with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                    run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                        str(path), self.roots, self.bucket, **deps
+                    )
+        get_mock.assert_not_called()
+        self.assertEqual(publish_spy.calls, [])
+
+    def test_v2_none_calendar_store_succeeds_and_delegates_with_none(self) -> None:
+        path, _calendar_request = self._write_spec_v2()
+        sentinel = object()
+        publish_spy = _JobSpy(result=sentinel)
+        deps = self._dependencies()
+        deps["calendar_store"] = None
+
+        with patch(_PUBLICATION_TARGET, publish_spy):
+            result = run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                str(path), self.roots, self.bucket, **deps
+            )
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(len(publish_spy.calls), 1)
+        args = publish_spy.calls[0]["args"]
+        self.assertIsNone(args[1])
+
+    def test_v2_exact_store_is_root_validated_but_get_and_other_methods_untouched(self) -> None:
+        path, _calendar_request = self._write_spec_v2()
+        sentinel = object()
+        publish_spy = _JobSpy(result=sentinel)
+        deps = self._dependencies()
+        deps["calendar_store"] = self.calendar_store
+
+        with patch.object(self.calendar_store, "get") as get_mock:
+            with patch(_PUBLICATION_TARGET, publish_spy):
+                result = run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                    str(path), self.roots, self.bucket, **deps
+                )
+
+        get_mock.assert_not_called()
+        self.assertIs(result, sentinel)
+        args = publish_spy.calls[0]["args"]
+        self.assertIsNone(args[1])
+
+    def test_v2_calendar_store_root_mismatch_rejected(self) -> None:
+        path, _calendar_request = self._write_spec_v2()
+        wrong_calendar_store = LocalCalendarMaterializationStore(
+            root=self.other_root, daily_reports_root=self.roots.daily_reports
+        )
+        publish_spy = _JobSpy(result=object())
+        deps = self._dependencies()
+        deps["calendar_store"] = wrong_calendar_store
+
+        with patch(_PUBLICATION_TARGET, publish_spy):
+            with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                    str(path), self.roots, self.bucket, **deps
+                )
+        self.assertEqual(publish_spy.calls, [])
+
+    def test_v2_calendar_store_subclass_rejected(self) -> None:
+        class _ShapedCalendarStore(LocalCalendarMaterializationStore):
+            pass
+
+        path, _calendar_request = self._write_spec_v2()
+        shaped = _ShapedCalendarStore(
+            root=self.roots.calendar_data, daily_reports_root=self.roots.daily_reports
+        )
+        publish_spy = _JobSpy(result=object())
+        deps = self._dependencies()
+        deps["calendar_store"] = shaped
+
+        with patch(_PUBLICATION_TARGET, publish_spy):
+            with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
+                    str(path), self.roots, self.bucket, **deps
+                )
+        self.assertEqual(publish_spy.calls, [])
 
 
 if __name__ == "__main__":
