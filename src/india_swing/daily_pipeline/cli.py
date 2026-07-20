@@ -26,7 +26,7 @@ from india_swing.universe import (
 )
 
 from .acquisition import GoogleCloudStorageObjectReader
-from .config import DailyPipelineConfig
+from .config import DailyPipelineConfig, StatePublicationConfig
 from .derived_evidence import (
     DailyDerivedEvidence,
     daily_run_chain,
@@ -34,8 +34,12 @@ from .derived_evidence import (
 )
 from .derived_evidence_store import LocalDailyDerivedEvidenceStore
 from .models import DailyPipelineRun
-from .pinned_gcs_run_file_boundary import run_daily_pipeline_from_pinned_gcs_run_spec_file
+from .pinned_gcs_run_file_boundary import (
+    run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file,
+)
 from .runner import run_daily_pipeline
+from .state_inventory import PipelineStateRoots
+from .state_publication import GoogleCloudStorageStateObjectWriter
 from .store import LocalDailyPipelineRunStore
 
 
@@ -174,7 +178,8 @@ def _derive(
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
-        run_store = LocalDailyPipelineRunStore(DailyPipelineConfig.from_env().data_root)
+        daily_pipeline_config = DailyPipelineConfig.from_env()
+        run_store = LocalDailyPipelineRunStore(daily_pipeline_config.data_root)
         if args.command == "run":
             reference_config = ReferenceDataConfig.from_env()
             daily_config = DailyReportsConfig.from_env()
@@ -232,6 +237,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             daily_config = DailyReportsConfig.from_env()
             historical_config = HistoricalPricesConfig.from_env()
             identity_config = IdentityRegistryConfig.from_env()
+            calendar_config = CalendarDataConfig.from_env()
+            publication_config = StatePublicationConfig.from_env()
+
+            roots = PipelineStateRoots(
+                calendar_data=calendar_config.data_root,
+                identity_registry=identity_config.data_root,
+                historical_prices=historical_config.data_root,
+                daily_reports=daily_config.data_root,
+                reference_data=reference_config.data_root,
+                daily_pipeline=daily_pipeline_config.data_root,
+            )
+
             reference_store = LocalReferenceArtifactStore(reference_config.data_root)
             daily_store = LocalDailyBundleArtifactStore(daily_config.data_root)
             historical_store = LocalHistoricalPriceArtifactStore(
@@ -247,12 +264,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 identity_store,
             )
             calendar_store = LocalCalendarMaterializationStore(
-                CalendarDataConfig.from_env().data_root,
+                calendar_config.data_root,
                 daily_config.data_root,
             )
             reader = GoogleCloudStorageObjectReader()
-            value = run_daily_pipeline_from_pinned_gcs_run_spec_file(
+            writer = GoogleCloudStorageStateObjectWriter()
+            aggregate = run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file(
                 args.spec_file,
+                roots,
+                publication_config.bucket,
                 calendar_store=calendar_store,
                 reader=reader,
                 reference_store=reference_store,
@@ -261,11 +281,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 identity_store=identity_store,
                 adjudication_store=adjudication_store,
                 run_store=run_store,
+                writer=writer,
             )
             response = {
                 "status": "COMPLETE",
-                "kind": "DAILY_PIPELINE_RUN",
-                **_summary(value),
+                "kind": "PINNED_GCS_STATE_PUBLICATION",
+                **_summary(aggregate.run),
+                "state_bucket": aggregate.bucket,
+                "inventory_id": aggregate.inventory.inventory_id,
+                "publication_id": aggregate.publication.manifest.publication_id,
+                "publication_object_name": aggregate.publication.publication_object.object_name,
+                "publication_object_generation": (
+                    aggregate.publication.publication_object.generation
+                ),
             }
         elif args.command == "derive":
             reference_config = ReferenceDataConfig.from_env()

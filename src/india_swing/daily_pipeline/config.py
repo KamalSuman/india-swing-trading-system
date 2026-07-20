@@ -23,3 +23,27 @@ class DailyPipelineConfig:
         if not isinstance(root, str) or not root.strip() or "\x00" in root:
             raise ValueError(f"{DAILY_PIPELINE_ROOT_ENV} is invalid")
         return cls(data_root=Path(root))
+
+
+STATE_PUBLICATION_BUCKET_ENV = "INDIA_SWING_STATE_PUBLICATION_BUCKET"
+
+
+@dataclass(frozen=True, slots=True)
+class StatePublicationConfig:
+    bucket: str
+
+    @classmethod
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+    ) -> StatePublicationConfig:
+        values = os.environ if environ is None else environ
+        bucket = values.get(STATE_PUBLICATION_BUCKET_ENV)
+        if (
+            type(bucket) is not str
+            or not bucket
+            or bucket != bucket.strip()
+            or "\x00" in bucket
+        ):
+            raise ValueError(f"{STATE_PUBLICATION_BUCKET_ENV} is invalid")
+        return cls(bucket=bucket)
