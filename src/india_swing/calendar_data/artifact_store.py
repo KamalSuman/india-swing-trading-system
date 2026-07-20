@@ -19,7 +19,6 @@ from india_swing._filesystem import (
     read_stable_regular_file,
 )
 from india_swing.domain.models import INDIA_STANDARD_TIME
-from india_swing.identity import content_id
 from india_swing.reference.models import ReferenceReadiness
 from india_swing.reference_data.models import AcquisitionMode
 
@@ -72,56 +71,6 @@ def _utc(value: datetime, field_name: str) -> datetime:
 def _is_link_like(path: Path) -> bool:
     is_junction = getattr(path, "is_junction", None)
     return path.is_symlink() or bool(is_junction and is_junction())
-
-
-def _artifact_identity(
-    manifest: CalendarSourceArtifactManifest,
-) -> dict[str, object]:
-    """Static source identity; locally observed availability is manifest-only."""
-
-    return {
-        "schema_version": manifest.schema_version,
-        "dataset": manifest.dataset,
-        "exchange": manifest.exchange,
-        "segment": manifest.segment,
-        "claimed_authority": manifest.claimed_authority,
-        "acquisition_mode": manifest.acquisition_mode,
-        "readiness": manifest.readiness,
-        "actionable": manifest.actionable,
-        "publication_time_status": manifest.publication_time_status,
-        "original_source_filename": manifest.original_source_filename,
-        "original_declaration_filename": manifest.original_declaration_filename,
-        "claimed_document_id": manifest.claimed_document_id,
-        "claimed_issue_date": manifest.claimed_issue_date,
-        "claimed_source_url": manifest.claimed_source_url,
-        "source_media_type": manifest.source_media_type,
-        "source_byte_count": manifest.source_byte_count,
-        "source_sha256": manifest.source_sha256,
-        "declaration_byte_count": manifest.declaration_byte_count,
-        "declaration_sha256": manifest.declaration_sha256,
-        "normalized_byte_count": manifest.normalized_byte_count,
-        "normalized_sha256": manifest.normalized_sha256,
-        "event_count": manifest.event_count,
-        "event_ids": manifest.event_ids,
-        "parser_version": manifest.parser_version,
-        "declaration_schema_version": manifest.declaration_schema_version,
-        "event_schema_version": manifest.event_schema_version,
-        "event_policy_version": manifest.event_policy_version,
-        "normalized_codec_version": manifest.normalized_codec_version,
-        "raw_filename": manifest.raw_filename,
-        "declaration_filename": manifest.declaration_filename,
-        "normalized_filename": manifest.normalized_filename,
-    }
-
-
-def _manifest_identity(
-    manifest: CalendarSourceArtifactManifest,
-) -> dict[str, object]:
-    return {
-        item.name: getattr(manifest, item.name)
-        for item in fields(CalendarSourceArtifactManifest)
-        if item.name != "manifest_id"
-    }
 
 
 def _manifest_json(manifest: CalendarSourceArtifactManifest) -> bytes:
@@ -393,9 +342,9 @@ class LocalCalendarSourceArtifactStore:
             declaration_filename=DECLARATION_FILENAME,
             normalized_filename=NORMALIZED_FILENAME,
         )
-        artifact_id = content_id(_artifact_identity(provisional), length=64)
+        artifact_id = provisional._calculated_artifact_id()
         with_artifact_id = replace(provisional, artifact_id=artifact_id)
-        manifest_id = content_id(_manifest_identity(with_artifact_id), length=64)
+        manifest_id = with_artifact_id._calculated_manifest_id()
         manifest = replace(with_artifact_id, manifest_id=manifest_id)
 
         existing = self._existing(artifact_id)
@@ -597,14 +546,7 @@ class LocalCalendarSourceArtifactStore:
                     "normalized calendar declaration is not deterministic"
                 )
             _validate_parsed_manifest(parsed, manifest)
-            if content_id(_artifact_identity(manifest), length=64) != manifest.artifact_id:
-                raise CalendarSourceArtifactIntegrityError(
-                    "calendar source artifact ID does not match its content"
-                )
-            if content_id(_manifest_identity(manifest), length=64) != manifest.manifest_id:
-                raise CalendarSourceArtifactIntegrityError(
-                    "calendar source manifest ID does not match its content"
-                )
+            manifest.verify_content_identity()
         except CalendarSourceArtifactIntegrityError:
             raise
         except (FileSafetyError, OSError, TypeError, ValueError, KeyError) as exc:

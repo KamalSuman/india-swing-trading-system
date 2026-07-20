@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime, time, timezone
 from enum import Enum
 from pathlib import Path, PurePath
@@ -507,6 +507,66 @@ class CalendarSourceArtifactManifest:
         """Earliest locally supportable time for the validated declaration."""
 
         return self.validated_at
+
+    def _calculated_artifact_id(self) -> str:
+        """Static source identity; locally observed availability is manifest-only."""
+
+        return content_id(
+            {
+                "schema_version": self.schema_version,
+                "dataset": self.dataset,
+                "exchange": self.exchange,
+                "segment": self.segment,
+                "claimed_authority": self.claimed_authority,
+                "acquisition_mode": self.acquisition_mode,
+                "readiness": self.readiness,
+                "actionable": self.actionable,
+                "publication_time_status": self.publication_time_status,
+                "original_source_filename": self.original_source_filename,
+                "original_declaration_filename": self.original_declaration_filename,
+                "claimed_document_id": self.claimed_document_id,
+                "claimed_issue_date": self.claimed_issue_date,
+                "claimed_source_url": self.claimed_source_url,
+                "source_media_type": self.source_media_type,
+                "source_byte_count": self.source_byte_count,
+                "source_sha256": self.source_sha256,
+                "declaration_byte_count": self.declaration_byte_count,
+                "declaration_sha256": self.declaration_sha256,
+                "normalized_byte_count": self.normalized_byte_count,
+                "normalized_sha256": self.normalized_sha256,
+                "event_count": self.event_count,
+                "event_ids": self.event_ids,
+                "parser_version": self.parser_version,
+                "declaration_schema_version": self.declaration_schema_version,
+                "event_schema_version": self.event_schema_version,
+                "event_policy_version": self.event_policy_version,
+                "normalized_codec_version": self.normalized_codec_version,
+                "raw_filename": self.raw_filename,
+                "declaration_filename": self.declaration_filename,
+                "normalized_filename": self.normalized_filename,
+            },
+            length=64,
+        )
+
+    def _calculated_manifest_id(self) -> str:
+        return content_id(
+            {
+                item.name: getattr(self, item.name)
+                for item in fields(CalendarSourceArtifactManifest)
+                if item.name != "manifest_id"
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        if self.artifact_id != self._calculated_artifact_id():
+            raise CalendarSourceArtifactIntegrityError(
+                "calendar source artifact ID does not match its content"
+            )
+        if self.manifest_id != self._calculated_manifest_id():
+            raise CalendarSourceArtifactIntegrityError(
+                "calendar source manifest ID does not match its content"
+            )
 
 
 @dataclass(frozen=True, slots=True)

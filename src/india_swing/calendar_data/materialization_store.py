@@ -36,7 +36,10 @@ from .materialization import (
     ObservedDateEvidenceBinding,
     materialize_collection_calendar,
 )
-from .materialization_codec import encode_calendar_materialization
+from .materialization_codec import (
+    MAXIMUM_CALENDAR_MATERIALIZATION_BYTES,
+    encode_calendar_materialization,
+)
 from .models import (
     CalendarSourceArtifactError,
     CalendarSourceArtifactManifest,
@@ -54,7 +57,9 @@ CALENDAR_MATERIALIZATION_STORE_CODEC_VERSION = (
 MANIFEST_FILENAME = "manifest.json"
 MATERIALIZATION_FILENAME = "materialization.json"
 MAXIMUM_MANIFEST_BYTES = 64 * 1024 * 1024
-MAXIMUM_MATERIALIZATION_BYTES = 256 * 1024 * 1024
+# Exact compatibility alias: materialization_codec.py is now the byte-ceiling
+# authority; this name is retained unchanged for every existing caller.
+MAXIMUM_MATERIALIZATION_BYTES = MAXIMUM_CALENDAR_MATERIALIZATION_BYTES
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
