@@ -25,6 +25,7 @@ from india_swing.universe import (
     LocalCollectionUniverseSnapshotStore,
 )
 
+from .acquisition import GoogleCloudStorageObjectReader
 from .config import DailyPipelineConfig
 from .derived_evidence import (
     DailyDerivedEvidence,
@@ -33,6 +34,7 @@ from .derived_evidence import (
 )
 from .derived_evidence_store import LocalDailyDerivedEvidenceStore
 from .models import DailyPipelineRun
+from .pinned_gcs_run_file_boundary import run_daily_pipeline_from_pinned_gcs_run_spec_file
 from .runner import run_daily_pipeline
 from .store import LocalDailyPipelineRunStore
 
@@ -76,6 +78,11 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--daily-bundle-file", type=Path, required=True)
     run.add_argument("--previous-run-id")
     run.add_argument("--minimum-history-sessions", type=int, default=120)
+    run_pinned_gcs = commands.add_parser(
+        "run-pinned-gcs",
+        help="run one pinned-GCS session from an operator-authored spec file",
+    )
+    run_pinned_gcs.add_argument("--spec-file", required=True)
     derive = commands.add_parser(
         "derive",
         help="materialize tick, liquidity, and universe evidence for one run",
@@ -219,6 +226,46 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "kind": "DAILY_PIPELINE_RUN",
                 **_summary(value),
                 **_derived_summary(derived),
+            }
+        elif args.command == "run-pinned-gcs":
+            reference_config = ReferenceDataConfig.from_env()
+            daily_config = DailyReportsConfig.from_env()
+            historical_config = HistoricalPricesConfig.from_env()
+            identity_config = IdentityRegistryConfig.from_env()
+            reference_store = LocalReferenceArtifactStore(reference_config.data_root)
+            daily_store = LocalDailyBundleArtifactStore(daily_config.data_root)
+            historical_store = LocalHistoricalPriceArtifactStore(
+                historical_config.data_root,
+                historical_config.daily_reports_root,
+            )
+            identity_store = LocalIdentityRegistryStore(
+                identity_config.data_root,
+                reference_config.data_root,
+            )
+            adjudication_store = LocalIdentityAdjudicationQueueStore(
+                identity_config.data_root,
+                identity_store,
+            )
+            calendar_store = LocalCalendarMaterializationStore(
+                CalendarDataConfig.from_env().data_root,
+                daily_config.data_root,
+            )
+            reader = GoogleCloudStorageObjectReader()
+            value = run_daily_pipeline_from_pinned_gcs_run_spec_file(
+                args.spec_file,
+                calendar_store=calendar_store,
+                reader=reader,
+                reference_store=reference_store,
+                daily_store=daily_store,
+                historical_store=historical_store,
+                identity_store=identity_store,
+                adjudication_store=adjudication_store,
+                run_store=run_store,
+            )
+            response = {
+                "status": "COMPLETE",
+                "kind": "DAILY_PIPELINE_RUN",
+                **_summary(value),
             }
         elif args.command == "derive":
             reference_config = ReferenceDataConfig.from_env()
