@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # parallel_dispatcher.py is not a package; import it directly the same way
 # tests/test_one_shot_runner.py imports one_shot_runner.
@@ -810,6 +811,32 @@ class LaunchBookkeepingTests(_DispatcherFixtureTestCase):
         supervisor.poll_once()  # same plan revision, launcher still raising
         self.assertEqual(len(self.launcher.launch_calls), 1)  # no retry
 
+    def test_oserror_launch_failure_is_logged_escalated_and_not_retried(self):
+        """Distinct from test_launch_error_is_logged_escalated_and_not_retried:
+        poll_once's launch try/except catches (LaunchError, OSError), and an
+        OSError from the injected launcher must be handled identically to a
+        LaunchError -- this is asserted as its own regression, not folded
+        into a loop over exception types, so a failure names exactly which
+        exception class broke."""
+
+        root_a = self._make_ready_slot("a", "feature-a", allowed_writes=["a.py", CLAUDE_OUTBOX_REL])
+        self._register(root_a)
+        _write_plan(
+            self.plan_path, 1, PLAN_READY_STATE, [self._slot_entry("a", root_a, "feature-a")]
+        )
+        self.launcher.raise_on_launch = OSError("boom")
+        supervisor = self._supervisor()
+        supervisor.poll_once()
+        self.assertEqual(len(self.launcher.launch_calls), 1)
+        self.assertFalse(supervisor.has_live_children())
+        self.assertTrue(any("could not be" in msg for msg in self.logs))
+        self.assertEqual(len(self.notifications), 1)
+        self.assertEqual(self.notifications[0][0], "Parallel dispatcher launch failed")
+
+        supervisor.poll_once()  # same plan revision, launcher still raising
+        self.assertEqual(len(self.launcher.launch_calls), 1)  # no retry
+        self.assertEqual(len(self.notifications), 1)  # no repeat escalation either
+
     def test_check_children_reaps_clean_exit_without_escalation(self):
         root_a = self._make_ready_slot("a", "feature-a", allowed_writes=["a.py", CLAUDE_OUTBOX_REL])
         self._register(root_a)
@@ -825,7 +852,7 @@ class LaunchBookkeepingTests(_DispatcherFixtureTestCase):
         self.assertFalse(supervisor.has_live_children())
         self.assertEqual(self.notifications, [])
 
-    def test_check_children_escalates_on_nonzero_exit(self):
+    def test_check_children_escalates_on_nonzero_exit_and_reap_is_never_retried(self):
         root_a = self._make_ready_slot("a", "feature-a", allowed_writes=["a.py", CLAUDE_OUTBOX_REL])
         self._register(root_a)
         _write_plan(
@@ -833,13 +860,26 @@ class LaunchBookkeepingTests(_DispatcherFixtureTestCase):
         )
         supervisor = self._supervisor()
         supervisor.poll_once()
+        self.assertEqual(len(self.launcher.launch_calls), 1)
         handle = self.launcher.handles_by_slot["a"]
         self.launcher.poll_results[handle] = 1
-        self.plan_path.unlink()
+
+        # The same READY plan (same plan_revision, slot, task, task_revision
+        # key) is retained -- not deleted -- across the next poll. The reap
+        # itself must escalate exactly once, and the attempted-key bookkeeping
+        # must prevent the reaped slot from being relaunched even though the
+        # plan on disk is unchanged and still names it.
         supervisor.poll_once()
         self.assertFalse(supervisor.has_live_children())
         self.assertEqual(len(self.notifications), 1)
         self.assertEqual(self.notifications[0][0], "Parallel dispatcher child failed")
+        self.assertEqual(len(self.launcher.launch_calls), 1)  # not relaunched
+
+        # A third poll on the still-present, still-READY plan must not
+        # relaunch it either, and must not repeat the failure notification.
+        supervisor.poll_once()
+        self.assertEqual(len(self.launcher.launch_calls), 1)
+        self.assertEqual(len(self.notifications), 1)
 
     def test_shutdown_releases_every_live_child(self):
         root_a = self._make_ready_slot("a", "feature-a", allowed_writes=["a.py", CLAUDE_OUTBOX_REL])
@@ -946,10 +986,18 @@ class SingletonLockTests(unittest.TestCase):
 
 class MainArgumentValidationTests(unittest.TestCase):
     def test_once_without_dry_run_exits_2_before_touching_filesystem(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit) as caught:
-                pd_mod.main(["--once"])
+        # pathlib.Path instances are slotted, so Path.mkdir is patched at the
+        # class level (scoped to this `with` block) rather than on the real
+        # module-level LOG_DIR instance -- either way, no real directory is
+        # ever created, and the mock proves main() never even attempts it.
+        with patch("pathlib.Path.mkdir") as mock_mkdir:
+            with patch.object(pd_mod, "acquire_singleton_lock") as mock_acquire:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as caught:
+                        pd_mod.main(["--once"])
         self.assertEqual(caught.exception.code, 2)
+        mock_mkdir.assert_not_called()
+        mock_acquire.assert_not_called()
 
 
 # --------------------------------------------------------------------------
@@ -1039,6 +1087,41 @@ class CapabilityLockTests(unittest.TestCase):
                             else str(current_func)
                         )
                         offenders.append(label)
+                self.generic_visit(node)
+
+        Visitor().visit(tree)
+        self.assertEqual(offenders, [])
+
+    def test_git_command_construction_confined_to_git_worktree_inspector(self):
+        """The subprocess-invocation test above already proves git command
+        *execution* (the actual subprocess.run call) happens only inside
+        GitWorktreeInspector._run_git. This test proves git command
+        *construction* -- every occurrence of the literal git-binary string
+        "git" that seeds an argv tuple -- appears only inside the
+        GitWorktreeInspector class as a whole (its three thin wrapper
+        methods, common_git_dir/registered_worktree_roots/current_branch,
+        each build one argv tuple and delegate to _run_git). Together the
+        two tests prove no fourth site, anywhere in the module, can ever
+        construct or execute a git command.
+        """
+
+        tree = ast.parse(self._source())
+        offenders: list[str] = []
+
+        class Visitor(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.class_stack: list[str] = []
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                self.class_stack.append(node.name)
+                self.generic_visit(node)
+                self.class_stack.pop()
+
+            def visit_Constant(self, node: ast.Constant) -> None:
+                if node.value == "git":
+                    current_class = self.class_stack[-1] if self.class_stack else None
+                    if current_class != "GitWorktreeInspector":
+                        offenders.append(str(current_class))
                 self.generic_visit(node)
 
         Visitor().visit(tree)
