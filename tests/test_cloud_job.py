@@ -321,6 +321,71 @@ class DeployScriptTests(unittest.TestCase):
         ephemeral_comment_index = self.text.index("ephemeral")
         self.assertLess(ephemeral_comment_index, artifact_roots_index)
 
+    def test_state_publication_bucket_env_mapped_from_exact_bucket_name_before_job_blocks(
+        self,
+    ) -> None:
+        self.assertIn(
+            'PINNED_JOB_STATE_PUBLICATION_BUCKET_ENV='
+            '"INDIA_SWING_STATE_PUBLICATION_BUCKET=${BUCKET_NAME}"',
+            self.text,
+        )
+        self.assertEqual(self.text.count("INDIA_SWING_STATE_PUBLICATION_BUCKET"), 1)
+
+        mapping_index = self.text.index("PINNED_JOB_STATE_PUBLICATION_BUCKET_ENV=")
+        job_update_index = self.text.index('gcloud run jobs update "${JOB_NAME}"')
+        job_create_index = self.text.index('gcloud run jobs create "${JOB_NAME}"')
+        self.assertLess(mapping_index, job_update_index)
+        self.assertLess(mapping_index, job_create_index)
+
+    def test_job_blocks_include_state_publication_bucket_in_set_env_vars(self) -> None:
+        for block in self._job_blocks():
+            self.assertIn(
+                'BUCKET_NAME=${BUCKET_NAME},FIRESTORE_DATABASE=${FIRESTORE_DATABASE},'
+                '${PINNED_JOB_ARTIFACT_ROOTS},${PINNED_JOB_STATE_PUBLICATION_BUCKET_ENV}',
+                block,
+            )
+
+    def test_state_publication_bucket_never_in_set_secrets_or_args(self) -> None:
+        for block in self._job_blocks():
+            args_index = block.index("--args=")
+            args_line_end = block.index("\n", args_index)
+            args_line = block[args_index:args_line_end]
+            self.assertNotIn("STATE_PUBLICATION_BUCKET", args_line)
+            self.assertNotIn("PINNED_JOB_STATE_PUBLICATION_BUCKET_ENV", args_line)
+
+            secrets_index = block.index("--set-secrets=")
+            secrets_line_end = block.find("\n", secrets_index)
+            if secrets_line_end == -1:
+                secrets_line_end = len(block)
+            secrets_line = block[secrets_index:secrets_line_end]
+            self.assertNotIn("STATE_PUBLICATION_BUCKET", secrets_line)
+            self.assertNotIn("PINNED_JOB_STATE_PUBLICATION_BUCKET_ENV", secrets_line)
+            self.assertNotIn("latest", secrets_line)
+
+    def test_eod_swing_runtime_objectuser_grant_is_bucket_scoped_before_job_blocks(
+        self,
+    ) -> None:
+        grant_marker = "# B. EOD Swing Runtime Permissions"
+        grant_index = self.text.index(grant_marker)
+        grant_block_end = self.text.index("\n\n", grant_index)
+        grant_block = self.text[grant_index:grant_block_end]
+        self.assertIn(
+            'gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}"',
+            grant_block,
+        )
+        self.assertIn(
+            '--member="serviceAccount:${JOB_RUNTIME_SERVICE_ACCOUNT}'
+            '@${PROJECT_ID}.iam.gserviceaccount.com"',
+            grant_block,
+        )
+        self.assertIn('--role="roles/storage.objectUser"', grant_block)
+        self.assertNotIn("roles/storage.admin", grant_block)
+
+        job_update_index = self.text.index('gcloud run jobs update "${JOB_NAME}"')
+        job_create_index = self.text.index('gcloud run jobs create "${JOB_NAME}"')
+        self.assertLess(grant_index, job_update_index)
+        self.assertLess(grant_index, job_create_index)
+
     def test_final_messages_do_not_unconditionally_claim_schedulers_active(self) -> None:
         success_index = self.text.rindex("SUCCESS:")
         tail = self.text[success_index:]

@@ -393,6 +393,12 @@ echo "Deploying Cloud Run Job: ${JOB_NAME}..."
 # (lost when the task ends) and suitable only for a bounded manual
 # validation run until real cloud artifact-store persistence exists.
 PINNED_JOB_ARTIFACT_ROOTS="INDIA_SWING_CALENDAR_DATA_ROOT=/tmp/india-swing/calendar_data,INDIA_SWING_IDENTITY_REGISTRY_ROOT=/tmp/india-swing/identity_registry,INDIA_SWING_HISTORICAL_PRICES_ROOT=/tmp/india-swing/historical_prices,INDIA_SWING_DAILY_REPORTS_ROOT=/tmp/india-swing/daily_reports,INDIA_SWING_REFERENCE_DATA_ROOT=/tmp/india-swing/reference_data,INDIA_SWING_DAILY_PIPELINE_ROOT=/tmp/india-swing/daily_pipeline"
+# The run-pinned-gcs CLI publishes its durable, cross-verified state
+# inventory/manifest objects only to this one already-provisioned regional
+# bucket -- the same bucket the runtime service account already holds
+# roles/storage.objectUser on above. No second bucket, override, or
+# "latest" selection exists anywhere in this script.
+PINNED_JOB_STATE_PUBLICATION_BUCKET_ENV="INDIA_SWING_STATE_PUBLICATION_BUCKET=${BUCKET_NAME}"
 if gcloud run jobs describe "${JOB_NAME}" --region="${REGION}" &>/dev/null; then
   echo "Job exists, updating..."
   gcloud run jobs update "${JOB_NAME}" \
@@ -406,7 +412,7 @@ if gcloud run jobs describe "${JOB_NAME}" --region="${REGION}" &>/dev/null; then
     --memory=4Gi \
     --task-timeout=5400s \
     --service-account="${JOB_RUNTIME_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
-    --set-env-vars="BUCKET_NAME=${BUCKET_NAME},FIRESTORE_DATABASE=${FIRESTORE_DATABASE},${PINNED_JOB_ARTIFACT_ROOTS}" \
+    --set-env-vars="BUCKET_NAME=${BUCKET_NAME},FIRESTORE_DATABASE=${FIRESTORE_DATABASE},${PINNED_JOB_ARTIFACT_ROOTS},${PINNED_JOB_STATE_PUBLICATION_BUCKET_ENV}" \
     --set-secrets="${PINNED_RUN_SPEC_MOUNT_PATH}=${PINNED_RUN_SPEC_SECRET_NAME}:${PINNED_GCS_RUN_SPEC_SECRET_VERSION}"
 else
   echo "Creating new Job..."
@@ -421,7 +427,7 @@ else
     --memory=4Gi \
     --task-timeout=5400s \
     --service-account="${JOB_RUNTIME_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
-    --set-env-vars="BUCKET_NAME=${BUCKET_NAME},FIRESTORE_DATABASE=${FIRESTORE_DATABASE},${PINNED_JOB_ARTIFACT_ROOTS}" \
+    --set-env-vars="BUCKET_NAME=${BUCKET_NAME},FIRESTORE_DATABASE=${FIRESTORE_DATABASE},${PINNED_JOB_ARTIFACT_ROOTS},${PINNED_JOB_STATE_PUBLICATION_BUCKET_ENV}" \
     --set-secrets="${PINNED_RUN_SPEC_MOUNT_PATH}=${PINNED_RUN_SPEC_SECRET_NAME}:${PINNED_GCS_RUN_SPEC_SECRET_VERSION}"
 fi
 
