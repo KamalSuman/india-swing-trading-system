@@ -15,12 +15,17 @@ from india_swing.calendar_data.materialization import (
     CollectionCalendarMaterialization,
     materialize_collection_calendar,
 )
+from india_swing.calendar_data.materialization_codec import encode_calendar_materialization
 from india_swing.calendar_data.materialization_store import (
     CALENDAR_MATERIALIZATION_STORE_DATASET,
     LocalCalendarMaterializationStore,
     StoredCalendarMaterialization,
 )
 from india_swing.calendar_data.models import CALENDAR_DECLARATION_SCHEMA_VERSION
+from india_swing.daily_pipeline.acquisition import GCSObjectPayload
+from india_swing.daily_pipeline.calendar_materialization_acquisition import (
+    CalendarMaterializationObjectRequest,
+)
 from india_swing.daily_pipeline.pinned_gcs_run_file_boundary import (
     PinnedGCSRunFileBoundaryError,
     load_pinned_gcs_run_spec_file,
@@ -30,6 +35,7 @@ from india_swing.daily_pipeline.pinned_gcs_run_service import PinnedGCSRunServic
 from india_swing.daily_pipeline.pinned_gcs_run_spec import (
     MAXIMUM_PINNED_GCS_RUN_SPEC_BYTES,
     PINNED_GCS_RUN_SPEC_SCHEMA_VERSION,
+    PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR,
     PinnedGCSRunSpec,
 )
 
@@ -44,10 +50,18 @@ _PREVIOUS_RUN_ID = "c" * 64
 _NOT_BEFORE = "2026-07-20T00:00:00Z"
 _BINDING_CUTOFF = "2026-07-20T14:00:00Z"
 _RUN_CUTOFF = "2026-07-20T15:00:00Z"
+_CALENDAR_ACQUISITION_BUCKET = "trusted-calendar-materialization-bucket"
+_CALENDAR_ACQUISITION_GENERATION = 999
+_ERR_LOAD = "pinned gcs run spec file could not be loaded"
+_ERR_SCHEMA = "pinned gcs run file boundary schema routing failed"
+_ERR_CALENDAR = "pinned gcs run file boundary calendar acquisition failed"
 
 _BOUNDARY_TARGET = (
     "india_swing.daily_pipeline.pinned_gcs_run_file_boundary."
     "run_daily_pipeline_from_pinned_gcs_run_spec"
+)
+_LOAD_TARGET = (
+    "india_swing.daily_pipeline.pinned_gcs_run_file_boundary.load_pinned_gcs_run_spec_file"
 )
 
 
@@ -87,6 +101,79 @@ def _valid_spec_dict(
 
 def _spec_bytes(**kwargs: object) -> bytes:
     return json.dumps(_valid_spec_dict(**kwargs), separators=(",", ":")).encode("utf-8")
+
+
+def _calendar_object_name(materialization_id: str) -> str:
+    return f"calendar-materializations/{materialization_id}/materialization.json"
+
+
+def _calendar_request_dict(
+    materialization: CollectionCalendarMaterialization, payload: bytes
+) -> dict[str, object]:
+    return {
+        "bucket": _CALENDAR_ACQUISITION_BUCKET,
+        "object_name": _calendar_object_name(materialization.materialization_id),
+        "generation": _CALENDAR_ACQUISITION_GENERATION,
+        "expected_sha256": hashlib.sha256(payload).hexdigest(),
+        "materialization_id": materialization.materialization_id,
+    }
+
+
+def _valid_spec_dict_v2(
+    *,
+    calendar_request: dict[str, object],
+    session: date = _SESSION,
+    previous_run_id: object = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR,
+        "manifest_request": {
+            "bucket": _BUCKET,
+            "object_name": _manifest_object_name(session),
+            "generation": 777,
+            "target_session": session.isoformat(),
+        },
+        "trusted_binding": {
+            "expected_manifest_sha256": _SHA256_HEX,
+            "allowed_bucket": _BUCKET,
+            "target_session": session.isoformat(),
+            "not_before": _NOT_BEFORE,
+            "cutoff": _BINDING_CUTOFF,
+        },
+        "calendar_request": calendar_request,
+        "run": {
+            "market_session": session.isoformat(),
+            "cutoff": _RUN_CUTOFF,
+            "calendar_materialization_id": calendar_request["materialization_id"],
+            "previous_run_id": previous_run_id,
+        },
+    }
+
+
+def _spec_bytes_v2(**kwargs: object) -> bytes:
+    return json.dumps(_valid_spec_dict_v2(**kwargs), separators=(",", ":")).encode("utf-8")
+
+
+class FakeGCSObjectReader:
+    """Fake GCSObjectReader. Never contacts GCP; records every call made."""
+
+    def __init__(self, *, generation: object, content_bytes: object) -> None:
+        self.generation = generation
+        self.content_bytes = content_bytes
+        self.calls: list[dict[str, object]] = []
+
+    def read_generation(
+        self, *, bucket: str, object_name: str, generation: int, maximum_bytes: int
+    ) -> GCSObjectPayload:
+        self.calls.append(
+            {
+                "bucket": bucket,
+                "object_name": object_name,
+                "generation": generation,
+                "maximum_bytes": maximum_bytes,
+            }
+        )
+        return GCSObjectPayload(content_bytes=self.content_bytes, generation=self.generation)
 
 
 def _import_base_source(calendar_root: Path, inputs_root: Path, *, document_id: str = "CMTR-BASE-2026"):
@@ -158,6 +245,24 @@ def _build_materialization(store_root: Path, inputs_root: Path) -> CollectionCal
         cutoff=_CALENDAR_CUTOFF,
         observed_date_artifacts=(),
     )
+
+
+def _build_v2_fixture(
+    root: Path, *, document_id: str = "CMTR-V2-BASE"
+) -> tuple[CollectionCalendarMaterialization, bytes, dict[str, object], FakeGCSObjectReader]:
+    """Real, canonically-encoded materialization plus a matching
+    generation-pinned calendar_request dict and an injected fake reader
+    ready to serve it. Schema v2 never uses a LocalCalendarMaterializationStore,
+    so this builds the materialization directly rather than via
+    _put_stored_materialization."""
+
+    materialization = _build_materialization(root / document_id, root / "inputs" / document_id)
+    payload = encode_calendar_materialization(materialization)
+    calendar_request = _calendar_request_dict(materialization, payload)
+    fake_reader = FakeGCSObjectReader(
+        generation=_CALENDAR_ACQUISITION_GENERATION, content_bytes=payload
+    )
+    return materialization, payload, calendar_request, fake_reader
 
 
 def _put_stored_materialization(root: Path) -> tuple[LocalCalendarMaterializationStore, StoredCalendarMaterialization]:
@@ -245,6 +350,20 @@ class LoadAcceptanceTests(PinnedGCSRunFileBoundaryTestCase):
 
         self.assertIsInstance(spec, PinnedGCSRunSpec)
 
+    def test_loads_valid_schema_v2_spec_file_with_exact_calendar_request(self) -> None:
+        materialization, _payload, calendar_request, _fake_reader = _build_v2_fixture(self.root)
+        path = self.root / "spec-v2.json"
+        path.write_bytes(_spec_bytes_v2(calendar_request=calendar_request))
+
+        spec = load_pinned_gcs_run_spec_file(str(path))
+
+        self.assertIsInstance(spec, PinnedGCSRunSpec)
+        self.assertEqual(spec.schema_version, PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR)
+        self.assertIsInstance(spec.calendar_request, CalendarMaterializationObjectRequest)
+        self.assertEqual(spec.calendar_request.materialization_id, materialization.materialization_id)
+        self.assertEqual(spec.calendar_request.bucket, _CALENDAR_ACQUISITION_BUCKET)
+        self.assertEqual(spec.calendar_materialization_id, materialization.materialization_id)
+
 
 class LoadRejectionTests(PinnedGCSRunFileBoundaryTestCase):
     def test_rejects_non_str_path_object(self) -> None:
@@ -314,9 +433,12 @@ class LoadRejectionTests(PinnedGCSRunFileBoundaryTestCase):
     def test_secret_bearing_filesystem_failure_never_leaks(self) -> None:
         secret = "SECRET-FILE-BOUNDARY-OSERROR-DO-NOT-LEAK-91ad"
 
+        class _DistinctiveFilesystemFailure(OSError):
+            pass
+
         class _RaisingPath(type(Path())):
             def lstat(self, *args: object, **kwargs: object) -> object:
-                raise OSError(secret)
+                raise _DistinctiveFilesystemFailure(secret)
 
         with self.assertRaises(PinnedGCSRunFileBoundaryError) as ctx:
             with patch(
@@ -326,8 +448,32 @@ class LoadRejectionTests(PinnedGCSRunFileBoundaryTestCase):
                 load_pinned_gcs_run_spec_file(str(self.root / "irrelevant.json"))
 
         message = str(ctx.exception)
+        self.assertEqual(message, _ERR_LOAD)
         self.assertNotIn(secret, message)
+        self.assertNotIn("_DistinctiveFilesystemFailure", message)
         self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+
+    def test_injected_same_class_error_from_filesystem_is_not_bare_reraised(self) -> None:
+        secret = "SECRET-INJECTED-FILE-BOUNDARY-ERROR-DO-NOT-LEAK-6a2f"
+        injected = PinnedGCSRunFileBoundaryError(secret)
+
+        class _RaisingPath(type(Path())):
+            def lstat(self, *args: object, **kwargs: object) -> object:
+                raise injected
+
+        with self.assertRaises(PinnedGCSRunFileBoundaryError) as ctx:
+            with patch(
+                "india_swing.daily_pipeline.pinned_gcs_run_file_boundary.Path",
+                _RaisingPath,
+            ):
+                load_pinned_gcs_run_spec_file(str(self.root / "irrelevant.json"))
+
+        self.assertIsNot(ctx.exception, injected)
+        self.assertEqual(str(ctx.exception), _ERR_LOAD)
+        self.assertNotIn(secret, str(ctx.exception))
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
 
 
 class DelegationTests(PinnedGCSRunFileBoundaryTestCase):
@@ -446,13 +592,406 @@ class DelegationTests(PinnedGCSRunFileBoundaryTestCase):
         path = self._write_spec()
         deps = self._dependencies()
 
-        with patch.object(self.calendar_store, "get", side_effect=RuntimeError(secret)):
+        class _DistinctiveGetFailure(RuntimeError):
+            pass
+
+        with patch.object(self.calendar_store, "get", side_effect=_DistinctiveGetFailure(secret)):
             with self.assertRaises(PinnedGCSRunFileBoundaryError) as ctx:
                 run_daily_pipeline_from_pinned_gcs_run_spec_file(str(path), **deps)
 
         message = str(ctx.exception)
+        self.assertEqual(message, _ERR_CALENDAR)
         self.assertNotIn(secret, message)
+        self.assertNotIn("_DistinctiveGetFailure", message)
         self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+
+    def test_injected_same_class_error_from_calendar_store_get_is_not_bare_reraised(self) -> None:
+        secret = "SECRET-INJECTED-CALENDAR-GET-ERROR-DO-NOT-LEAK-7d3e"
+        injected = PinnedGCSRunFileBoundaryError(secret)
+        path = self._write_spec()
+        deps = self._dependencies()
+
+        with patch.object(self.calendar_store, "get", side_effect=injected):
+            with self.assertRaises(PinnedGCSRunFileBoundaryError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec_file(str(path), **deps)
+
+        self.assertIsNot(ctx.exception, injected)
+        self.assertEqual(str(ctx.exception), _ERR_CALENDAR)
+        self.assertNotIn(secret, str(ctx.exception))
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+
+    def test_v1_calendar_store_failure_calls_get_once_and_never_delegates(self) -> None:
+        path = self._write_spec()
+        spy = _JobSpy(result=object())
+        calls: list[str] = []
+
+        def _failing_get(artifact_id: str) -> object:
+            calls.append(artifact_id)
+            raise RuntimeError("boom")
+
+        with patch.object(self.calendar_store, "get", side_effect=_failing_get):
+            with patch(_BOUNDARY_TARGET, spy):
+                with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                    run_daily_pipeline_from_pinned_gcs_run_spec_file(
+                        str(path), **self._dependencies()
+                    )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(spy.calls, [])
+
+    def test_v1_with_none_calendar_store_is_rejected_before_get_call(self) -> None:
+        path = self._write_spec()
+        deps = self._dependencies()
+        deps["calendar_store"] = None
+        spy = _JobSpy(result=object())
+
+        with patch(_BOUNDARY_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                run_daily_pipeline_from_pinned_gcs_run_spec_file(str(path), **deps)
+
+        self.assertEqual(spy.calls, [])
+
+    def test_wrong_loaded_spec_type_is_rejected_before_get_or_service(self) -> None:
+        path = self._write_spec()
+        spy = _JobSpy(result=object())
+
+        with patch(_LOAD_TARGET, return_value="not-a-spec"):
+            with patch.object(self.calendar_store, "get") as get_spy:
+                with patch(_BOUNDARY_TARGET, spy):
+                    with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                        run_daily_pipeline_from_pinned_gcs_run_spec_file(
+                            str(path), **self._dependencies()
+                        )
+
+        get_spy.assert_not_called()
+        self.assertEqual(spy.calls, [])
+
+    def test_loaded_spec_subclass_is_rejected_before_get_or_service(self) -> None:
+        path = self._write_spec()
+        real_spec = load_pinned_gcs_run_spec_file(str(path))
+
+        class _SpecSubclass(PinnedGCSRunSpec):
+            pass
+
+        subclass_instance = _SpecSubclass(
+            schema_version=real_spec.schema_version,
+            manifest_request=real_spec.manifest_request,
+            trusted_binding=real_spec.trusted_binding,
+            market_session=real_spec.market_session,
+            cutoff=real_spec.cutoff,
+            calendar_materialization_id=real_spec.calendar_materialization_id,
+            previous_run_id=real_spec.previous_run_id,
+        )
+        spy = _JobSpy(result=object())
+
+        with patch(_LOAD_TARGET, return_value=subclass_instance):
+            with patch.object(self.calendar_store, "get") as get_spy:
+                with patch(_BOUNDARY_TARGET, spy):
+                    with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                        run_daily_pipeline_from_pinned_gcs_run_spec_file(
+                            str(path), **self._dependencies()
+                        )
+
+        get_spy.assert_not_called()
+        self.assertEqual(spy.calls, [])
+
+    def test_shaped_loaded_spec_proxy_is_rejected_before_get_or_service(self) -> None:
+        path = self._write_spec()
+        real_spec = load_pinned_gcs_run_spec_file(str(path))
+
+        class _ShapedSpecProxy:
+            def __init__(self) -> None:
+                for name in (
+                    "schema_version",
+                    "manifest_request",
+                    "trusted_binding",
+                    "market_session",
+                    "cutoff",
+                    "calendar_materialization_id",
+                    "previous_run_id",
+                    "calendar_request",
+                ):
+                    setattr(self, name, getattr(real_spec, name))
+
+            def __eq__(self, other: object) -> bool:
+                return True
+
+            def __hash__(self) -> int:
+                return 0
+
+        spy = _JobSpy(result=object())
+
+        with patch(_LOAD_TARGET, return_value=_ShapedSpecProxy()):
+            with patch.object(self.calendar_store, "get") as get_spy:
+                with patch(_BOUNDARY_TARGET, spy):
+                    with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                        run_daily_pipeline_from_pinned_gcs_run_spec_file(
+                            str(path), **self._dependencies()
+                        )
+
+        get_spy.assert_not_called()
+        self.assertEqual(spy.calls, [])
+
+    def test_unsupported_schema_version_is_rejected_before_get_or_service(self) -> None:
+        path = self._write_spec()
+        real_spec = load_pinned_gcs_run_spec_file(str(path))
+        object.__setattr__(real_spec, "schema_version", 3)
+        spy = _JobSpy(result=object())
+
+        with patch(_LOAD_TARGET, return_value=real_spec):
+            with patch.object(self.calendar_store, "get") as get_spy:
+                with patch(_BOUNDARY_TARGET, spy):
+                    with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                        run_daily_pipeline_from_pinned_gcs_run_spec_file(
+                            str(path), **self._dependencies()
+                        )
+
+        get_spy.assert_not_called()
+        self.assertEqual(spy.calls, [])
+
+    def _assert_mutation_rejected_before_get_or_service(
+        self, mutate: object, path: object | None = None
+    ) -> None:
+        # Shared helper for every "mutate the loaded spec, then prove the
+        # reconstruction step (not ordinary equality) rejects it before
+        # any get/service call" regression below.
+        if path is None:
+            path = self._write_spec()
+        real_spec = load_pinned_gcs_run_spec_file(str(path))
+        mutate(real_spec)
+        spy = _JobSpy(result=object())
+
+        with patch(_LOAD_TARGET, return_value=real_spec):
+            with patch.object(self.calendar_store, "get") as get_spy:
+                with patch(_BOUNDARY_TARGET, spy):
+                    with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                        run_daily_pipeline_from_pinned_gcs_run_spec_file(
+                            str(path), **self._dependencies()
+                        )
+
+        get_spy.assert_not_called()
+        self.assertEqual(spy.calls, [])
+
+    def test_schema_version_mutated_to_bool_true_is_rejected(self) -> None:
+        # Regression for Codex's exact repro: True == 1 == PINNED_GCS_RUN_
+        # SPEC_SCHEMA_VERSION under ordinary equality, so without the
+        # reconstruction fix this would have incorrectly routed as v1 and
+        # reached calendar_store.get.
+        self._assert_mutation_rejected_before_get_or_service(
+            lambda spec: object.__setattr__(spec, "schema_version", True)
+        )
+
+    def test_schema_version_mutated_to_bool_false_is_rejected(self) -> None:
+        self._assert_mutation_rejected_before_get_or_service(
+            lambda spec: object.__setattr__(spec, "schema_version", False)
+        )
+
+    def test_schema_version_mutated_to_int_subclass_is_rejected(self) -> None:
+        class _IntSubclass(int):
+            pass
+
+        self._assert_mutation_rejected_before_get_or_service(
+            lambda spec: object.__setattr__(
+                spec, "schema_version", _IntSubclass(PINNED_GCS_RUN_SPEC_SCHEMA_VERSION)
+            )
+        )
+
+    def test_schema_version_mutated_to_equality_poisoned_object_is_rejected(self) -> None:
+        class _PoisonedEquality:
+            def __eq__(self, other: object) -> bool:
+                return True
+
+            def __hash__(self) -> int:
+                return 0
+
+        self._assert_mutation_rejected_before_get_or_service(
+            lambda spec: object.__setattr__(spec, "schema_version", _PoisonedEquality())
+        )
+
+    def test_mutated_calendar_materialization_id_is_rejected_before_get(self) -> None:
+        self._assert_mutation_rejected_before_get_or_service(
+            lambda spec: object.__setattr__(spec, "calendar_materialization_id", "not-hex")
+        )
+
+    def test_mutated_manifest_request_field_is_rejected_before_get(self) -> None:
+        self._assert_mutation_rejected_before_get_or_service(
+            lambda spec: object.__setattr__(spec.manifest_request, "generation", -1)
+        )
+
+    def test_mutated_trusted_binding_field_is_rejected_before_get(self) -> None:
+        self._assert_mutation_rejected_before_get_or_service(
+            lambda spec: object.__setattr__(spec.trusted_binding, "allowed_bucket", "")
+        )
+
+    def test_mutated_run_cutoff_is_rejected_before_get(self) -> None:
+        self._assert_mutation_rejected_before_get_or_service(
+            lambda spec: object.__setattr__(spec, "cutoff", datetime(2020, 1, 1))
+        )
+
+    def test_mutated_market_session_is_rejected_before_get(self) -> None:
+        self._assert_mutation_rejected_before_get_or_service(
+            lambda spec: object.__setattr__(spec, "market_session", "not-a-date")
+        )
+
+    def test_mutated_previous_run_id_is_rejected_before_get(self) -> None:
+        self._assert_mutation_rejected_before_get_or_service(
+            lambda spec: object.__setattr__(spec, "previous_run_id", "not-hex")
+        )
+
+    def test_mutated_v2_calendar_request_is_rejected_before_service(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        path = self.root / "spec-v2-mutated-request.json"
+        path.write_bytes(_spec_bytes_v2(calendar_request=calendar_request))
+        real_spec = load_pinned_gcs_run_spec_file(str(path))
+        object.__setattr__(real_spec.calendar_request, "materialization_id", "f" * 64)
+        spy = _JobSpy(result=object())
+        deps = self._dependencies()
+        deps["calendar_store"] = None
+        deps["reader"] = fake_reader
+
+        with patch(_LOAD_TARGET, return_value=real_spec):
+            with patch(_BOUNDARY_TARGET, spy):
+                with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                    run_daily_pipeline_from_pinned_gcs_run_spec_file(str(path), **deps)
+
+        self.assertEqual(spy.calls, [])
+        self.assertEqual(fake_reader.calls, [])
+
+    def test_snapshot_isolation_from_mutated_loaded_spec(self) -> None:
+        # A hostile/buggy calendar_store.get() that mutates the ORIGINAL
+        # loaded spec object as a side effect must not affect the spec the
+        # delegated service receives -- it is built from an independently
+        # reconstructed pre-mutation snapshot, not the caller's object.
+        path = self._write_spec()
+        loaded_spec = load_pinned_gcs_run_spec_file(str(path))
+        original_id = loaded_spec.calendar_materialization_id
+        original_bucket = loaded_spec.manifest_request.bucket
+        spy = _JobSpy(result=object())
+
+        def _mutating_get(artifact_id: str) -> StoredCalendarMaterialization:
+            object.__setattr__(loaded_spec, "calendar_materialization_id", "f" * 64)
+            object.__setattr__(loaded_spec.manifest_request, "bucket", "mutated-bucket")
+            return self.stored
+
+        with patch(_LOAD_TARGET, return_value=loaded_spec):
+            with patch.object(self.calendar_store, "get", side_effect=_mutating_get) as get_spy:
+                with patch(_BOUNDARY_TARGET, spy):
+                    run_daily_pipeline_from_pinned_gcs_run_spec_file(
+                        str(path), **self._dependencies()
+                    )
+
+        get_spy.assert_called_once_with(original_id)
+        self.assertEqual(len(spy.calls), 1)
+        spec_arg = spy.calls[0]["args"][0]
+        self.assertIsNot(spec_arg, loaded_spec)
+        self.assertEqual(spec_arg.calendar_materialization_id, original_id)
+        self.assertEqual(spec_arg.manifest_request.bucket, original_bucket)
+
+    def test_v2_with_none_calendar_store_delegates_with_none_and_no_get_call(self) -> None:
+        materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        path = self.root / "spec-v2-none-store.json"
+        path.write_bytes(_spec_bytes_v2(calendar_request=calendar_request))
+        sentinel = object()
+        spy = _JobSpy(result=sentinel)
+        deps = self._dependencies()
+        deps["calendar_store"] = None
+        deps["reader"] = fake_reader
+
+        with patch(_BOUNDARY_TARGET, spy):
+            result = run_daily_pipeline_from_pinned_gcs_run_spec_file(str(path), **deps)
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(len(spy.calls), 1)
+        call = spy.calls[0]
+        args = call["args"]
+        self.assertEqual(len(args), 2)
+        spec_arg, calendar_arg = args
+        self.assertIsNone(calendar_arg)
+        self.assertEqual(spec_arg.calendar_materialization_id, materialization.materialization_id)
+        self.assertIs(call["kwargs"]["reader"], fake_reader)
+
+    def test_v2_with_exact_local_store_never_calls_get_and_delegates_with_none(self) -> None:
+        materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        path = self.root / "spec-v2-unused-store.json"
+        path.write_bytes(_spec_bytes_v2(calendar_request=calendar_request))
+        sentinel = object()
+        spy = _JobSpy(result=sentinel)
+        deps = self._dependencies()
+        deps["reader"] = fake_reader
+        distinctive_error = AssertionError("v2 must never call calendar_store.get")
+
+        with patch.object(self.calendar_store, "get", side_effect=distinctive_error):
+            with patch(_BOUNDARY_TARGET, spy):
+                result = run_daily_pipeline_from_pinned_gcs_run_spec_file(str(path), **deps)
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(len(spy.calls), 1)
+        calendar_arg = spy.calls[0]["args"][1]
+        self.assertIsNone(calendar_arg)
+        self.assertEqual(materialization.materialization_id, calendar_request["materialization_id"])
+
+    def test_v2_with_wrong_type_calendar_store_is_rejected_before_service(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        path = self.root / "spec-v2-wrong-store.json"
+        path.write_bytes(_spec_bytes_v2(calendar_request=calendar_request))
+        spy = _JobSpy(result=object())
+        deps = self._dependencies()
+        deps["calendar_store"] = object()
+        deps["reader"] = fake_reader
+
+        with patch(_BOUNDARY_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                run_daily_pipeline_from_pinned_gcs_run_spec_file(str(path), **deps)
+
+        self.assertEqual(spy.calls, [])
+
+    def test_v2_with_calendar_store_subclass_is_rejected_before_service(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        path = self.root / "spec-v2-subclass-store.json"
+        path.write_bytes(_spec_bytes_v2(calendar_request=calendar_request))
+
+        class _StoreSubclass(LocalCalendarMaterializationStore):
+            pass
+
+        subclass_store = _StoreSubclass(
+            root=self.root / "calendar-materializations",
+            daily_reports_root=self.root / "daily-reports",
+        )
+        spy = _JobSpy(result=object())
+        deps = self._dependencies()
+        deps["calendar_store"] = subclass_store
+        deps["reader"] = fake_reader
+
+        with patch(_BOUNDARY_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                run_daily_pipeline_from_pinned_gcs_run_spec_file(str(path), **deps)
+
+        self.assertEqual(spy.calls, [])
+
+    def test_v2_with_shaped_calendar_store_proxy_is_rejected_before_service(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        path = self.root / "spec-v2-shaped-store.json"
+        path.write_bytes(_spec_bytes_v2(calendar_request=calendar_request))
+
+        class _ShapedStoreProxy:
+            def __eq__(self, other: object) -> bool:
+                return True
+
+            def __hash__(self) -> int:
+                return 0
+
+        spy = _JobSpy(result=object())
+        deps = self._dependencies()
+        deps["calendar_store"] = _ShapedStoreProxy()
+        deps["reader"] = fake_reader
+
+        with patch(_BOUNDARY_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunFileBoundaryError):
+                run_daily_pipeline_from_pinned_gcs_run_spec_file(str(path), **deps)
+
+        self.assertEqual(spy.calls, [])
 
     def test_service_error_propagates_unchanged(self) -> None:
         path = self._write_spec()
@@ -478,6 +1017,35 @@ class DelegationTests(PinnedGCSRunFileBoundaryTestCase):
                     str(path), **self._dependencies()
                 )
 
+    def test_v2_service_error_propagates_unchanged(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        path = self.root / "spec-v2-service-error.json"
+        path.write_bytes(_spec_bytes_v2(calendar_request=calendar_request))
+        service_error = PinnedGCSRunServiceError("pinned gcs run service execution failed")
+        spy = _JobSpy(raises=service_error)
+        deps = self._dependencies()
+        deps["calendar_store"] = None
+        deps["reader"] = fake_reader
+
+        with patch(_BOUNDARY_TARGET, spy):
+            with self.assertRaises(PinnedGCSRunServiceError) as ctx:
+                run_daily_pipeline_from_pinned_gcs_run_spec_file(str(path), **deps)
+
+        self.assertIs(ctx.exception, service_error)
+
+    def test_v2_base_exception_from_service_is_not_intercepted(self) -> None:
+        _materialization, _payload, calendar_request, fake_reader = _build_v2_fixture(self.root)
+        path = self.root / "spec-v2-base-exception.json"
+        path.write_bytes(_spec_bytes_v2(calendar_request=calendar_request))
+        spy = _JobSpy(raises=_MarkerBaseException("marker"))
+        deps = self._dependencies()
+        deps["calendar_store"] = None
+        deps["reader"] = fake_reader
+
+        with patch(_BOUNDARY_TARGET, spy):
+            with self.assertRaises(_MarkerBaseException):
+                run_daily_pipeline_from_pinned_gcs_run_spec_file(str(path), **deps)
+
 
 _EXACT_ALLOWED_BOUNDARY_IMPORTS = frozenset((
     # (level, module, imported name, asname). Closed set: any import in
@@ -496,6 +1064,8 @@ _EXACT_ALLOWED_BOUNDARY_IMPORTS = frozenset((
     (1, "models", "DailyPipelineRun", None),
     (1, "pinned_gcs_run_service", "run_daily_pipeline_from_pinned_gcs_run_spec", None),
     (1, "pinned_gcs_run_spec", "MAXIMUM_PINNED_GCS_RUN_SPEC_BYTES", None),
+    (1, "pinned_gcs_run_spec", "PINNED_GCS_RUN_SPEC_SCHEMA_VERSION", None),
+    (1, "pinned_gcs_run_spec", "PINNED_GCS_RUN_SPEC_SCHEMA_VERSION_WITH_CALENDAR", None),
     (1, "pinned_gcs_run_spec", "PinnedGCSRunSpec", None),
     (1, "pinned_gcs_run_spec", "parse_pinned_gcs_run_spec", None),
     (1, "store", "LocalDailyPipelineRunStore", None),
@@ -520,6 +1090,7 @@ _EXACT_ALLOWED_BOUNDARY_CALL_TARGETS = frozenset((
     "read",
     "parse_pinned_gcs_run_spec",
     "load_pinned_gcs_run_spec_file",
+    "PinnedGCSRunSpec",
     "get",
     "run_daily_pipeline_from_pinned_gcs_run_spec",
 ))
