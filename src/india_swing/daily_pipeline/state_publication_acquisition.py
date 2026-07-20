@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import date
 
 from .acquisition import GCSObjectPayload, GCSObjectReader, _MAXIMUM_GENERATION
 from .state_inventory import (
@@ -36,6 +37,26 @@ class StatePublicationAcquisitionError(Exception):
 
 def _validate_sha256(value: object) -> None:
     if type(value) is not str or len(value) != 64 or not _SHA256_CHARS.issuperset(value):
+        raise StatePublicationAcquisitionError(_ERROR_REQUEST)
+
+
+def _validate_publication_object_name(value: str, expected_run_id: str) -> None:
+    parts = value.split("/")
+    if (
+        len(parts) != 6
+        or parts[:3] != ["state", "v1", "publications"]
+        or parts[4] != expected_run_id
+        or not parts[5].endswith(".json")
+    ):
+        raise StatePublicationAcquisitionError(_ERROR_REQUEST)
+    publication_id = parts[5][:-5]
+    _validate_sha256(publication_id)
+    session = parts[3]
+    try:
+        parsed_session = date.fromisoformat(session)
+    except ValueError:
+        raise StatePublicationAcquisitionError(_ERROR_REQUEST) from None
+    if parsed_session.isoformat() != session:
         raise StatePublicationAcquisitionError(_ERROR_REQUEST)
 
 
@@ -79,6 +100,10 @@ class PinnedStatePublicationRequest:
             raise StatePublicationAcquisitionError(_ERROR_REQUEST)
         _validate_sha256(self.expected_sha256)
         _validate_sha256(self.expected_run_id)
+        _validate_publication_object_name(
+            self.publication_object_name,
+            self.expected_run_id,
+        )
 
 
 def _reconstructed_request(value: object) -> PinnedStatePublicationRequest:

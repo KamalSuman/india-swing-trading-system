@@ -228,6 +228,19 @@ class PinnedStatePublicationRequestTests(unittest.TestCase):
         with self.assertRaises(StatePublicationAcquisitionError):
             PinnedStatePublicationRequest(**kwargs)
 
+    def test_rejects_noncanonical_or_wrong_run_object_name(self) -> None:
+        for object_name in (
+            "../escape.json",
+            "state/v1/publications/2026-99-99/" + _RUN_ID + "/" + "b" * 64 + ".json",
+            "state/v1/publications/2026-07-20/" + "f" * 64 + "/" + "b" * 64 + ".json",
+            "state/v1/publications/2026-07-20/" + _RUN_ID + "/not-a-hash.json",
+        ):
+            kwargs = self._valid_kwargs()
+            kwargs["publication_object_name"] = object_name
+            with self.subTest(object_name=object_name):
+                with self.assertRaises(StatePublicationAcquisitionError):
+                    PinnedStatePublicationRequest(**kwargs)
+
     def test_rejects_non_positive_generation(self) -> None:
         for bad_generation in (0, -1, -100):
             kwargs = self._valid_kwargs()
@@ -558,12 +571,16 @@ class PublicationStageFailureTests(unittest.TestCase):
 
     def test_expected_run_mismatch_rejected(self) -> None:
         request, manifest_bytes, _ = _build_fixture()
+        mismatched_run_id = "b" * 64
         mismatched_request = PinnedStatePublicationRequest(
             bucket=request.bucket,
-            publication_object_name=request.publication_object_name,
+            publication_object_name=request.publication_object_name.replace(
+                f"/{request.expected_run_id}/",
+                f"/{mismatched_run_id}/",
+            ),
             generation=request.generation,
             expected_sha256=request.expected_sha256,
-            expected_run_id="b" * 64,
+            expected_run_id=mismatched_run_id,
         )
         reader = _ScriptedReader(
             [GCSObjectPayload(content_bytes=manifest_bytes, generation=_PUBLICATION_GENERATION)]
@@ -1022,6 +1039,7 @@ class CapabilityLockTests(unittest.TestCase):
             (0, "__future__", "annotations", None),
             (0, "hashlib", None, None),
             (0, "dataclasses", "dataclass", None),
+            (0, "datetime", "date", None),
             (1, "acquisition", "GCSObjectPayload", None),
             (1, "acquisition", "GCSObjectReader", None),
             (1, "acquisition", "_MAXIMUM_GENERATION", None),
