@@ -59,7 +59,7 @@ Headless Claude cannot answer permission prompts. The dispatcher exposes only
 native `Edit`/`Write` plus Bash and passes
 `--permission-mode acceptEdits --allowedTools "Bash(rtk:*)"`. Native `Read`,
 `Grep`, and `Glob` are deliberately unavailable, so file reads use `rtk read`
-and searches use targeted `rtk proxy rg`. Native editing stays enabled because
+and searches use targeted `rtk rg`. Native editing stays enabled because
 RTK optimizes shell output, not writes. If a run's log shows a denied tool,
 review the exact task scope before changing these fail-closed flags.
 

@@ -32,7 +32,7 @@ When the assigned task is complete, write the schema-conforming handoff only to
 For every repository file read or search, use an RTK-prefixed Bash command:
 
 - `rtk read <allowed-path>` for file reads;
-- `rtk proxy rg <targeted-pattern> <allowed-paths>` for searches.
+- `rtk rg <targeted-pattern> <allowed-paths>` for compact searches.
 
 Do not use native `Read`, `Grep`, or `Glob`. Headless dispatcher runs do not
 expose those tools. Continue using native `Edit` and `Write` for authorized
