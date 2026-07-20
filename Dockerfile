@@ -75,6 +75,9 @@ USER appuser
 # Expose port 8080 (standard for Cloud Run services)
 EXPOSE 8080
 
-# The default command runs the demo script to verify runtime correctness
-# Cloud Run Services and Cloud Run Jobs will override this command with their respective entrypoints
-CMD ["python", "-m", "india_swing.demo", "--output-dir", "var/audit"]
+# Fail-closed default command: the Cloud Run Job entrypoint requires an
+# explicit --spec-file argument and delegates only to the pinned-GCS daily
+# pipeline CLI; it never falls back to the demo script. deploy.sh's
+# --command/--args override this explicitly for the eod-swing job, but the
+# image's own default must not be able to invoke the demo either.
+CMD ["python", "-m", "india_swing.cloud_job"]

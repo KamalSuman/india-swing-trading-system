@@ -76,6 +76,11 @@ TAG="latest"
 BUCKET_NAME="swing-data-${PROJECT_ID}"
 FIRESTORE_DATABASE="(default)"
 
+# EOD scheduler is opt-in and paused by default: explicit operator action
+# (setting this to exactly "true") is required to activate live automated
+# scheduling of the eod-swing job.
+ENABLE_EOD_SCHEDULER="${ENABLE_EOD_SCHEDULER:-false}"
+
 # Cloud Run Names
 SERVICE_NAME="rss-collector"
 JOB_NAME="eod-swing"
@@ -95,6 +100,7 @@ echo "Storage Bucket:   gs://${BUCKET_NAME}"
 echo "Firestore Db:     ${FIRESTORE_DATABASE}"
 echo "Run Service:      ${SERVICE_NAME}"
 echo "Run Job:          ${JOB_NAME}"
+echo "EOD Scheduler:    ${ENABLE_EOD_SCHEDULER} (opt-in; paused/disabled unless exactly 'true')"
 echo "==========================================================="
 
 # ------------------------------------------------------------------------------
@@ -327,6 +333,8 @@ if gcloud run jobs describe "${JOB_NAME}" --region="${REGION}" &>/dev/null; then
   gcloud run jobs update "${JOB_NAME}" \
     --image="${FULL_IMAGE_URL}" \
     --region="${REGION}" \
+    --command=python \
+    --args=-m,india_swing.cloud_job \
     --tasks=1 \
     --max-retries=1 \
     --cpu=2 \
@@ -340,6 +348,8 @@ else
   gcloud run jobs create "${JOB_NAME}" \
     --image="${FULL_IMAGE_URL}" \
     --region="${REGION}" \
+    --command=python \
+    --args=-m,india_swing.cloud_job \
     --tasks=1 \
     --max-retries=1 \
     --cpu=2 \
@@ -388,33 +398,50 @@ echo "Configuring Cloud Scheduler Jobs..."
 #     --oidc-token-audience="${SERVICE_URL}/"
 # fi
 
-# B. EOD Swing Job Schedule: 20:15 IST, Monday-Friday
+# B. EOD Swing Job Schedule: 20:15 IST, Monday-Friday -- opt-in and paused
+# by default. Only ENABLE_EOD_SCHEDULER=true creates/updates and leaves it
+# active; any other value pauses an existing schedule (or reports it
+# remains disabled if it was never created) instead of running the job
+# unattended.
 # Uses OAuth token to invoke the Cloud Run Job via REST API: /jobs/eod-swing:run
 JOB_RUN_URI="https://${REGION}-run.googleapis.com/v1/projects/${PROJECT_ID}/locations/${REGION}/jobs/${JOB_NAME}:run"
-if gcloud scheduler jobs describe "eod-swing-schedule" --location="${REGION}" &>/dev/null; then
-  echo "Updating existing EOD Swing Scheduler Job..."
-  gcloud scheduler jobs update http eod-swing-schedule \
-    --location="${REGION}" \
-    --schedule="15 20 * * 1-5" \
-    --time-zone="Asia/Kolkata" \
-    --uri="${JOB_RUN_URI}" \
-    --http-method=POST \
-    --oauth-service-account-email="${JOB_SCHEDULER_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
-    --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
+if [ "${ENABLE_EOD_SCHEDULER}" = "true" ]; then
+  if gcloud scheduler jobs describe "eod-swing-schedule" --location="${REGION}" &>/dev/null; then
+    echo "Updating existing EOD Swing Scheduler Job..."
+    gcloud scheduler jobs update http eod-swing-schedule \
+      --location="${REGION}" \
+      --schedule="15 20 * * 1-5" \
+      --time-zone="Asia/Kolkata" \
+      --uri="${JOB_RUN_URI}" \
+      --http-method=POST \
+      --oauth-service-account-email="${JOB_SCHEDULER_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
+      --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
+  else
+    echo "Creating new EOD Swing Scheduler Job..."
+    gcloud scheduler jobs create http eod-swing-schedule \
+      --location="${REGION}" \
+      --schedule="15 20 * * 1-5" \
+      --time-zone="Asia/Kolkata" \
+      --uri="${JOB_RUN_URI}" \
+      --http-method=POST \
+      --oauth-service-account-email="${JOB_SCHEDULER_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
+      --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
+  fi
+  EOD_SCHEDULER_STATE="active"
 else
-  echo "Creating new EOD Swing Scheduler Job..."
-  gcloud scheduler jobs create http eod-swing-schedule \
-    --location="${REGION}" \
-    --schedule="15 20 * * 1-5" \
-    --time-zone="Asia/Kolkata" \
-    --uri="${JOB_RUN_URI}" \
-    --http-method=POST \
-    --oauth-service-account-email="${JOB_SCHEDULER_SERVICE_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" \
-    --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
+  if gcloud scheduler jobs describe "eod-swing-schedule" --location="${REGION}" &>/dev/null; then
+    echo "ENABLE_EOD_SCHEDULER is not 'true'; pausing the existing EOD Swing Scheduler Job..."
+    gcloud scheduler jobs pause "eod-swing-schedule" --location="${REGION}"
+    EOD_SCHEDULER_STATE="paused"
+  else
+    echo "ENABLE_EOD_SCHEDULER is not 'true'; EOD Swing Scheduler Job remains disabled (not created)."
+    EOD_SCHEDULER_STATE="disabled"
+  fi
 fi
 
 echo "=========================================================="
 echo "SUCCESS: GCP Infrastructure provisioning pipeline configured!"
 echo "Check the Secret Manager console to populate your keys."
-echo "Your Scheduler jobs are now active and will run as configured."
+echo "EOD Swing Scheduler: ${EOD_SCHEDULER_STATE} (ENABLE_EOD_SCHEDULER=${ENABLE_EOD_SCHEDULER})"
+echo "RSS Collector Scheduler: disabled (rss-collector service is not yet deployed)."
 echo "=========================================================="
