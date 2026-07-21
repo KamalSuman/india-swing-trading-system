@@ -16,6 +16,7 @@ kite = ["kiteconnect==5.2.0"]
 [project.scripts]
 india-swing-demo = "india_swing.demo:main"
 india-swing-cloud-job = "india_swing.cloud_job:main"
+india-swing-state-restore = "india_swing.state_restore_job:main"
 india-swing-market-data = "india_swing.market_data.cli:main"
 india-swing-reference-data = "india_swing.reference_data.cli:main"
 india-swing-daily-reports = "india_swing.daily_reports.cli:main"

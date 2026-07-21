@@ -37,6 +37,12 @@ from .models import DailyPipelineRun
 from .pinned_gcs_run_file_boundary import (
     run_daily_pipeline_and_publish_state_from_pinned_gcs_run_spec_file,
 )
+from .pinned_gcs_state_restoration_service import (
+    restore_pipeline_state_from_pinned_gcs,
+)
+from .pinned_gcs_state_restore_file_boundary import (
+    load_pinned_gcs_state_restore_spec_file,
+)
 from .runner import run_daily_pipeline
 from .state_inventory import PipelineStateRoots
 from .state_publication import GoogleCloudStorageStateObjectWriter
@@ -87,6 +93,11 @@ def parser() -> argparse.ArgumentParser:
         help="run one pinned-GCS session from an operator-authored spec file",
     )
     run_pinned_gcs.add_argument("--spec-file", required=True)
+    restore_pinned_state = commands.add_parser(
+        "restore-pinned-state",
+        help="restore one exact pinned state publication from a canonical spec file",
+    )
+    restore_pinned_state.add_argument("--spec-file", type=Path, required=True)
     derive = commands.add_parser(
         "derive",
         help="materialize tick, liquidity, and universe evidence for one run",
@@ -178,6 +189,27 @@ def _derive(
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
+        if args.command == "restore-pinned-state":
+            restore_spec = load_pinned_gcs_state_restore_spec_file(args.spec_file)
+            restore_reader = GoogleCloudStorageObjectReader()
+            restored = restore_pipeline_state_from_pinned_gcs(
+                restore_spec.publication_request,
+                reader=restore_reader,
+                destination=restore_spec.destination,
+            )
+            inventory = restored.state.acquired_blobs.control.inventory
+            response = {
+                "status": "COMPLETE",
+                "kind": "PINNED_GCS_STATE_RESTORE",
+                "run_id": restored.restoration.run_id,
+                "inventory_id": restored.restoration.inventory_id,
+                "snapshot_root": str(restored.restoration.snapshot_root),
+                "entry_count": inventory.entry_count,
+                "total_bytes": inventory.total_bytes,
+            }
+            print(json.dumps(response, indent=2, sort_keys=True))
+            return 0
+
         daily_pipeline_config = DailyPipelineConfig.from_env()
         run_store = LocalDailyPipelineRunStore(daily_pipeline_config.data_root)
         if args.command == "run":
