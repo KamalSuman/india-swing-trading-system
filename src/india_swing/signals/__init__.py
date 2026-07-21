@@ -45,6 +45,15 @@ from .proposal_batch import (
     SwingTechnicalProposal,
     assemble_swing_proposal_batch,
 )
+from .quote_gate import (
+    SwingQuoteGateBatch,
+    SwingQuoteGateDisposition,
+    SwingQuoteGateError,
+    SwingQuoteGateOutcome,
+    SwingQuoteGatePolicy,
+    SwingQuoteGateReason,
+    assemble_swing_quote_gate_batch,
+)
 from .ranking import RankedCandidate, RankWeights, WeightedRanker
 
 __all__ = [
@@ -64,6 +73,12 @@ __all__ = [
     "SwingNextEntryWindow",
     "SwingProposalBatch",
     "SwingProposalBatchError",
+    "SwingQuoteGateBatch",
+    "SwingQuoteGateDisposition",
+    "SwingQuoteGateError",
+    "SwingQuoteGateOutcome",
+    "SwingQuoteGatePolicy",
+    "SwingQuoteGateReason",
     "SwingTechnicalMetrics",
     "SwingTechnicalProposal",
     "SwingTradeLevels",
@@ -80,6 +95,7 @@ __all__ = [
     "assemble_alert_swing_inputs",
     "assemble_swing_inputs",
     "assemble_swing_proposal_batch",
+    "assemble_swing_quote_gate_batch",
     "assemble_universe_input_batch",
     "calculate_next_entry_window",
     "calculate_swing_technical_metrics",
