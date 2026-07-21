@@ -23,6 +23,7 @@ from .models import (
     KiteFullQuote,
     KiteInstrument,
     NseSessionFinality,
+    MAXIMUM_QUOTE_KEYS,
     require_canonical_listing_keys,
 )
 
@@ -409,7 +410,10 @@ class KiteMarketDataAdapter:
 
     def fetch_full_quotes(self, listing_keys: tuple[str, ...]) -> FullQuoteBatch:
         try:
-            require_canonical_listing_keys(listing_keys)
+            require_canonical_listing_keys(
+                listing_keys,
+                maximum_keys=MAXIMUM_QUOTE_KEYS,
+            )
         except ValueError as exc:
             raise KiteDataIntegrityError(
                 "quote",

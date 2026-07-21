@@ -23,6 +23,12 @@ The current vertical slice implements:
   every other listing, and never applies a market-cap filter or silently accepts
   a partial scan;
 - deterministic ranking, sizing, delivery/intraday cost, liquidity, and portfolio-risk gates;
+- a complete quote-to-decision package that emits at most one content-addressed
+  BUY/NO_TRADE research decision with full factor, quote, sizing, target/stop,
+  cancellation, and veto rationale, plus a create-once local notification outbox;
+- a paper-only operational runner with deterministic 500-symbol Kite chunking,
+  injected portfolio/clock boundaries, sanitized fail-closed results, one
+  terminal manifest per immutable run spec, and automatic paper registration;
 - `BUY` or `NO_TRADE` output only;
 - typed failed-run output for data/model/research outages, always with `NO_TRADE`;
 - create-once typed pipeline audit records with run-ID, nested-integrity, and
@@ -187,6 +193,10 @@ The explicit-input observation scanner is documented in
 `docs/SHADOW_SCANNER.md`.
 The deterministic signal and trade-level engine is documented in
 `docs/DETERMINISTIC_SWING_ENGINE.md`.
+The final quote-to-decision and notification package is documented in
+`docs/SWING_DECISIONS.md`.
+The operational quote, publication, and paper-registration boundary is
+documented in `docs/SWING_OPERATIONS.md`.
 
 Persist or inspect a family evaluation report after its registrations, runs,
 comparisons, and family aggregate have already been sealed:
@@ -291,10 +301,34 @@ real alert.
 
 ## Pilot risk defaults
 
-For the intended Rs 1,00,000 pilot, the deterministic defaults are Rs 250 planned
-risk per trade, Rs 500 aggregate open risk, at most two open positions, Rs 20,000
-per position, and Rs 40,000 gross exposure. Sizing is also capped by remaining
-cash and 0.25% of median daily traded value. New positions halt after Rs 750 of
-daily realized loss or Rs 1,500 of cumulative pilot realized loss, preserving a
-Rs 500 reserve inside the user's Rs 2,000 maximum-loss envelope for gap and
-execution risk. These controls cannot guarantee a market gap will not lose more.
+The operational service can now start from one explicitly named, create-once
+proposal manifest. It resolves the exact universe batch, calendar snapshot, and
+signal policy by content ID, deterministically replays the proposal batch, and
+rejects any lineage or coverage difference before quotes are requested. See
+`docs/SWING_OPERATIONS.md` for the stored-ID service and inspection commands.
+The three parent objects are also stored in a strict type-directed archive, so
+the same replay works after a process or Cloud Run job restart without an
+in-memory fixture or a `latest` lookup.
+
+The dedicated `india-swing-operational-job` entrypoint now binds that replay to
+one canonical job spec, an evidence-backed paper-only portfolio snapshot, the
+read-only Kite full-quote adapter, idempotent notification/paper-ledger writes,
+and a terminal operational record. It requires a pre-restored writable state
+root, then durably publishes its notification, optional paper registration,
+terminal record, and terminal-last exact-generation manifest to a private GCS
+bucket. `india-swing-operational-restore` rebuilds those local outputs only from
+an externally retained manifest object name, generation, and SHA-256—never a
+bucket listing or `latest` lookup. Every terminal result is then delivered to a
+configured private Telegram chat through the free Bot API, with protected
+content, a stable operational record ID, sanitized failures, and a create-once
+local receipt. No broker execution authority is attached to that delivery.
+
+For the intended Rs 1,00,000 research pilot, the current quote-to-decision
+defaults are Rs 500 planned risk per trade, Rs 2,000 aggregate open risk, at most
+four open positions across runs, one new position per run, Rs 25,000 per
+position, and Rs 80,000 gross exposure. Sizing is also capped by remaining cash,
+0.25% of median daily traded value, and 20% of captured best-ask quantity. New
+positions halt after Rs 1,000 of daily realized loss or Rs 2,000 of cumulative
+pilot realized loss. These are planning limits, not guarantees: gaps, circuit
+limits, liquidity withdrawal, costs, or manual delay can lose more. The engine
+does not assume or promise a 5–10% return.

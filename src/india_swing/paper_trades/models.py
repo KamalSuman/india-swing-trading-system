@@ -99,8 +99,10 @@ class PaperTradeRegistration:
         object.__setattr__(
             self, "entry_expires_at", _utc(self.entry_expires_at, "entry_expires_at")
         )
-        if not self.decision_time <= self.earliest_entry_at < self.entry_expires_at:
+        if not self.earliest_entry_at < self.entry_expires_at:
             raise PaperTradeError("entry window is invalid")
+        if self.decision_time >= self.entry_expires_at:
+            raise PaperTradeError("paper decision must predate entry expiry")
         for value, name in (
             (self.entry_low, "entry_low"),
             (self.entry_high, "entry_high"),

@@ -264,13 +264,22 @@ class DailyCandleArchive:
             )
 
 
-def require_canonical_listing_keys(listing_keys: object) -> None:
+MAXIMUM_AGGREGATED_QUOTE_KEYS = 10000
+
+
+def require_canonical_listing_keys(
+    listing_keys: object,
+    *,
+    maximum_keys: int = MAXIMUM_QUOTE_KEYS,
+) -> None:
     """Validate an exact, non-empty, sorted, unique, canonical-uppercase key tuple."""
 
+    if type(maximum_keys) is not int or maximum_keys <= 0:
+        raise ValueError("maximum_keys must be a positive exact integer")
     if type(listing_keys) is not tuple or not listing_keys:
         raise ValueError("listing_keys must be a non-empty exact tuple")
-    if len(listing_keys) > MAXIMUM_QUOTE_KEYS:
-        raise ValueError(f"listing_keys cannot exceed {MAXIMUM_QUOTE_KEYS} keys")
+    if len(listing_keys) > maximum_keys:
+        raise ValueError(f"listing_keys cannot exceed {maximum_keys} keys")
     for key in listing_keys:
         if type(key) is not str or LISTING_KEY_PATTERN.fullmatch(key) is None:
             raise ValueError(
@@ -435,7 +444,10 @@ class FullQuoteBatch:
     batch_id: str = field(init=False)
 
     def __post_init__(self) -> None:
-        require_canonical_listing_keys(self.requested_keys)
+        require_canonical_listing_keys(
+            self.requested_keys,
+            maximum_keys=MAXIMUM_AGGREGATED_QUOTE_KEYS,
+        )
         require_aware(self.requested_at, "quote_batch.requested_at")
         require_aware(self.observed_at, "quote_batch.observed_at")
         object.__setattr__(self, "requested_at", self.requested_at.astimezone(timezone.utc))

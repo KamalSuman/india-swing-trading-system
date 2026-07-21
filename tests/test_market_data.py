@@ -22,6 +22,7 @@ from india_swing.market_data.kite import (
 from india_swing.market_data.models import (
     NSE_REGULAR_FINALITY_POLICY_VERSION,
     NseSessionFinality,
+    require_canonical_listing_keys,
 )
 
 
@@ -614,6 +615,13 @@ class KiteFullQuoteAdapterTests(unittest.TestCase):
                 with self.assertRaises(KiteDataIntegrityError):
                     adapter(client).fetch_full_quotes(keys)
                 self.assertEqual(client.quote_calls, [])
+
+    def test_per_request_quote_limit_is_separate_from_aggregated_coverage(self) -> None:
+        keys = tuple(f"NSE:SYM{index:04d}" for index in range(501))
+
+        with self.assertRaises(ValueError):
+            require_canonical_listing_keys(keys)
+        require_canonical_listing_keys(keys, maximum_keys=10000)
 
     def test_response_shape_violations_are_rejected(self) -> None:
         cases = (

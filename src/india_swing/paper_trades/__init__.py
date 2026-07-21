@@ -11,7 +11,12 @@ from .models import (
     PaperTradeSummary,
     registration_from_shadow_alert,
 )
-from .store import LocalPaperTradeLedger, validate_paper_trade_history
+from .store import (
+    LocalPaperTradeLedger,
+    decode_paper_trade_registration,
+    encode_paper_trade_registration,
+    validate_paper_trade_history,
+)
 
 __all__ = (
     "LocalPaperTradeLedger",
@@ -23,6 +28,8 @@ __all__ = (
     "PaperTradeRegistration",
     "PaperTradeStatus",
     "PaperTradeSummary",
+    "decode_paper_trade_registration",
+    "encode_paper_trade_registration",
     "registration_from_shadow_alert",
     "validate_paper_trade_history",
 )

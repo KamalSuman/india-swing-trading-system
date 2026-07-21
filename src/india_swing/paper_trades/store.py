@@ -162,6 +162,14 @@ def _decode_registration(payload: bytes) -> PaperTradeRegistration:
         raise PaperTradeIntegrityError("stored paper registration is invalid") from None
 
 
+def encode_paper_trade_registration(value: PaperTradeRegistration) -> bytes:
+    return _encode(value, _REGISTRATION_CODEC)
+
+
+def decode_paper_trade_registration(payload: bytes) -> PaperTradeRegistration:
+    return _decode_registration(payload)
+
+
 def _decode_event(payload: bytes) -> PaperTradeEvent:
     try:
         root = _load(payload)
@@ -280,7 +288,21 @@ class LocalPaperTradeLedger:
     def register(self, alert: ShadowAlert) -> PaperTradeRegistration:
         try:
             value = registration_from_shadow_alert(alert)
-            payload = _encode(value, _REGISTRATION_CODEC)
+        except Exception:
+            raise PaperTradeError("paper registration input is invalid") from None
+        return self.register_value(value)
+
+    def register_value(
+        self,
+        value: PaperTradeRegistration,
+    ) -> PaperTradeRegistration:
+        """Register an already-verified paper-only decision from any trusted adapter."""
+
+        if type(value) is not PaperTradeRegistration:
+            raise PaperTradeError("paper registration must be exact")
+        try:
+            value.verify_content_identity()
+            payload = encode_paper_trade_registration(value)
         except Exception:
             raise PaperTradeError("paper registration input is invalid") from None
         target = self.registration_path(value.registration_id)
@@ -317,7 +339,9 @@ class LocalPaperTradeLedger:
         if not path.exists() or not path.is_file() or _is_link_like(path):
             raise PaperTradeIntegrityError("paper registration was not found safely")
         try:
-            value = _decode_registration(read_stable_regular_file(path, maximum_bytes=_MAX_BYTES))
+            value = decode_paper_trade_registration(
+                read_stable_regular_file(path, maximum_bytes=_MAX_BYTES)
+            )
         except Exception:
             raise PaperTradeIntegrityError("paper registration could not be read") from None
         if value.registration_id != registration_id:

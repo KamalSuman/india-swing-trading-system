@@ -33,6 +33,9 @@ india-swing-tick-sizes = "india_swing.tick_sizes.cli:main"
 india-swing-liquidity = "india_swing.liquidity.cli:main"
 india-swing-universe = "india_swing.universe.cli:main"
 india-swing-shadow-scan = "india_swing.shadow_scanner.cli:main"
+india-swing-operational = "india_swing.operations.cli:main"
+india-swing-operational-job = "india_swing.operational_job:main"
+india-swing-operational-restore = "india_swing.operational_restore:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

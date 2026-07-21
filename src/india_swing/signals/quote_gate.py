@@ -345,7 +345,7 @@ class SwingQuoteGateBatch:
             raise SwingQuoteGateError("evaluated_at must be timezone-aware")
 
         expected_keys = tuple(
-            f"NSE:{value.symbol}" for value in self.proposal_batch.proposals
+            sorted(f"NSE:{value.symbol}" for value in self.proposal_batch.proposals)
         )
         if self.quote_batch.requested_keys != expected_keys:
             raise SwingQuoteGateError(
@@ -371,9 +371,12 @@ class SwingQuoteGateBatch:
             )
         for value in self.outcomes:
             value.verify_content_identity()
+        quote_by_key = {
+            quote.listing_key: quote for quote in self.quote_batch.quotes
+        }
         for index, outcome in enumerate(self.outcomes):
             proposal = self.proposal_batch.proposals[index]
-            quote = self.quote_batch.quotes[index]
+            quote = quote_by_key[f"NSE:{proposal.symbol}"]
             if outcome.proposal.proposal_id != proposal.proposal_id:
                 raise SwingQuoteGateError(
                     "outcome is not bound to its proposal batch proposal"
@@ -446,7 +449,9 @@ def assemble_swing_quote_gate_batch(
         raise SwingQuoteGateError("policy must be exact")
     policy.verify_content_identity()
 
-    expected_keys = tuple(f"NSE:{value.symbol}" for value in proposal_batch.proposals)
+    expected_keys = tuple(
+        sorted(f"NSE:{value.symbol}" for value in proposal_batch.proposals)
+    )
     if quote_batch.requested_keys != expected_keys:
         raise SwingQuoteGateError("quote batch keys do not exactly match the proposal batch")
     if quote_batch.observed_at > evaluated_at:
@@ -457,8 +462,10 @@ def assemble_swing_quote_gate_batch(
             "quote batch collection duration exceeded the policy maximum"
         )
 
+    quote_by_key = {quote.listing_key: quote for quote in quote_batch.quotes}
     outcomes: list[SwingQuoteGateOutcome] = []
-    for proposal, quote in zip(proposal_batch.proposals, quote_batch.quotes, strict=True):
+    for proposal in proposal_batch.proposals:
+        quote = quote_by_key[f"NSE:{proposal.symbol}"]
         try:
             disposition, reasons, spread, cost, levels = _evaluate_quote_gate(
                 proposal, quote, evaluated_at, policy
