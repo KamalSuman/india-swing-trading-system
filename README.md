@@ -310,6 +310,12 @@ The three parent objects are also stored in a strict type-directed archive, so
 the same replay works after a process or Cloud Run job restart without an
 in-memory fixture or a `latest` lookup.
 
+`india-swing-proposal-prepare` now builds that terminal proposal manifest from
+the three exact stored parent IDs. Its preparation record binds every promoted
+subject assembly and promotion-decision ID, preserving complete small-cap and
+veto coverage rather than silently shrinking the universe. Collection-only
+inputs remain blocked. See `docs/PROPOSAL_PREPARATION.md`.
+
 The dedicated `india-swing-operational-job` entrypoint now binds that replay to
 one canonical job spec, an evidence-backed paper-only portfolio snapshot, the
 read-only Kite full-quote adapter, idempotent notification/paper-ledger writes,

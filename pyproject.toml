@@ -43,6 +43,7 @@ india-swing-paper-portfolio-from-pipeline = "india_swing.paper_portfolio_from_pi
 india-swing-paper-portfolio-prepare = "india_swing.paper_portfolio_prepare:main"
 india-swing-paper-portfolio-restore = "india_swing.paper_portfolio_restore:main"
 india-swing-daily-workflow-job = "india_swing.daily_workflow_job:main"
+india-swing-proposal-prepare = "india_swing.proposal_prepare:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -134,6 +134,12 @@ exact proposal ID load, quote and portfolio acquisition, decision assembly,
 paper registration, notification publication, and terminal record sealing.
 It remains `PAPER_ONLY` and has no broker-order capability.
 
+The upstream graph can now be prepared without an in-process proposal object.
+`india-swing-proposal-prepare` loads an exact stored universe batch, calendar,
+and signal policy by ID, replays complete actionable/veto coverage and every
+promotion-decision binding, then publishes the proposal manifest terminal-last.
+See `docs/PROPOSAL_PREPARATION.md`.
+
 Manifest inspection is available without loading market histories:
 
 ```powershell
