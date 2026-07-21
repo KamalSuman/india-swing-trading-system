@@ -29,6 +29,12 @@ from india_swing.signals.deterministic_swing import (
     DeterministicSwingSignalError,
     DeterministicSwingSignalProvider,
     InstrumentSwingHistory,
+    SwingNextEntryWindow,
+    SwingTechnicalMetrics,
+    SwingTradeLevels,
+    calculate_next_entry_window,
+    calculate_swing_technical_metrics,
+    calculate_swing_trade_levels,
 )
 from india_swing.signals.calibration import (
     CalibrationObservation,
@@ -496,6 +502,156 @@ class DeterministicSwingSignalTests(unittest.TestCase):
                 minimum_history_sessions=20,
                 trend_lookback_sessions=50,
             )
+
+    def test_identity_material_reflects_bound_inputs(self) -> None:
+        provider = self.provider()
+
+        material = provider.identity_material()
+
+        self.assertEqual(material["version"], DeterministicSwingSignalProvider.version)
+        self.assertEqual(material["snapshot_fingerprint"], self.snapshot.content_fingerprint)
+        self.assertEqual(material["calendar_snapshot_id"], self.calendar.snapshot_id)
+        self.assertIsNone(material["calibration_id"])
+        self.assertEqual(material["history_ids"], (self.history.history_id,))
+
+
+class SwingTechnicalMetricsAndLevelsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.calendar = calendar()
+        self.history = history()
+        self.config = DeterministicSwingSignalConfig()
+
+    def test_metrics_are_deterministic_content_addressed_and_replayable(self) -> None:
+        first = calculate_swing_technical_metrics(self.history, self.config)
+        second = calculate_swing_technical_metrics(self.history, self.config)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first.metrics_id, second.metrics_id)
+        first.verify_content_identity()
+        first.verify_content_identity()
+
+    def test_metrics_reject_wrong_types(self) -> None:
+        with self.assertRaisesRegex(DeterministicSwingSignalError, "history must be exact"):
+            calculate_swing_technical_metrics(object(), self.config)
+        with self.assertRaisesRegex(DeterministicSwingSignalError, "config must be exact"):
+            calculate_swing_technical_metrics(self.history, object())
+
+    def test_metrics_enforce_the_configured_minimum_history(self) -> None:
+        short = history(history_bars=self.history.bars[-59:])
+
+        with self.assertRaisesRegex(DeterministicSwingSignalError, "shorter"):
+            calculate_swing_technical_metrics(short, self.config)
+
+    def test_metrics_detect_post_construction_mutation(self) -> None:
+        metrics = calculate_swing_technical_metrics(self.history, self.config)
+        original_id = metrics.metrics_id
+        object.__setattr__(metrics, "atr", metrics.atr + Decimal("1"))
+
+        self.assertEqual(metrics.metrics_id, original_id)
+        with self.assertRaisesRegex(DeterministicSwingSignalError, "content identity"):
+            metrics.verify_content_identity()
+
+    def test_levels_are_deterministic_content_addressed_and_tick_aligned(self) -> None:
+        metrics = calculate_swing_technical_metrics(self.history, self.config)
+        current_close = self.history.bars[-1].close
+        tick = self.history.tick_size
+
+        first = calculate_swing_trade_levels(
+            current_close=current_close,
+            tick=tick,
+            atr=metrics.atr,
+            estimated_cost_bps=Decimal("40"),
+            config=self.config,
+        )
+        second = calculate_swing_trade_levels(
+            current_close=current_close,
+            tick=tick,
+            atr=metrics.atr,
+            estimated_cost_bps=Decimal("40"),
+            config=self.config,
+        )
+
+        self.assertEqual(first.levels_id, second.levels_id)
+        for value in (first.entry_low, first.entry_high, first.stop, first.target):
+            self.assertEqual(value % tick, Decimal("0"))
+        self.assertLess(first.stop, first.entry_low)
+        self.assertLess(first.entry_high, first.target)
+        first.verify_content_identity()
+
+    def test_levels_preserve_configured_net_reward_risk_after_cost(self) -> None:
+        metrics = calculate_swing_technical_metrics(self.history, self.config)
+        levels = calculate_swing_trade_levels(
+            current_close=self.history.bars[-1].close,
+            tick=self.history.tick_size,
+            atr=metrics.atr,
+            estimated_cost_bps=self.config.base_round_trip_cost_bps,
+            config=self.config,
+        )
+
+        self.assertGreaterEqual(levels.net_reward_risk, self.config.target_net_reward_risk)
+
+    def test_levels_reject_a_non_tick_aligned_close(self) -> None:
+        metrics = calculate_swing_technical_metrics(self.history, self.config)
+
+        with self.assertRaisesRegex(DeterministicSwingSignalError, "tick-aligned"):
+            calculate_swing_trade_levels(
+                current_close=self.history.bars[-1].close + Decimal("0.001"),
+                tick=self.history.tick_size,
+                atr=metrics.atr,
+                estimated_cost_bps=Decimal("40"),
+                config=self.config,
+            )
+
+    def test_levels_reject_a_negative_estimated_cost(self) -> None:
+        metrics = calculate_swing_technical_metrics(self.history, self.config)
+
+        with self.assertRaisesRegex(DeterministicSwingSignalError, "cannot be negative"):
+            calculate_swing_trade_levels(
+                current_close=self.history.bars[-1].close,
+                tick=self.history.tick_size,
+                atr=metrics.atr,
+                estimated_cost_bps=Decimal("-1"),
+                config=self.config,
+            )
+
+    def test_levels_detect_post_construction_mutation(self) -> None:
+        metrics = calculate_swing_technical_metrics(self.history, self.config)
+        levels = calculate_swing_trade_levels(
+            current_close=self.history.bars[-1].close,
+            tick=self.history.tick_size,
+            atr=metrics.atr,
+            estimated_cost_bps=Decimal("40"),
+            config=self.config,
+        )
+        original_id = levels.levels_id
+        object.__setattr__(levels, "target", levels.target + levels.entry_high)
+
+        self.assertEqual(levels.levels_id, original_id)
+        with self.assertRaisesRegex(DeterministicSwingSignalError, "content identity"):
+            levels.verify_content_identity()
+
+    def test_entry_window_is_deterministic_and_matches_provider_output(self) -> None:
+        first = calculate_next_entry_window(self.calendar, SIGNAL_SESSION, self.config)
+        second = calculate_next_entry_window(self.calendar, SIGNAL_SESSION, self.config)
+
+        self.assertEqual(first.window_id, second.window_id)
+        self.assertEqual(first.earliest_entry_at, datetime(2026, 3, 2, 9, 20, tzinfo=IST))
+        self.assertEqual(first.entry_expires_at, datetime(2026, 3, 2, 15, 15, tzinfo=IST))
+        self.assertEqual(first.entry_day, date(2026, 3, 2))
+        first.verify_content_identity()
+
+    def test_entry_window_detects_post_construction_mutation(self) -> None:
+        window = calculate_next_entry_window(self.calendar, SIGNAL_SESSION, self.config)
+        original_id = window.window_id
+        object.__setattr__(
+            window,
+            "holding_boundary_day",
+            window.holding_boundary_day + timedelta(days=1),
+        )
+
+        self.assertEqual(window.window_id, original_id)
+        with self.assertRaisesRegex(DeterministicSwingSignalError, "content identity"):
+            window.verify_content_identity()
 
 
 if __name__ == "__main__":

@@ -15,6 +15,12 @@ from .deterministic_swing import (
     DeterministicSwingSignalError,
     DeterministicSwingSignalProvider,
     InstrumentSwingHistory,
+    SwingNextEntryWindow,
+    SwingTechnicalMetrics,
+    SwingTradeLevels,
+    calculate_next_entry_window,
+    calculate_swing_technical_metrics,
+    calculate_swing_trade_levels,
 )
 from .history_adapter import (
     SwingHistoryAdapterError,
@@ -33,6 +39,12 @@ from .universe_batch import (
     SwingUniverseVeto,
     assemble_universe_input_batch,
 )
+from .proposal_batch import (
+    SwingProposalBatch,
+    SwingProposalBatchError,
+    SwingTechnicalProposal,
+    assemble_swing_proposal_batch,
+)
 from .ranking import RankedCandidate, RankWeights, WeightedRanker
 
 __all__ = [
@@ -49,6 +61,12 @@ __all__ = [
     "SwingInputAssembly",
     "SwingInputAssemblyError",
     "SwingHistoryMaterialization",
+    "SwingNextEntryWindow",
+    "SwingProposalBatch",
+    "SwingProposalBatchError",
+    "SwingTechnicalMetrics",
+    "SwingTechnicalProposal",
+    "SwingTradeLevels",
     "SwingUniverseBatchError",
     "SwingUniverseInputBatch",
     "SwingUniverseVeto",
@@ -61,7 +79,11 @@ __all__ = [
     "build_walk_forward_calibration",
     "assemble_alert_swing_inputs",
     "assemble_swing_inputs",
+    "assemble_swing_proposal_batch",
     "assemble_universe_input_batch",
+    "calculate_next_entry_window",
+    "calculate_swing_technical_metrics",
+    "calculate_swing_trade_levels",
     "observations_from_evaluation_comparison",
     "materialize_swing_history",
 ]

@@ -306,13 +306,320 @@ class DeterministicSwingSignalConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class _CalculatedFeatures:
+class SwingTechnicalMetrics:
+    """Point-in-time technical features computed from one exact swing history.
+
+    These are descriptive technical scores, not probabilities. They carry no
+    forecast, confidence, or execution authority on their own.
+    """
+
     momentum_return: Decimal
     trend_quality: Decimal
     volume_confirmation: Decimal
     median_traded_value: Decimal
     atr: Decimal
+    relative_strength: Decimal
+    liquidity_quality: Decimal
     evidence_ids: tuple[str, ...]
+    metrics_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "momentum_return",
+            "trend_quality",
+            "volume_confirmation",
+            "median_traded_value",
+            "atr",
+            "relative_strength",
+            "liquidity_quality",
+        ):
+            _decimal(getattr(self, name), f"metrics.{name}")
+        if self.atr <= ZERO:
+            raise DeterministicSwingSignalError("ATR must be positive")
+        if self.median_traded_value < ZERO:
+            raise DeterministicSwingSignalError("median_traded_value cannot be negative")
+        if (
+            type(self.evidence_ids) is not tuple
+            or not self.evidence_ids
+            or any(type(value) is not str or not value.strip() for value in self.evidence_ids)
+        ):
+            raise DeterministicSwingSignalError(
+                "metrics evidence_ids must be a non-empty exact text tuple"
+            )
+        if len(set(self.evidence_ids)) != len(self.evidence_ids):
+            raise DeterministicSwingSignalError("metrics evidence IDs must be unique")
+        object.__setattr__(self, "metrics_id", self._calculated_id())
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                item.name: getattr(self, item.name)
+                for item in fields(self)
+                if item.name != "metrics_id"
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        if self.metrics_id != self._calculated_id():
+            raise DeterministicSwingSignalError("technical metrics content identity failed")
+
+
+def calculate_swing_technical_metrics(
+    history: InstrumentSwingHistory,
+    config: DeterministicSwingSignalConfig,
+) -> SwingTechnicalMetrics:
+    """Pure, replay-verifiable technical-feature kernel shared by every caller."""
+
+    if type(history) is not InstrumentSwingHistory:
+        raise DeterministicSwingSignalError("history must be exact")
+    if type(config) is not DeterministicSwingSignalConfig:
+        raise DeterministicSwingSignalError("config must be exact")
+    history.verify_content_identity()
+    config.verify_content_identity()
+    if len(history.bars) < config.minimum_history_sessions:
+        raise DeterministicSwingSignalError("history is shorter than the configured minimum")
+
+    bars = history.bars
+    current = bars[-1]
+    momentum_start = bars[-(config.momentum_lookback_sessions + 1)].close
+    momentum = current.close / momentum_start - ONE
+
+    trend_bars = bars[-config.trend_lookback_sessions :]
+    positive = sum(
+        trend_bars[index].close > trend_bars[index - 1].close
+        for index in range(1, len(trend_bars))
+    )
+    positive_fraction = Decimal(positive) / Decimal(len(trend_bars) - 1)
+    moving_average = _mean(tuple(value.close for value in trend_bars))
+    above_average = _clamp((current.close / moving_average - Decimal("0.95")) / Decimal("0.10"))
+    prior_high = max(
+        value.high for value in bars[-(config.breakout_lookback_sessions + 1) : -1]
+    )
+    breakout_proximity = _clamp(
+        (current.close / prior_high - Decimal("0.90")) / Decimal("0.10")
+    )
+    trend_quality = (
+        positive_fraction + above_average + breakout_proximity
+    ) / Decimal("3")
+
+    prior_volume = tuple(
+        value.volume
+        for value in bars[-(config.volume_lookback_sessions + 1) : -1]
+    )
+    volume_confirmation = _clamp(
+        current.volume / _median(prior_volume) / Decimal("2")
+    )
+    median_traded_value = _median(
+        tuple(value.traded_value for value in bars[-config.volume_lookback_sessions :])
+    )
+
+    atr_bars = bars[-(config.atr_lookback_sessions + 1) :]
+    true_ranges: list[Decimal] = []
+    for index in range(1, len(atr_bars)):
+        bar = atr_bars[index]
+        previous_close = atr_bars[index - 1].close
+        true_ranges.append(
+            max(
+                bar.high - bar.low,
+                abs(bar.high - previous_close),
+                abs(bar.low - previous_close),
+            )
+        )
+    atr = _mean(tuple(true_ranges))
+    if atr <= ZERO:
+        raise DeterministicSwingSignalError("ATR must be positive")
+    required = max(
+        config.momentum_lookback_sessions + 1,
+        config.trend_lookback_sessions,
+        config.atr_lookback_sessions + 1,
+        config.volume_lookback_sessions + 1,
+        config.breakout_lookback_sessions + 1,
+    )
+    relative_strength = _clamp(momentum / config.full_momentum_score)
+    liquidity_quality = _clamp(
+        median_traded_value / config.minimum_daily_traded_value / Decimal("2")
+    )
+    return SwingTechnicalMetrics(
+        momentum_return=momentum,
+        trend_quality=trend_quality,
+        volume_confirmation=volume_confirmation,
+        median_traded_value=median_traded_value,
+        atr=atr,
+        relative_strength=relative_strength,
+        liquidity_quality=liquidity_quality,
+        evidence_ids=tuple(value.evidence_id for value in bars[-required:]),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SwingTradeLevels:
+    """Tick-rounded entry/stop/target construction at one declared cost assumption."""
+
+    entry_low: Decimal
+    entry_high: Decimal
+    stop: Decimal
+    target: Decimal
+    estimated_cost_bps: Decimal
+    levels_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        for name in ("entry_low", "entry_high", "target"):
+            _decimal(getattr(self, name), f"levels.{name}", positive=True)
+        _decimal(self.stop, "levels.stop")
+        if self.stop <= ZERO:
+            raise DeterministicSwingSignalError("ATR stop is non-positive")
+        _decimal(self.estimated_cost_bps, "levels.estimated_cost_bps")
+        if self.estimated_cost_bps < ZERO:
+            raise DeterministicSwingSignalError("levels.estimated_cost_bps cannot be negative")
+        object.__setattr__(self, "levels_id", self._calculated_id())
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                item.name: getattr(self, item.name)
+                for item in fields(self)
+                if item.name != "levels_id"
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        if self.levels_id != self._calculated_id():
+            raise DeterministicSwingSignalError("trade levels content identity failed")
+
+    @property
+    def cost_per_share(self) -> Decimal:
+        return self.entry_high * self.estimated_cost_bps / Decimal("10000")
+
+    @property
+    def net_reward_risk(self) -> Decimal:
+        cost_per_share = self.cost_per_share
+        net_loss_per_share = self.entry_high - self.stop + cost_per_share
+        return (self.target - self.entry_high - cost_per_share) / net_loss_per_share
+
+
+def calculate_swing_trade_levels(
+    *,
+    current_close: Decimal,
+    tick: Decimal,
+    atr: Decimal,
+    estimated_cost_bps: Decimal,
+    config: DeterministicSwingSignalConfig,
+) -> SwingTradeLevels:
+    """Pure, replay-verifiable tick-aligned level kernel shared by every caller."""
+
+    if type(config) is not DeterministicSwingSignalConfig:
+        raise DeterministicSwingSignalError("config must be exact")
+    config.verify_content_identity()
+    _decimal(current_close, "current_close", positive=True)
+    _decimal(tick, "tick", positive=True)
+    _decimal(atr, "atr", positive=True)
+    _decimal(estimated_cost_bps, "estimated_cost_bps")
+    if estimated_cost_bps < ZERO:
+        raise DeterministicSwingSignalError("estimated_cost_bps cannot be negative")
+    if current_close != _tick_floor(current_close, tick):
+        raise DeterministicSwingSignalError("signal close is not tick-aligned")
+
+    entry_low = _tick_floor(current_close, tick)
+    entry_high = _tick_ceiling(current_close + config.entry_atr_buffer * atr, tick)
+    stop = _tick_floor(entry_low - config.stop_atr_multiple * atr, tick)
+    cost_per_share = entry_high * estimated_cost_bps / Decimal("10000")
+    net_loss_per_share = entry_high - stop + cost_per_share
+    target = _tick_ceiling(
+        entry_high + cost_per_share + config.target_net_reward_risk * net_loss_per_share,
+        tick,
+    )
+    return SwingTradeLevels(
+        entry_low=entry_low,
+        entry_high=entry_high,
+        stop=stop,
+        target=target,
+        estimated_cost_bps=estimated_cost_bps,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SwingNextEntryWindow:
+    """The next eligible executable calendar window and its holding boundary."""
+
+    entry_day: date
+    earliest_entry_at: datetime
+    entry_expires_at: datetime
+    holding_boundary_day: date
+    window_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.entry_day) is not date:
+            raise DeterministicSwingSignalError("entry window entry_day must be a date")
+        if type(self.holding_boundary_day) is not date:
+            raise DeterministicSwingSignalError(
+                "entry window holding_boundary_day must be a date"
+            )
+        for value, name in (
+            (self.earliest_entry_at, "earliest_entry_at"),
+            (self.entry_expires_at, "entry_expires_at"),
+        ):
+            if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+                raise DeterministicSwingSignalError(
+                    f"entry window {name} must be timezone-aware"
+                )
+        if self.earliest_entry_at >= self.entry_expires_at:
+            raise DeterministicSwingSignalError("entry window must open before it expires")
+        if self.holding_boundary_day < self.entry_day:
+            raise DeterministicSwingSignalError(
+                "holding boundary cannot precede the entry day"
+            )
+        object.__setattr__(self, "window_id", self._calculated_id())
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                item.name: getattr(self, item.name)
+                for item in fields(self)
+                if item.name != "window_id"
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        if self.window_id != self._calculated_id():
+            raise DeterministicSwingSignalError("entry window content identity failed")
+
+
+def calculate_next_entry_window(
+    calendar: CalendarSnapshot,
+    market_session: date,
+    config: DeterministicSwingSignalConfig,
+) -> SwingNextEntryWindow:
+    """Pure, replay-verifiable next-session entry-window kernel shared by every caller."""
+
+    if type(calendar) is not CalendarSnapshot:
+        raise DeterministicSwingSignalError("calendar must be exact")
+    calendar.verify_content_identity()
+    if type(config) is not DeterministicSwingSignalConfig:
+        raise DeterministicSwingSignalError("config must be exact")
+    config.verify_content_identity()
+    if type(market_session) is not date:
+        raise DeterministicSwingSignalError("market_session must be a date")
+
+    entry_day = calendar.next_session(market_session)
+    executable = tuple(value for value in entry_day.session_windows if value.is_executable)
+    if not executable:
+        raise DeterministicSwingSignalError("next session has no executable window")
+    entry_window = executable[0]
+    earliest_entry_at = entry_window.opens_at + timedelta(minutes=config.entry_delay_minutes)
+    entry_expires_at = entry_window.closes_at - timedelta(
+        minutes=config.entry_expiry_buffer_minutes
+    )
+    entry_day.require_same_session_window(earliest_entry_at, entry_expires_at)
+    holding_boundary = calendar.advance_sessions(entry_day.day, config.maximum_holding_sessions)
+    return SwingNextEntryWindow(
+        entry_day=entry_day.day,
+        earliest_entry_at=earliest_entry_at,
+        entry_expires_at=entry_expires_at,
+        holding_boundary_day=holding_boundary.day,
+    )
 
 
 class DeterministicSwingSignalProvider:
@@ -382,7 +689,7 @@ class DeterministicSwingSignalProvider:
                 raise DeterministicSwingSignalError(
                     "calibration evidence binding differs"
                 )
-        calculated: dict[str, _CalculatedFeatures] = {}
+        calculated: dict[str, SwingTechnicalMetrics] = {}
         for history in histories:
             history.verify_content_identity()
             if len(history.bars) < config.minimum_history_sessions:
@@ -427,31 +734,16 @@ class DeterministicSwingSignalProvider:
                     or item.available_at.astimezone(timezone.utc) != bar.available_at
                 ):
                     raise DeterministicSwingSignalError("history evidence binding differs")
-            calculated[history.instrument_id] = self._calculate(history, config)
+            calculated[history.instrument_id] = calculate_swing_technical_metrics(
+                history, config
+            )
 
         try:
             validate_snapshot(snapshot)
         except Exception:
             raise DeterministicSwingSignalError("snapshot contains unavailable evidence") from None
 
-        entry_day = calendar.next_session(snapshot.market_session)
-        executable = tuple(
-            value for value in entry_day.session_windows if value.is_executable
-        )
-        if not executable:
-            raise DeterministicSwingSignalError("next session has no executable window")
-        entry_window = executable[0]
-        earliest_entry_at = entry_window.opens_at + timedelta(
-            minutes=config.entry_delay_minutes
-        )
-        entry_expires_at = entry_window.closes_at - timedelta(
-            minutes=config.entry_expiry_buffer_minutes
-        )
-        entry_day.require_same_session_window(earliest_entry_at, entry_expires_at)
-        calendar.advance_sessions(
-            entry_day.day,
-            config.maximum_holding_sessions,
-        )
+        entry_window = calculate_next_entry_window(calendar, snapshot.market_session, config)
 
         self.snapshot = snapshot
         self.histories = histories
@@ -460,8 +752,7 @@ class DeterministicSwingSignalProvider:
         self.calibration = calibration
         self._history_by_id = {value.instrument_id: value for value in histories}
         self._calculated = calculated
-        self._earliest_entry_at = earliest_entry_at
-        self._entry_expires_at = entry_expires_at
+        self._entry_window = entry_window
 
     def identity_material(self) -> object:
         return {
@@ -474,76 +765,6 @@ class DeterministicSwingSignalProvider:
             ),
             "history_ids": tuple(value.history_id for value in self.histories),
         }
-
-    @staticmethod
-    def _calculate(
-        history: InstrumentSwingHistory,
-        config: DeterministicSwingSignalConfig,
-    ) -> _CalculatedFeatures:
-        bars = history.bars
-        current = bars[-1]
-        momentum_start = bars[-(config.momentum_lookback_sessions + 1)].close
-        momentum = current.close / momentum_start - ONE
-
-        trend_bars = bars[-config.trend_lookback_sessions :]
-        positive = sum(
-            trend_bars[index].close > trend_bars[index - 1].close
-            for index in range(1, len(trend_bars))
-        )
-        positive_fraction = Decimal(positive) / Decimal(len(trend_bars) - 1)
-        moving_average = _mean(tuple(value.close for value in trend_bars))
-        above_average = _clamp((current.close / moving_average - Decimal("0.95")) / Decimal("0.10"))
-        prior_high = max(
-            value.high for value in bars[-(config.breakout_lookback_sessions + 1) : -1]
-        )
-        breakout_proximity = _clamp(
-            (current.close / prior_high - Decimal("0.90")) / Decimal("0.10")
-        )
-        trend_quality = (
-            positive_fraction + above_average + breakout_proximity
-        ) / Decimal("3")
-
-        prior_volume = tuple(
-            value.volume
-            for value in bars[-(config.volume_lookback_sessions + 1) : -1]
-        )
-        volume_confirmation = _clamp(
-            current.volume / _median(prior_volume) / Decimal("2")
-        )
-        median_traded_value = _median(
-            tuple(value.traded_value for value in bars[-config.volume_lookback_sessions :])
-        )
-
-        atr_bars = bars[-(config.atr_lookback_sessions + 1) :]
-        true_ranges: list[Decimal] = []
-        for index in range(1, len(atr_bars)):
-            bar = atr_bars[index]
-            previous_close = atr_bars[index - 1].close
-            true_ranges.append(
-                max(
-                    bar.high - bar.low,
-                    abs(bar.high - previous_close),
-                    abs(bar.low - previous_close),
-                )
-            )
-        atr = _mean(tuple(true_ranges))
-        if atr <= ZERO:
-            raise DeterministicSwingSignalError("ATR must be positive")
-        required = max(
-            config.momentum_lookback_sessions + 1,
-            config.trend_lookback_sessions,
-            config.atr_lookback_sessions + 1,
-            config.volume_lookback_sessions + 1,
-            config.breakout_lookback_sessions + 1,
-        )
-        return _CalculatedFeatures(
-            momentum_return=momentum,
-            trend_quality=trend_quality,
-            volume_confirmation=volume_confirmation,
-            median_traded_value=median_traded_value,
-            atr=atr,
-            evidence_ids=tuple(value.evidence_id for value in bars[-required:]),
-        )
 
     def _verify_bound_inputs(self) -> None:
         self.snapshot.verify_content_identity()
@@ -595,40 +816,18 @@ class DeterministicSwingSignalProvider:
         config = self.config
         current_close = history.bars[-1].close
         tick = history.tick_size
-        if current_close != _tick_floor(current_close, tick):
-            raise DeterministicSwingSignalError("signal close is not tick-aligned")
-        entry_low = _tick_floor(current_close, tick)
-        entry_high = _tick_ceiling(
-            current_close + config.entry_atr_buffer * calculated.atr,
-            tick,
-        )
-        stop = _tick_floor(
-            entry_low - config.stop_atr_multiple * calculated.atr,
-            tick,
-        )
-        if stop <= ZERO:
-            raise DeterministicSwingSignalError("ATR stop is non-positive")
         estimated_cost_bps = max(
             config.base_round_trip_cost_bps,
             instrument.quoted_spread_bps,
         )
-        cost_per_share = entry_high * estimated_cost_bps / Decimal("10000")
-        net_loss_per_share = entry_high - stop + cost_per_share
-        target = _tick_ceiling(
-            entry_high
-            + cost_per_share
-            + config.target_net_reward_risk * net_loss_per_share,
-            tick,
+        levels = calculate_swing_trade_levels(
+            current_close=current_close,
+            tick=tick,
+            atr=calculated.atr,
+            estimated_cost_bps=estimated_cost_bps,
+            config=config,
         )
 
-        relative_strength = _clamp(
-            calculated.momentum_return / config.full_momentum_score
-        )
-        liquidity_quality = _clamp(
-            calculated.median_traded_value
-            / config.minimum_daily_traded_value
-            / Decimal("2")
-        )
         common = {
             "instrument_id": instrument.instrument_id,
             "listing_id": instrument.listing_id,
@@ -639,10 +838,10 @@ class DeterministicSwingSignalProvider:
             "provider_version": self.version,
         }
         signals = SignalFeatures(
-            relative_strength=relative_strength,
+            relative_strength=calculated.relative_strength,
             trend_quality=calculated.trend_quality,
             volume_confirmation=calculated.volume_confirmation,
-            liquidity_quality=liquidity_quality,
+            liquidity_quality=calculated.liquidity_quality,
             news_score=ZERO,
             estimated_cost_bps=estimated_cost_bps,
             **common,
@@ -651,12 +850,12 @@ class DeterministicSwingSignalProvider:
         setup = TradeSetup(
             symbol=instrument.symbol,
             decision_time=snapshot.decision_time,
-            earliest_entry_at=self._earliest_entry_at,
-            entry_expires_at=self._entry_expires_at,
-            entry_low=entry_low,
-            entry_high=entry_high,
-            stop=stop,
-            target=target,
+            earliest_entry_at=self._entry_window.earliest_entry_at,
+            entry_expires_at=self._entry_window.entry_expires_at,
+            entry_low=levels.entry_low,
+            entry_high=levels.entry_high,
+            stop=levels.stop,
+            target=levels.target,
             target_probability=(
                 ZERO if calibration is None else calibration.target_probability
             ),
