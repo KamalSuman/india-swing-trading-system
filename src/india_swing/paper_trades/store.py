@@ -32,6 +32,7 @@ from .models import (
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_REGISTRATION_FILE = re.compile(r"([0-9a-f]{64})\.json\Z")
 _EVENT_FILE = re.compile(r"([0-9]{20})-([0-9a-f]{64})\.json\Z")
 _MAX_BYTES = 1024 * 1024
 _REGISTRATION_CODEC = "paper-trade-registration-json/v1"
@@ -355,6 +356,30 @@ class LocalPaperTradeLedger:
         if value.registration_id != registration_id:
             raise PaperTradeIntegrityError("paper registration differs from its path")
         return value
+
+    def list_registrations(self) -> tuple[PaperTradeRegistration, ...]:
+        """Return the complete, identity-verified local registration set.
+
+        The persistent advisory lock is the only non-registration entry allowed
+        in this directory. Any other file, link, directory, or malformed name
+        fails closed so an incomplete active-position view cannot be produced.
+        """
+
+        if not self.registrations_root.exists():
+            return ()
+        if not self.registrations_root.is_dir() or _is_link_like(self.registrations_root):
+            raise PaperTradeIntegrityError("paper registration set is unsafe")
+        values: list[PaperTradeRegistration] = []
+        for path in sorted(self.registrations_root.iterdir(), key=lambda item: item.name):
+            if path.name == ".paper-registration.lock":
+                if not path.is_file() or _is_link_like(path):
+                    raise PaperTradeIntegrityError("paper registration set is unsafe")
+                continue
+            match = _REGISTRATION_FILE.fullmatch(path.name)
+            if match is None or not path.is_file() or _is_link_like(path):
+                raise PaperTradeIntegrityError("paper registration file set is invalid")
+            values.append(self.get_registration(match.group(1)))
+        return tuple(values)
 
     def list_events(self, registration_id: str) -> tuple[PaperTradeEvent, ...]:
         registration = self.get_registration(registration_id)

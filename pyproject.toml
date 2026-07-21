@@ -38,6 +38,10 @@ india-swing-operational-job = "india_swing.operational_job:main"
 india-swing-operational-restore = "india_swing.operational_restore:main"
 india-swing-paper-outcome-job = "india_swing.paper_outcome_job:main"
 india-swing-paper-outcome-restore = "india_swing.paper_outcome_restore:main"
+india-swing-paper-portfolio-job = "india_swing.paper_portfolio_job:main"
+india-swing-paper-portfolio-from-pipeline = "india_swing.paper_portfolio_from_pipeline:main"
+india-swing-paper-portfolio-prepare = "india_swing.paper_portfolio_prepare:main"
+india-swing-paper-portfolio-restore = "india_swing.paper_portfolio_restore:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -332,6 +332,19 @@ durable publication. It never lists for a latest artifact, fabricates a news
 cause, rewrites portfolio evidence, retrains a model, or places an order. See
 `docs/PAPER_OUTCOMES.md`.
 
+An exact-ID daily paper-portfolio batch now advances all explicitly named
+active outcomes together, refuses to drop an active registration, counts each
+closure once, and seals cumulative estimated P&L, drawdown, expectancy, costs,
+open risk, and loss-halt reasons into a create-once state. Its aggregate GCS
+manifest is written terminal-last and restored only by exact generation and
+hash. This remains paper-only accounting and has no broker-order capability.
+Its preparation command derives the complete active set from the fail-closed
+local ledger, seals jobs only from an explicit evidence inventory, and refuses
+missing registrations, accounting-chain resets, and non-leaf predecessors.
+An exact-ID bridge now creates that inventory directly from a sealed daily run
+and `DailyDerivedEvidence`; every trade retains a decision-time tick snapshot,
+so a later snapshot can never leak into entry or outcome replay.
+
 For the intended Rs 1,00,000 research pilot, the current quote-to-decision
 defaults are Rs 500 planned risk per trade, Rs 2,000 aggregate open risk, at most
 four open positions across runs, one new position per run, Rs 25,000 per

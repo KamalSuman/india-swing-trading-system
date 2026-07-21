@@ -56,6 +56,102 @@ india-swing-paper-outcome-job `
 Both roots must already exist, be canonical local directories, and contain the
 exact archived objects named by the job. Neither path is read from the job spec.
 
+## Daily paper portfolio
+
+Daily preparation is split from execution. A canonical
+`PaperPortfolioPreparationSpec` supplies the UTC cutoff, exact calendar
+materialization ID, ordered EOD artifact IDs, conservative policy, per-registration
+decision-time tick snapshot and listing identity, predecessor binding, and loss
+limits. It is an evidence inventory, not permission to discover a latest file.
+
+`prepare_paper_portfolio_batch` safely enumerates the complete local paper
+registration set and derives its active `ALERTED`/`OPEN` set. Listing coverage
+must match that set exactly: a missing active registration, an extra terminal
+registration, or any malformed directory entry fails before evidence is read.
+It then replays each registration against the pinned evidence to seal the
+expected replay IDs and stores one canonical, create-once batch spec:
+
+```powershell
+india-swing-paper-portfolio-prepare `
+  --spec-file C:\absolute\path\to\paper-portfolio-preparation.json `
+  --evidence-root C:\absolute\restored-evidence-state `
+  --state-root C:\absolute\restored-operational-state
+```
+
+The command returns the exact prepared batch file consumed by
+`india-swing-paper-portfolio-job`. Once any portfolio state exists, a new
+genesis is rejected. A follow-on batch must bind the unique current leaf's
+batch and state IDs, preventing accidental P&L resets or forks from an older
+state. No evidence ID is inferred from filesystem time, name ordering, a GCS
+listing, or a `latest` alias.
+
+The daily-pipeline bridge removes the remaining hand-built inventory step. It
+requires one exact `DailyPipelineRun` ID and one exact `DailyDerivedEvidence`
+ID, validates the complete predecessor run chain, calendar materialization,
+historical artifacts, current derived tick bundle, and the unique portfolio
+leaf, then writes both the preparation spec and executable batch spec:
+
+```powershell
+india-swing-paper-portfolio-from-pipeline `
+  --run-id <64-hex-daily-run-id> `
+  --derived-evidence-id <64-hex-derived-evidence-id> `
+  --evidence-root C:\absolute\restored-evidence-state `
+  --state-root C:\absolute\restored-operational-state
+```
+
+For each new registration, the bridge derives its listing only from tick
+snapshots reconstructed from that exact sealed run chain and chooses the final
+snapshot whose `knowledge_time` is no later than the original decision time.
+If no such snapshot exists, preparation stops; it never substitutes today's
+snapshot. Existing positions retain the tick snapshot, series, and validated
+ISIN already pinned by their preceding outcome job, and any identity drift is
+rejected. The bridge currently accepts only the scanner's `EQ` series policy.
+
+`PaperPortfolioBatchSpec` groups an explicitly ordered set of exact outcome-job
+specs under one UTC cutoff. A follow-on batch must bind the exact previous batch
+and state IDs. Every previously `WAITING`, `OPEN`, or `BLOCKED` registration must
+remain in the next batch; omitting an active position fails before new evidence
+is read. The batch never discovers registrations, lists storage, or selects a
+latest object.
+
+`run_paper_portfolio_batch` runs those exact jobs, retains earlier terminal
+positions, and creates one immutable `PaperPortfolioState`. It accounts for a
+position's realized P&L only on the first batch in which it becomes `CLOSED`, so
+retries and later batches do not count the same outcome twice. The state
+recomputes and verifies daily and cumulative estimated realized P&L, peak and
+drawdown, estimated costs, open planned risk/notional, win rate, expectancy,
+and configured daily/cumulative loss halts. These remain paper-fill estimates,
+not broker performance or a return guarantee.
+
+The operational entrypoint processes the batch, publishes every exact outcome
+record, publishes the aggregate portfolio state, and only then sends its
+Telegram summary:
+
+```powershell
+india-swing-paper-portfolio-job `
+  --spec-file C:\absolute\path\to\paper-portfolio-batch.json `
+  --evidence-root C:\absolute\restored-evidence-state `
+  --state-root C:\absolute\restored-operational-state
+```
+
+Aggregate state is uploaded create-once before its terminal manifest. Restore
+requires the externally retained batch ID, manifest path, generation, and
+SHA-256; it verifies strict canonical JSON and every pinned object before making
+a local create-once state visible:
+
+```powershell
+india-swing-paper-portfolio-restore `
+  --state-root C:\absolute\restored-operational-state `
+  --expected-batch-id <64-hex-batch-id> `
+  --manifest-object <exact-object-name> `
+  --manifest-generation <positive-generation> `
+  --manifest-sha256 <64-hex-sha256>
+```
+
+Both commands use `INDIA_SWING_PAPER_OUTCOME_STATE_BUCKET`; the daily job also
+uses the Telegram variables listed above. Neither entrypoint imports a broker
+order client or has execution authority.
+
 ## Evidence boundaries
 
 Before replay, one `PaperTradeRegistration` is bound to an exact NSE listing
