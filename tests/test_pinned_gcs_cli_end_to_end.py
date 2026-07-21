@@ -27,6 +27,7 @@ from india_swing.daily_pipeline.pinned_gcs_run_spec import (
 )
 from india_swing.daily_pipeline.store import LocalDailyPipelineRunStore
 from india_swing.reference.models import ReferenceReadiness
+from india_swing.daily_pipeline.state_publication import PublishedStateObject
 
 from tests.test_reconciliation import SESSION, _bundle_bytes, _master_bytes
 
@@ -34,6 +35,7 @@ _SECURITY_MASTER_MAXIMUM_BYTES = 32 * 1024 * 1024
 _DAILY_BUNDLE_MAXIMUM_BYTES = 128 * 1024 * 1024
 
 _BUCKET = "trusted-e2e-landing-bucket"
+_STATE_BUCKET = "trusted-e2e-state-bucket"
 _MANIFEST_GENERATION = 777
 _SM_GENERATION = 111
 _DB_GENERATION = 222
@@ -148,6 +150,23 @@ class _FakeStorageModule:
     def Client(self) -> _FakeStorageClient:
         self.client_construction_count += 1
         return self._client
+
+
+class _RecordingStateWriter:
+    """In-memory immutable writer for the CLI's durable publication stage."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def create_or_verify(self, **values: object) -> PublishedStateObject:
+        self.calls.append(values)
+        payload = values["content_bytes"]
+        return PublishedStateObject(
+            object_name=values["object_name"],
+            generation=len(self.calls),
+            byte_count=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+        )
 
 
 # --------------------------------------------------------------------------
@@ -485,8 +504,19 @@ class _EndToEndFixtureTestCase(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         fake_storage = _FakeStorageModule(fake_client)
-        with patch.dict(os.environ, self.env, clear=False):
-            with patch("india_swing.daily_pipeline.acquisition.storage", fake_storage):
+        self.publication_writer = _RecordingStateWriter()
+        runtime_env = {
+            **self.env,
+            "INDIA_SWING_STATE_PUBLICATION_BUCKET": _STATE_BUCKET,
+        }
+        with patch.dict(os.environ, runtime_env, clear=False):
+            with (
+                patch("india_swing.daily_pipeline.acquisition.storage", fake_storage),
+                patch(
+                    "india_swing.daily_pipeline.cli.GoogleCloudStorageStateObjectWriter",
+                    return_value=self.publication_writer,
+                ),
+            ):
                 with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                     exit_code = cli_main(["run-pinned-gcs", "--spec-file", str(spec_path)])
         return exit_code, stdout.getvalue(), stderr.getvalue(), fake_storage
@@ -519,6 +549,11 @@ class _EndToEndFixtureTestCase(unittest.TestCase):
         )
 
     def _run_cli_v2(self, spec_path: Path, fake_client: _FakeStorageClient):
+        # Pipeline state inventory requires every configured state root to
+        # exist.  Schema v2 intentionally acquires its calendar from GCS and
+        # never writes it into LocalCalendarMaterializationStore, so provision
+        # the otherwise-empty configured root just as deployment does.
+        self.calendar_data_root.mkdir(parents=True, exist_ok=True)
         with patch.object(
             LocalCalendarMaterializationStore, "get", self._get_must_not_be_called
         ):
@@ -562,7 +597,12 @@ class HappyPathTests(_EndToEndFixtureTestCase):
         self.assertEqual(stderr, "")
         payload = json.loads(stdout)
         self.assertEqual(payload["status"], "COMPLETE")
-        self.assertEqual(payload["kind"], "DAILY_PIPELINE_RUN")
+        self.assertEqual(payload["kind"], "PINNED_GCS_STATE_PUBLICATION")
+        self.assertEqual(payload["state_bucket"], _STATE_BUCKET)
+        self.assertEqual(
+            payload["publication_object_generation"],
+            len(self.publication_writer.calls),
+        )
 
         reloaded = self._run_store().get(payload["run_id"])
         self.assertEqual(reloaded.market_session, session)
@@ -679,7 +719,12 @@ class HappyPathTests(_EndToEndFixtureTestCase):
         self.assertEqual(stderr, "")
         payload = json.loads(stdout)
         self.assertEqual(payload["status"], "COMPLETE")
-        self.assertEqual(payload["kind"], "DAILY_PIPELINE_RUN")
+        self.assertEqual(payload["kind"], "PINNED_GCS_STATE_PUBLICATION")
+        self.assertEqual(payload["state_bucket"], _STATE_BUCKET)
+        self.assertEqual(
+            payload["publication_object_generation"],
+            len(self.publication_writer.calls),
+        )
 
         reloaded = self._run_store().get(payload["run_id"])
         self.assertEqual(reloaded.market_session, session)
@@ -791,7 +836,9 @@ class FailurePathTests(_EndToEndFixtureTestCase):
 
         self.assertEqual(exit_code, 2)
         payload = self._assert_sanitized_failure_envelope(stdout, stderr)
-        self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
+        self.assertEqual(
+            payload["error_type"], "PinnedGCSStatePublicationServiceError"
+        )
         self.assertEqual(
             [entry["object_name"] for entry in fake_client.download_log],
             [_manifest_object_name(session)],
@@ -900,7 +947,9 @@ class FailurePathTests(_EndToEndFixtureTestCase):
 
         self.assertEqual(exit_code, 2)
         payload = self._assert_sanitized_failure_envelope(stdout, stderr)
-        self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
+        self.assertEqual(
+            payload["error_type"], "PinnedGCSStatePublicationServiceError"
+        )
         self.assertEqual(
             [entry["object_name"] for entry in fake_client.download_log],
             [_manifest_object_name(session), _sm_object_name(session)],
@@ -955,7 +1004,9 @@ class FailurePathTests(_EndToEndFixtureTestCase):
 
         self.assertEqual(exit_code, 2)
         payload = self._assert_sanitized_failure_envelope(stdout, stderr)
-        self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
+        self.assertEqual(
+            payload["error_type"], "PinnedGCSStatePublicationServiceError"
+        )
         self.assertEqual(fake_client.download_log, [])
         self.assertEqual(fake_client.bucket_calls, [])
         self._assert_stderr_omits(stderr, _BUCKET, calendar_id, expected_manifest_sha256)
@@ -988,7 +1039,9 @@ class FailurePathTests(_EndToEndFixtureTestCase):
 
         self.assertEqual(exit_code, 2)
         payload = self._assert_sanitized_failure_envelope(stdout, stderr)
-        self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
+        self.assertEqual(
+            payload["error_type"], "PinnedGCSStatePublicationServiceError"
+        )
         self.assertEqual(fake_client.download_log, [])
         self.assertEqual(fake_client.bucket_calls, [])
         self._assert_stderr_omits(
@@ -1052,15 +1105,27 @@ class FailurePathTests(_EndToEndFixtureTestCase):
         fake_storage = _FakeStorageModule(raising_client)
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with patch.dict(os.environ, self.env, clear=False):
-            with patch("india_swing.daily_pipeline.acquisition.storage", fake_storage):
+        runtime_env = {
+            **self.env,
+            "INDIA_SWING_STATE_PUBLICATION_BUCKET": _STATE_BUCKET,
+        }
+        with patch.dict(os.environ, runtime_env, clear=False):
+            with (
+                patch("india_swing.daily_pipeline.acquisition.storage", fake_storage),
+                patch(
+                    "india_swing.daily_pipeline.cli.GoogleCloudStorageStateObjectWriter",
+                    return_value=_RecordingStateWriter(),
+                ),
+            ):
                 with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                     exit_code = cli_main(["run-pinned-gcs", "--spec-file", str(spec_path)])
 
         self.assertEqual(exit_code, 2)
         stderr_text = stderr.getvalue()
         payload = self._assert_sanitized_failure_envelope(stdout.getvalue(), stderr_text)
-        self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
+        self.assertEqual(
+            payload["error_type"], "PinnedGCSStatePublicationServiceError"
+        )
         self._assert_stderr_omits(stderr_text, secret_bucket, secret_exception_text)
         self._assert_no_pipeline_artifacts_created()
 
@@ -1133,7 +1198,9 @@ class FailurePathTests(_EndToEndFixtureTestCase):
 
         self.assertEqual(exit_code, 2)
         payload = self._assert_sanitized_failure_envelope(stdout, stderr)
-        self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
+        self.assertEqual(
+            payload["error_type"], "PinnedGCSStatePublicationServiceError"
+        )
         self.assertEqual(
             [entry["object_name"] for entry in fake_client.download_log],
             [_calendar_object_name(calendar_materialization_id)],
@@ -1190,7 +1257,9 @@ class FailurePathTests(_EndToEndFixtureTestCase):
 
         self.assertEqual(exit_code, 2)
         payload = self._assert_sanitized_failure_envelope(stdout, stderr)
-        self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
+        self.assertEqual(
+            payload["error_type"], "PinnedGCSStatePublicationServiceError"
+        )
         self.assertEqual(
             [entry["object_name"] for entry in fake_client.download_log],
             [_calendar_object_name(calendar_materialization_id)],
@@ -1252,7 +1321,9 @@ class FailurePathTests(_EndToEndFixtureTestCase):
 
         self.assertEqual(exit_code, 2)
         payload = self._assert_sanitized_failure_envelope(stdout, stderr)
-        self.assertEqual(payload["error_type"], "PinnedGCSRunServiceError")
+        self.assertEqual(
+            payload["error_type"], "PinnedGCSStatePublicationServiceError"
+        )
         self.assertEqual(
             [entry["object_name"] for entry in fake_client.download_log],
             [_calendar_object_name(fake_materialization_id)],
