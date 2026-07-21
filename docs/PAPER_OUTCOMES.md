@@ -5,6 +5,57 @@ objects and returns one deterministic `PaperOutcomeReplay`; it does not write
 the paper ledger, send a notification, access a broker, or select a latest
 artifact.
 
+## Operational outcome job
+
+The pure resolver is now composed by an exact-ID, paper-only operational job.
+`PaperOutcomeJobSpec` pins one registration, calendar materialization, tick-size
+snapshot, ordered EOD artifact set, replay cutoff, conservative fill policy, and
+the expected replay ID. `prepare_paper_outcome_job_spec` reads those immutable
+objects once and seals the replay ID without writing the ledger.
+
+`run_paper_outcome_job` then re-reads the same IDs, independently reconstructs
+the instrument binding and observations, refuses a different replay ID, and
+uses `reconcile_paper_outcome` for append-only ledger changes. A create-once
+terminal record captures the complete event prefix, gross and estimated net
+P&L, and the same evidence-based review shape for profitable and losing closed
+outcomes. Missing market/sector/news evidence remains an explicit uncertainty;
+the review never invents a catalyst or automatically retrains a model.
+
+The record is realized-P&L evidence for the next explicit portfolio
+reconciliation. It does not silently mutate a portfolio artifact because that
+artifact also binds broker funds, positions, engine risk, and engine P&L
+evidence.
+
+`india-swing-paper-outcome-job` publishes the exact registration, event prefix,
+and terminal record to the configured private GCS bucket using create-or-verify
+writes, followed by a terminal manifest. It sends Telegram only after that
+manifest is durable. The job has no broker order capability.
+
+`india-swing-paper-outcome-restore` requires the externally retained manifest
+object name, generation, and SHA-256. It never lists a bucket or chooses a
+latest object. Every referenced generation and hash is verified before the
+registration, events, and terminal record are restored locally in that order.
+
+Runtime configuration:
+
+```text
+INDIA_SWING_PAPER_OUTCOME_STATE_BUCKET
+INDIA_SWING_TELEGRAM_BOT_TOKEN
+INDIA_SWING_TELEGRAM_CHAT_ID
+```
+
+Job invocation:
+
+```powershell
+india-swing-paper-outcome-job `
+  --spec-file C:\absolute\path\to\paper-outcome-job.json `
+  --evidence-root C:\absolute\restored-evidence-state `
+  --state-root C:\absolute\restored-operational-state
+```
+
+Both roots must already exist, be canonical local directories, and contain the
+exact archived objects named by the job. Neither path is read from the job spec.
+
 ## Evidence boundaries
 
 Before replay, one `PaperTradeRegistration` is bound to an exact NSE listing

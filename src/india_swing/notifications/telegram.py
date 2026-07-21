@@ -29,6 +29,9 @@ _CODEC = "telegram-delivery-receipt-json/v1"
 _RECEIPT_SCHEMA = "telegram-delivery-receipt/v1"
 _REQUEST_SCHEMA = "telegram-delivery-request/v1"
 _MAXIMUM_MESSAGE_CHARACTERS = 4096
+_DELIVERY_CATEGORIES = frozenset(
+    {"SWING_OPERATIONAL_RESULT", "PAPER_OUTCOME_RESULT"}
+)
 _MAXIMUM_RESPONSE_BYTES = 1024 * 1024
 _MAXIMUM_RECEIPT_BYTES = 256 * 1024
 _TIMEOUT_SECONDS = 15
@@ -112,7 +115,7 @@ class TelegramDeliveryRequest:
         _sha(self.message_sha256, "message_sha256")
         if hashlib.sha256(self.text.encode("utf-8")).hexdigest() != self.message_sha256:
             raise TelegramDeliveryError("Telegram message hash differs")
-        if self.category != "SWING_OPERATIONAL_RESULT":
+        if self.category not in _DELIVERY_CATEGORIES:
             raise TelegramDeliveryError("Telegram delivery category is invalid")
         if self.schema_version != _REQUEST_SCHEMA:
             raise TelegramDeliveryError("Telegram request schema is unsupported")

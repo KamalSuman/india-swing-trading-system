@@ -170,6 +170,10 @@ def decode_paper_trade_registration(payload: bytes) -> PaperTradeRegistration:
     return _decode_registration(payload)
 
 
+def encode_paper_trade_event(value: PaperTradeEvent) -> bytes:
+    return _encode(value, _EVENT_CODEC)
+
+
 def _decode_event(payload: bytes) -> PaperTradeEvent:
     try:
         root = _load(payload)
@@ -203,6 +207,10 @@ def _decode_event(payload: bytes) -> PaperTradeEvent:
         raise
     except Exception:
         raise PaperTradeIntegrityError("stored paper event is invalid") from None
+
+
+def decode_paper_trade_event(payload: bytes) -> PaperTradeEvent:
+    return _decode_event(payload)
 
 
 def validate_paper_trade_history(

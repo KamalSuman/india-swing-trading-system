@@ -323,6 +323,15 @@ configured private Telegram chat through the free Bot API, with protected
 content, a stable operational record ID, sanitized failures, and a create-once
 local receipt. No broker execution authority is attached to that delivery.
 
+The paper lifecycle also has a restart-safe outcome job. It resolves entries
+and exits from exact, sealed EOD artifacts with conservative stop-first
+ordering, appends only the missing paper-ledger prefix, records estimated net
+P&L and evidence-limited win/loss attribution, publishes a terminal-last GCS
+manifest, supports exact-generation restoration, and sends Telegram only after
+durable publication. It never lists for a latest artifact, fabricates a news
+cause, rewrites portfolio evidence, retrains a model, or places an order. See
+`docs/PAPER_OUTCOMES.md`.
+
 For the intended Rs 1,00,000 research pilot, the current quote-to-decision
 defaults are Rs 500 planned risk per trade, Rs 2,000 aggregate open risk, at most
 four open positions across runs, one new position per run, Rs 25,000 per

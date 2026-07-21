@@ -36,6 +36,8 @@ india-swing-shadow-scan = "india_swing.shadow_scanner.cli:main"
 india-swing-operational = "india_swing.operations.cli:main"
 india-swing-operational-job = "india_swing.operational_job:main"
 india-swing-operational-restore = "india_swing.operational_restore:main"
+india-swing-paper-outcome-job = "india_swing.paper_outcome_job:main"
+india-swing-paper-outcome-restore = "india_swing.paper_outcome_restore:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

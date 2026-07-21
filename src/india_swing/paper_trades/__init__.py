@@ -14,6 +14,8 @@ from .models import (
 from .store import (
     LocalPaperTradeLedger,
     decode_paper_trade_registration,
+    decode_paper_trade_event,
+    encode_paper_trade_event,
     encode_paper_trade_registration,
     validate_paper_trade_history,
 )
@@ -29,6 +31,8 @@ __all__ = (
     "PaperTradeStatus",
     "PaperTradeSummary",
     "decode_paper_trade_registration",
+    "decode_paper_trade_event",
+    "encode_paper_trade_event",
     "encode_paper_trade_registration",
     "registration_from_shadow_alert",
     "validate_paper_trade_history",

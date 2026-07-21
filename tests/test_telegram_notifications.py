@@ -44,6 +44,18 @@ def _request(text: str = "Paper-only test alert") -> TelegramDeliveryRequest:
 
 
 class TelegramNotificationTests(unittest.TestCase):
+    def test_paper_outcome_delivery_category_is_integrity_bound(self) -> None:
+        text = "paper outcome"
+        request = TelegramDeliveryRequest(
+            delivery_key="a" * 64,
+            text=text,
+            message_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            category="PAPER_OUTCOME_RESULT",
+        )
+
+        request.verify_content_identity()
+        self.assertEqual(request.category, "PAPER_OUTCOME_RESULT")
+
     def test_send_uses_protected_https_payload_and_receipt_suppresses_retry(self) -> None:
         config = TelegramBotConfig(bot_token=_TOKEN, chat_id="123456789")
         transport = FakeTelegramTransport()
