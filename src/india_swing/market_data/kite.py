@@ -11,13 +11,19 @@ from importlib import metadata
 from time import monotonic, sleep
 from typing import Any, Protocol
 
+from india_swing.domain.models import INDIA_STANDARD_TIME
+
 from .config import KiteCredentials
 from .models import (
     DailyCandle,
     DailyCandleBatch,
+    FullQuoteBatch,
     InstrumentBatch,
+    KiteDepthLevel,
+    KiteFullQuote,
     KiteInstrument,
     NseSessionFinality,
+    require_canonical_listing_keys,
 )
 
 
@@ -38,6 +44,8 @@ class KiteReadClient(Protocol):
         continuous: bool = False,
         oi: bool = False,
     ) -> list[dict[str, Any]]: ...
+
+    def quote(self, *instruments: str) -> dict[str, dict[str, Any]]: ...
 
 
 class RequestRateLimiter(Protocol):
@@ -78,6 +86,7 @@ class EndpointRateLimiter:
         self._requests_per_second = {
             "historical_data": 3.0,
             "instruments": 10.0,
+            "quote": 1.0,
         }
 
     def wait(self, operation: str) -> None:
@@ -213,6 +222,26 @@ def _datetime(value: Any, field_name: str) -> datetime:
     return parsed
 
 
+def _exchange_timestamp(value: Any, field_name: str) -> datetime:
+    """Interpret a Kite exchange timestamp, attaching IST only to a naive SDK value.
+
+    Kite documents exchange timestamps as IST. The pinned SDK (5.2.0) converts
+    19-character timestamp strings into naive datetimes; that exact naive form
+    is what gets Asia/Kolkata attached here. Any already-aware value must
+    already carry the IST offset -- a different offset is rejected rather than
+    silently reinterpreted.
+    """
+
+    if type(value) is not datetime:
+        raise ValueError(f"{field_name} must be the pinned SDK datetime type")
+    parsed = value
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=INDIA_STANDARD_TIME)
+    if parsed.utcoffset() != INDIA_STANDARD_TIME.utcoffset(None):
+        raise ValueError(f"{field_name} has an inconsistent timezone offset")
+    return parsed.astimezone(INDIA_STANDARD_TIME)
+
+
 class KiteMarketDataAdapter:
     """Validated read-only wrapper around Zerodha's official Python SDK."""
 
@@ -267,7 +296,7 @@ class KiteMarketDataAdapter:
             "provider": "ZERODHA_KITE",
             "sdk_version": self.sdk_version,
             "api_version": 3,
-            "capabilities": ("instruments", "historical_data"),
+            "capabilities": ("instruments", "historical_data", "quote"),
             "order_access": False,
         }
 
@@ -378,6 +407,55 @@ class KiteMarketDataAdapter:
                 f"InvalidBatch:{type(exc).__name__}",
             ) from None
 
+    def fetch_full_quotes(self, listing_keys: tuple[str, ...]) -> FullQuoteBatch:
+        try:
+            require_canonical_listing_keys(listing_keys)
+        except ValueError as exc:
+            raise KiteDataIntegrityError(
+                "quote",
+                f"InvalidRequest:{type(exc).__name__}",
+            ) from None
+
+        request_started_at = self._observed_at()
+        raw_response = self._call("quote", lambda: self._client.quote(*listing_keys))
+        if not isinstance(raw_response, Mapping):
+            raise KiteDataIntegrityError("quote", "InvalidResponseType")
+        if not raw_response:
+            raise KiteDataIntegrityError("quote", "EmptyQuoteResponse")
+        if set(raw_response.keys()) != set(listing_keys):
+            raise KiteDataIntegrityError("quote", "IncompleteQuoteCoverage")
+
+        quotes: list[KiteFullQuote] = []
+        for key in listing_keys:
+            row = raw_response[key]
+            if not isinstance(row, Mapping):
+                raise KiteDataIntegrityError("quote", "InvalidRowType")
+            try:
+                quote = self._full_quote(key, row)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise KiteDataIntegrityError(
+                    "quote",
+                    f"InvalidRow:{type(exc).__name__}",
+                ) from None
+            quotes.append(quote)
+
+        observed_at = self._observed_at()
+        if observed_at < request_started_at:
+            raise KiteDataIntegrityError("quote", "NonMonotonicAcquisitionClock")
+        try:
+            return FullQuoteBatch(
+                requested_keys=listing_keys,
+                requested_at=request_started_at,
+                observed_at=observed_at,
+                provider_version=self.model_version,
+                quotes=tuple(quotes),
+            )
+        except ValueError as exc:
+            raise KiteDataIntegrityError(
+                "quote",
+                f"InvalidBatch:{type(exc).__name__}",
+            ) from None
+
     def _observed_at(self) -> datetime:
         observed_at = self._clock()
         if observed_at.tzinfo is None or observed_at.utcoffset() is None:
@@ -429,6 +507,47 @@ class KiteMarketDataAdapter:
             ),
         )
         return candle
+
+    @staticmethod
+    def _full_quote(listing_key: str, row: Mapping[str, Any]) -> KiteFullQuote:
+        depth = row.get("depth")
+        if not isinstance(depth, Mapping):
+            raise ValueError("quote.depth is required")
+        last_trade_time = row.get("last_trade_time")
+        return KiteFullQuote(
+            listing_key=listing_key,
+            instrument_token=_integer(row["instrument_token"], "instrument_token", minimum=1),
+            exchange_timestamp=_exchange_timestamp(row["timestamp"], "quote.timestamp"),
+            last_trade_time=(
+                _exchange_timestamp(last_trade_time, "quote.last_trade_time")
+                if last_trade_time is not None
+                else None
+            ),
+            last_price=_decimal(row["last_price"], "last_price") or Decimal("0"),
+            lower_circuit_limit=_decimal(row["lower_circuit_limit"], "lower_circuit_limit")
+            or Decimal("0"),
+            upper_circuit_limit=_decimal(row["upper_circuit_limit"], "upper_circuit_limit")
+            or Decimal("0"),
+            depth_buy=KiteMarketDataAdapter._depth_levels(depth.get("buy"), "depth.buy"),
+            depth_sell=KiteMarketDataAdapter._depth_levels(depth.get("sell"), "depth.sell"),
+        )
+
+    @staticmethod
+    def _depth_levels(rows: Any, field_name: str) -> tuple[KiteDepthLevel, ...]:
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+            raise ValueError(f"{field_name} must be a list")
+        levels: list[KiteDepthLevel] = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise ValueError(f"{field_name} entry must be a mapping")
+            levels.append(
+                KiteDepthLevel(
+                    price=_decimal(row.get("price", 0), "depth.price") or Decimal("0"),
+                    quantity=_integer(row.get("quantity", 0), "depth.quantity", minimum=0),
+                    orders=_integer(row.get("orders", 0), "depth.orders", minimum=0),
+                )
+            )
+        return tuple(levels)
 
     def _call(self, operation: str, callback: Callable[[], Any]) -> Any:
         for attempt in range(1, self._retry_policy.max_attempts + 1):

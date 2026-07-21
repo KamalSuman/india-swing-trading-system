@@ -63,6 +63,33 @@ def candle_row(session: date = date(2026, 7, 15), **overrides):
     return row
 
 
+NSE_INFY = "NSE:INFY"
+NSE_TCS = "NSE:TCS"
+
+
+def depth_level(price="1500.00", quantity=10, orders=2):
+    return {"price": price, "quantity": quantity, "orders": orders}
+
+
+def quote_row(**overrides):
+    row = {
+        "instrument_token": 408065,
+        # Naive by default, simulating the pinned SDK's documented quirk of
+        # converting exchange (IST) timestamp strings into naive datetimes.
+        "timestamp": datetime(2026, 7, 15, 15, 29, 55),
+        "last_trade_time": datetime(2026, 7, 15, 15, 29, 50),
+        "last_price": "1500.10",
+        "lower_circuit_limit": "1350.00",
+        "upper_circuit_limit": "1650.00",
+        "depth": {
+            "buy": [depth_level("1500.00", 10, 2), depth_level("1499.50", 5, 1)],
+            "sell": [depth_level("1500.50", 8, 3), depth_level("1501.00", 4, 2)],
+        },
+    }
+    row.update(overrides)
+    return row
+
+
 class FakeLimiter:
     def __init__(self) -> None:
         self.operations: list[str] = []
@@ -72,11 +99,13 @@ class FakeLimiter:
 
 
 class FakeKiteClient:
-    def __init__(self, *, instruments=None, candles=None) -> None:
+    def __init__(self, *, instruments=None, candles=None, quotes=None) -> None:
         self.instrument_result = instruments if instruments is not None else [instrument_row()]
         self.candle_result = candles if candles is not None else [candle_row()]
+        self.quote_result = quotes if quotes is not None else {NSE_INFY: quote_row()}
         self.instrument_calls = 0
         self.historical_calls: list[tuple] = []
+        self.quote_calls: list[tuple] = []
 
     def instruments(self, exchange=None):
         self.instrument_calls += 1
@@ -101,6 +130,18 @@ class FakeKiteClient:
             (instrument_token, from_date, to_date, interval, continuous, oi)
         )
         result = self.candle_result
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def quote(self, *instruments):
+        self.quote_calls.append(instruments)
+        result = self.quote_result
+        if isinstance(result, list) and result and isinstance(result[0], Exception):
+            outcome = result.pop(0)
+            raise outcome
+        if isinstance(result, list):
+            return result.pop(0)
         if isinstance(result, Exception):
             raise result
         return result
@@ -407,6 +448,293 @@ class EndpointRateLimiterTests(unittest.TestCase):
 
         self.assertAlmostEqual(delays[0], 1 / 3)
         self.assertAlmostEqual(delays[1], 0.1)
+
+    def test_quote_uses_the_one_request_per_second_limiter_entry(self) -> None:
+        now = [0.0]
+        delays: list[float] = []
+
+        def sleeper(delay: float) -> None:
+            delays.append(delay)
+            now[0] += delay
+
+        limiter = EndpointRateLimiter(
+            monotonic_clock=lambda: now[0],
+            sleeper=sleeper,
+        )
+
+        limiter.wait("quote")
+        limiter.wait("quote")
+
+        self.assertAlmostEqual(delays[0], 1.0)
+
+
+class KiteFullQuoteAdapterTests(unittest.TestCase):
+    def test_fetches_full_quotes_with_exact_multi_key_request_and_matching_order(
+        self,
+    ) -> None:
+        client = FakeKiteClient(
+            quotes={
+                NSE_TCS: quote_row(
+                    instrument_token=11536,
+                    last_price="3500.00",
+                    lower_circuit_limit="3150.00",
+                    upper_circuit_limit="3850.00",
+                ),
+                NSE_INFY: quote_row(),
+            }
+        )
+        limiter = FakeLimiter()
+        keys = (NSE_INFY, NSE_TCS)
+
+        batch = adapter(client, rate_limiter=limiter).fetch_full_quotes(keys)
+
+        self.assertEqual(client.quote_calls, [keys])
+        self.assertEqual(limiter.operations, ["quote"])
+        self.assertEqual(batch.requested_keys, keys)
+        self.assertEqual(tuple(value.listing_key for value in batch.quotes), keys)
+
+        quote = batch.quotes[0]
+        self.assertEqual(quote.best_bid, Decimal("1500.00"))
+        self.assertEqual(quote.best_ask, Decimal("1500.50"))
+        self.assertEqual(quote.mid_price, Decimal("1500.25"))
+        expected_spread = (
+            (Decimal("1500.50") - Decimal("1500.00")) / Decimal("1500.25") * Decimal("10000")
+        )
+        self.assertEqual(quote.spread_bps, expected_spread)
+        self.assertFalse(quote.at_lower_circuit)
+        self.assertFalse(quote.at_upper_circuit)
+
+        batch.verify_content_identity()
+        batch.verify_content_identity()
+
+    def test_captures_request_and_observed_clocks_in_order_and_utc_normalized(
+        self,
+    ) -> None:
+        started = datetime(2026, 7, 15, 15, 30, 0, tzinfo=IST)
+        completed = datetime(2026, 7, 15, 15, 30, 1, tzinfo=IST)
+        times = iter((started, completed))
+        client = FakeKiteClient(quotes={NSE_INFY: quote_row()})
+
+        batch = adapter(client, clock=lambda: next(times)).fetch_full_quotes((NSE_INFY,))
+
+        self.assertEqual(batch.requested_at, started.astimezone(UTC))
+        self.assertEqual(batch.observed_at, completed.astimezone(UTC))
+
+    def test_naive_sdk_timestamp_is_interpreted_as_ist(self) -> None:
+        client = FakeKiteClient(
+            quotes={NSE_INFY: quote_row(timestamp=datetime(2026, 7, 15, 15, 29, 55))}
+        )
+
+        batch = adapter(client).fetch_full_quotes((NSE_INFY,))
+
+        self.assertEqual(
+            batch.quotes[0].exchange_timestamp,
+            datetime(2026, 7, 15, 15, 29, 55, tzinfo=IST),
+        )
+
+    def test_aware_ist_timestamp_is_accepted(self) -> None:
+        client = FakeKiteClient(
+            quotes={
+                NSE_INFY: quote_row(
+                    timestamp=datetime(2026, 7, 15, 15, 29, 55, tzinfo=IST)
+                )
+            }
+        )
+
+        batch = adapter(client).fetch_full_quotes((NSE_INFY,))
+
+        self.assertEqual(
+            batch.quotes[0].exchange_timestamp,
+            datetime(2026, 7, 15, 15, 29, 55, tzinfo=IST),
+        )
+
+    def test_aware_non_ist_timestamp_is_rejected(self) -> None:
+        client = FakeKiteClient(
+            quotes={
+                NSE_INFY: quote_row(timestamp=datetime(2026, 7, 15, 9, 59, 55, tzinfo=UTC))
+            }
+        )
+
+        with self.assertRaises(KiteDataIntegrityError):
+            adapter(client).fetch_full_quotes((NSE_INFY,))
+
+    def test_raw_timestamp_text_is_rejected_at_the_pinned_sdk_boundary(self) -> None:
+        client = FakeKiteClient(
+            quotes={NSE_INFY: quote_row(timestamp="2026-07-15 15:29:55")}
+        )
+
+        with self.assertRaises(KiteDataIntegrityError):
+            adapter(client).fetch_full_quotes((NSE_INFY,))
+
+    def test_future_exchange_timestamp_is_rejected(self) -> None:
+        client = FakeKiteClient(
+            quotes={NSE_INFY: quote_row(timestamp=datetime(2026, 7, 16, 9, 0, tzinfo=IST))}
+        )
+
+        with self.assertRaises(KiteDataIntegrityError):
+            adapter(client, clock=lambda: OBSERVED_AT).fetch_full_quotes((NSE_INFY,))
+
+    def test_last_trade_time_after_exchange_timestamp_is_rejected(self) -> None:
+        client = FakeKiteClient(
+            quotes={
+                NSE_INFY: quote_row(
+                    timestamp=datetime(2026, 7, 15, 15, 29, 55, tzinfo=IST),
+                    last_trade_time=datetime(2026, 7, 15, 15, 30, 0, tzinfo=IST),
+                )
+            }
+        )
+
+        with self.assertRaises(KiteDataIntegrityError):
+            adapter(client).fetch_full_quotes((NSE_INFY,))
+
+    def test_non_monotonic_acquisition_clock_is_rejected(self) -> None:
+        started = datetime(2026, 7, 15, 15, 30, 1, tzinfo=IST)
+        completed = datetime(2026, 7, 15, 15, 30, 0, tzinfo=IST)
+        times = iter((started, completed))
+        client = FakeKiteClient(quotes={NSE_INFY: quote_row()})
+
+        with self.assertRaisesRegex(KiteDataIntegrityError, "NonMonotonic"):
+            adapter(client, clock=lambda: next(times)).fetch_full_quotes((NSE_INFY,))
+
+    def test_malformed_requests_are_rejected_without_a_vendor_call(self) -> None:
+        cases = (
+            (),
+            [NSE_INFY],
+            (NSE_TCS, NSE_INFY),
+            (NSE_INFY, NSE_INFY),
+            ("NSE INFY",),
+            ("nse:infy",),
+            ("INFY",),
+            ("BSE:INFY",),
+            tuple(f"NSE:SYM{index:04d}" for index in range(501)),
+        )
+        for keys in cases:
+            with self.subTest(keys=keys):
+                client = FakeKiteClient()
+                with self.assertRaises(KiteDataIntegrityError):
+                    adapter(client).fetch_full_quotes(keys)
+                self.assertEqual(client.quote_calls, [])
+
+    def test_response_shape_violations_are_rejected(self) -> None:
+        cases = (
+            "not-a-mapping",
+            {},
+            {NSE_TCS: quote_row()},
+        )
+        for response in cases:
+            with self.subTest(response=response):
+                client = FakeKiteClient(quotes=response)
+                with self.assertRaises(KiteDataIntegrityError):
+                    adapter(client).fetch_full_quotes((NSE_INFY,))
+
+    def test_malformed_row_error_does_not_echo_the_requested_listing_key(self) -> None:
+        client = FakeKiteClient(quotes={NSE_INFY: "not-a-mapping"})
+
+        with self.assertRaises(KiteDataIntegrityError) as raised:
+            adapter(client).fetch_full_quotes((NSE_INFY,))
+
+        self.assertNotIn(NSE_INFY, str(raised.exception))
+
+    def test_malformed_quote_and_depth_rows_are_rejected(self) -> None:
+        cases = (
+            "not-a-mapping",
+            quote_row(instrument_token=1.9),
+            quote_row(instrument_token=True),
+            quote_row(last_price="NaN"),
+            quote_row(last_price="0"),
+            quote_row(lower_circuit_limit="0"),
+            quote_row(last_price="1700.00"),
+            quote_row(depth="not-a-mapping"),
+            quote_row(depth={"buy": "not-a-list", "sell": []}),
+            quote_row(depth={"buy": [depth_level("0", 5, 1)], "sell": []}),
+            quote_row(depth={"buy": [depth_level("100", True, 1)], "sell": []}),
+            quote_row(
+                depth={
+                    "buy": [depth_level("1499", 1, 1), depth_level("1500", 1, 1)],
+                    "sell": [],
+                }
+            ),
+            quote_row(
+                depth={
+                    "buy": [depth_level("1500", 1, 1)],
+                    "sell": [depth_level("1499", 1, 1)],
+                }
+            ),
+        )
+        for row in cases:
+            with self.subTest(row=row):
+                client = FakeKiteClient(quotes={NSE_INFY: row})
+                with self.assertRaises(KiteDataIntegrityError):
+                    adapter(client).fetch_full_quotes((NSE_INFY,))
+
+    def test_duplicate_instrument_tokens_across_quotes_are_rejected(self) -> None:
+        client = FakeKiteClient(
+            quotes={
+                NSE_INFY: quote_row(instrument_token=408065),
+                NSE_TCS: quote_row(instrument_token=408065),
+            }
+        )
+
+        with self.assertRaises(KiteDataIntegrityError):
+            adapter(client).fetch_full_quotes((NSE_INFY, NSE_TCS))
+
+    def test_one_sided_or_empty_depth_yields_spread_bps_none(self) -> None:
+        cases = (
+            quote_row(depth={"buy": [depth_level("1500.00", 5, 1)], "sell": []}),
+            quote_row(depth={"buy": [], "sell": [depth_level("1500.50", 5, 1)]}),
+            quote_row(depth={"buy": [], "sell": []}),
+        )
+        for row in cases:
+            with self.subTest(row=row):
+                client = FakeKiteClient(quotes={NSE_INFY: row})
+                batch = adapter(client).fetch_full_quotes((NSE_INFY,))
+                quote = batch.quotes[0]
+                self.assertIsNone(quote.spread_bps)
+                self.assertFalse(quote.has_two_sided_depth)
+
+    def test_quote_authentication_error_is_sanitized_and_never_retried(self) -> None:
+        class TokenException(Exception):
+            code = 403
+
+        client = FakeKiteClient(quotes=TokenException("distinct-access-token"))
+
+        with self.assertRaises(KiteAuthenticationError) as raised:
+            adapter(client).fetch_full_quotes((NSE_INFY,))
+
+        self.assertEqual(len(client.quote_calls), 1)
+        self.assertNotIn("distinct-access-token", str(raised.exception))
+
+    def test_quote_transient_error_retries_are_bounded(self) -> None:
+        class ServiceUnavailable(Exception):
+            code = 503
+
+        client = FakeKiteClient(
+            quotes=[
+                ServiceUnavailable("one"),
+                ServiceUnavailable("two"),
+                {NSE_INFY: quote_row()},
+            ]
+        )
+        limiter = FakeLimiter()
+
+        batch = adapter(client, rate_limiter=limiter).fetch_full_quotes((NSE_INFY,))
+
+        self.assertEqual(len(batch.quotes), 1)
+        self.assertEqual(len(client.quote_calls), 3)
+        self.assertEqual(limiter.operations, ["quote"] * 3)
+
+    def test_verify_content_identity_detects_nested_mutation_without_disturbing_batch_id(
+        self,
+    ) -> None:
+        client = FakeKiteClient(quotes={NSE_INFY: quote_row()})
+        batch = adapter(client).fetch_full_quotes((NSE_INFY,))
+        original_batch_id = batch.batch_id
+
+        object.__setattr__(batch.quotes[0].depth_buy[0], "price", Decimal("999.99"))
+
+        self.assertEqual(batch.batch_id, original_batch_id)
+        with self.assertRaises(Exception):
+            batch.verify_content_identity()
 
 
 if __name__ == "__main__":
