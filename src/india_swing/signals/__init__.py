@@ -54,6 +54,15 @@ from .quote_gate import (
     SwingQuoteGateReason,
     assemble_swing_quote_gate_batch,
 )
+from .opportunity_ranking import (
+    SwingOpportunityRankingBatch,
+    SwingOpportunityRankingError,
+    SwingOpportunityRankingPolicy,
+    SwingRankedOpportunity,
+    SwingRankingComponent,
+    SwingRankingFactor,
+    assemble_swing_opportunity_ranking_batch,
+)
 from .ranking import RankedCandidate, RankWeights, WeightedRanker
 
 __all__ = [
@@ -71,6 +80,9 @@ __all__ = [
     "SwingInputAssemblyError",
     "SwingHistoryMaterialization",
     "SwingNextEntryWindow",
+    "SwingOpportunityRankingBatch",
+    "SwingOpportunityRankingError",
+    "SwingOpportunityRankingPolicy",
     "SwingProposalBatch",
     "SwingProposalBatchError",
     "SwingQuoteGateBatch",
@@ -79,6 +91,9 @@ __all__ = [
     "SwingQuoteGateOutcome",
     "SwingQuoteGatePolicy",
     "SwingQuoteGateReason",
+    "SwingRankedOpportunity",
+    "SwingRankingComponent",
+    "SwingRankingFactor",
     "SwingTechnicalMetrics",
     "SwingTechnicalProposal",
     "SwingTradeLevels",
@@ -94,6 +109,7 @@ __all__ = [
     "build_walk_forward_calibration",
     "assemble_alert_swing_inputs",
     "assemble_swing_inputs",
+    "assemble_swing_opportunity_ranking_batch",
     "assemble_swing_proposal_batch",
     "assemble_swing_quote_gate_batch",
     "assemble_universe_input_batch",
