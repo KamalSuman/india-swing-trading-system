@@ -9,6 +9,19 @@ The current vertical slice implements:
 - strict point-in-time evidence validation;
 - NSE main-board eligibility without a market-cap cutoff;
 - explicit Kronos, signal, and TradingAgents adapter contracts;
+- a snapshot-bound deterministic swing signal provider that derives
+  explainable momentum, trend, volume, liquidity, ATR entry/stop/target levels,
+  rejects raw-unadjusted or future-known evidence, keeps uncalibrated
+  probabilities provisional, and accepts only snapshot-bound, preregistered,
+  untouched-test calibration before marking probabilities validated;
+- a promotion-replayed signal-input assembler that joins each raw NSE session
+  to one exact stable listing, carries identity knowledge time through
+  corporate-action adjustment, permits synthetic research, and refuses to let
+  synthetic or collection-only inputs enter the alert engine;
+- a content-addressed full-universe input batch that requires exactly one
+  verified assembly for every actionable listing, preserves explicit vetoes for
+  every other listing, and never applies a market-cap filter or silently accepts
+  a partial scan;
 - deterministic ranking, sizing, delivery/intraday cost, liquidity, and portfolio-risk gates;
 - `BUY` or `NO_TRADE` output only;
 - typed failed-run output for data/model/research outages, always with `NO_TRADE`;
@@ -36,6 +49,10 @@ The current vertical slice implements:
 - a point-in-time corporate-action ledger contract that preserves amendments
   and cancellations, supports explicit split/bonus ratios and cash dividends,
   and refuses unsafe automatic factors for complex actions;
+- a content-addressed corporate-action adjustment engine that applies only safe
+  split/bonus price-volume factors, requires an exact stable-identity binding
+  for every raw bar, and adapts the result into signal-engine evidence without
+  rewriting raw NSE history;
 - a replay-verified collection-only tick-size materializer sourced from the NSE
   security master's paise-denominated `BidIntrvl`, with exact Decimal conversion,
   reserved-field change detection, create-once storage, CLI, and promotion
@@ -168,6 +185,8 @@ The non-executable paper-notification boundary is documented in
 `docs/SHADOW_ALERTS.md`.
 The explicit-input observation scanner is documented in
 `docs/SHADOW_SCANNER.md`.
+The deterministic signal and trade-level engine is documented in
+`docs/DETERMINISTIC_SWING_ENGINE.md`.
 
 Persist or inspect a family evaluation report after its registrations, runs,
 comparisons, and family aggregate have already been sealed:

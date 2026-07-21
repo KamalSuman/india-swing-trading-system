@@ -1,8 +1,8 @@
 # Point-in-time corporate-action ledger
 
-Status: the event and snapshot contracts are implemented. The official NSE
-row importer and adjusted-price view are not yet implemented because no real
-official export sample has been supplied.
+Status: the event/snapshot contracts and a cutoff-specific adjusted-price view
+are implemented. The official NSE row importer is not yet implemented because
+no real official export sample has been supplied.
 
 ## Event contract
 
@@ -38,6 +38,24 @@ Snapshots declare coverage, readiness, completeness, actionability, and exact
 blocker codes. A helper converts the snapshot to the corporate-action capability
 used by the promotion gate without upgrading any of those declarations.
 
+## Adjusted-price view
+
+`build_adjusted_price_history` consumes exact raw NSE bars, one point-in-time
+stable-identity binding per bar, and one complete actionable corporate-action
+snapshot. It creates a separate content-addressed view; raw artifacts are never
+rewritten.
+
+For confirmed splits and bonuses, every pre-effective bar receives the
+mechanical price factor and reciprocal volume factor. The effective-session bar
+is left untouched. Cancellations remove superseded actions. Cash dividends,
+rights, mergers, demergers, and other complex actions fail closed because no
+safe automatic total-return factor has been defined.
+
+The signal-history adapter binds the resulting bars, effective tick size, stable
+identity, and corporate-action snapshot into the deterministic swing engine's
+evidence contract. Collection-only, future-known, mismatched-identity, or
+wrong-listing inputs are rejected.
+
 ## Remaining work
 
 Once a real official NSE export is available, the next increment will add:
@@ -46,8 +64,9 @@ Once a real official NSE export is available, the next increment will add:
 2. pinned header/row parsing for the observed NSE schema;
 3. explicit publication and amendment timing rules;
 4. stable-identity resolution for every affected security;
-5. point-in-time adjustment views derived from immutable raw bars; and
-6. regression fixtures taken from sanitized real row shapes.
+5. regression fixtures taken from sanitized real row shapes; and
+6. validated cash-dividend total-return methodology if dividends are included
+   in strategy features.
 
 Raw historical-price artifacts will never be rewritten. Adjustment views must
 be separately versioned by their knowledge cutoff so a future split, dividend,
