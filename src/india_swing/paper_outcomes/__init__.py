@@ -93,11 +93,17 @@ from .portfolio_pipeline_bridge import (
     PreparedPaperPortfolioFromDailyPipeline,
     prepare_paper_portfolio_from_daily_pipeline,
 )
+from .portfolio_service import (
+    CompletedPaperPortfolioJob,
+    PaperPortfolioServiceError,
+    run_paper_portfolio_operational_service,
+)
 
 __all__ = (
     "DEFAULT_PAPER_OUTCOME_BLOCKERS",
     "CompletedPaperOutcomeStatePublication",
     "CompletedPaperPortfolioPublication",
+    "CompletedPaperPortfolioJob",
     "PaperInstrumentBinding",
     "PaperOutcomeError",
     "PaperOutcomeExitReason",
@@ -133,6 +139,7 @@ __all__ = (
     "PaperPortfolioPreparationSpec",
     "PaperPortfolioPipelineBridgeError",
     "PaperPortfolioState",
+    "PaperPortfolioServiceError",
     "PaperRegistrationListing",
     "PreparedPaperPortfolioFromDailyPipeline",
     "ReconciliationResult",
@@ -171,5 +178,6 @@ __all__ = (
     "restore_paper_portfolio_state",
     "run_paper_outcome_job",
     "run_paper_portfolio_batch",
+    "run_paper_portfolio_operational_service",
     "validate_paper_outcome_state_bucket",
 )

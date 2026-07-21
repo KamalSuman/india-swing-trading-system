@@ -345,6 +345,14 @@ An exact-ID bridge now creates that inventory directly from a sealed daily run
 and `DailyDerivedEvidence`; every trade retains a decision-time tick snapshot,
 so a later snapshot can never leak into entry or outcome replay.
 
+`india-swing-daily-workflow-job` composes that bridge, outcome reconciliation,
+aggregate portfolio accounting, immutable GCS publication, and Telegram into
+one bounded-retry EOD workflow. Its append-only attempt log distinguishes
+started, completed, rejected, and failed attempts; a durable terminal suppresses
+domain reruns, and an empty active set produces one explicit paper-only
+heartbeat instead of a fabricated portfolio genesis. See
+`docs/DAILY_WORKFLOW.md`.
+
 For the intended Rs 1,00,000 research pilot, the current quote-to-decision
 defaults are Rs 500 planned risk per trade, Rs 2,000 aggregate open risk, at most
 four open positions across runs, one new position per run, Rs 25,000 per

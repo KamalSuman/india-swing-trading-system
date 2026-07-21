@@ -6,12 +6,14 @@ import unittest
 from contextlib import redirect_stderr
 
 from india_swing import (
+    daily_workflow_job,
     paper_portfolio_from_pipeline,
     paper_portfolio_job,
     paper_portfolio_prepare,
     paper_portfolio_restore,
 )
 from india_swing.paper_outcomes import PaperPortfolioError
+from india_swing.daily_workflow import DailyPaperWorkflowError
 
 
 class PaperPortfolioCLITests(unittest.TestCase):
@@ -49,6 +51,7 @@ class PaperPortfolioCLITests(unittest.TestCase):
 
     def test_entrypoints_do_not_import_broker_order_capabilities(self) -> None:
         for module in (
+            daily_workflow_job,
             paper_portfolio_job,
             paper_portfolio_from_pipeline,
             paper_portfolio_prepare,
@@ -82,6 +85,20 @@ class PaperPortfolioCLITests(unittest.TestCase):
         self.assertEqual(
             json.loads(stream.getvalue()),
             {"error_type": "PaperPortfolioPipelineBridgeError", "status": "FAILED"},
+        )
+
+    def test_daily_workflow_argument_parser_and_failure_are_sanitized(self) -> None:
+        secret = "private-workflow-id"
+        with self.assertRaises(DailyPaperWorkflowError):
+            daily_workflow_job._arguments(("--run-id", secret))
+        stream = io.StringIO()
+        with redirect_stderr(stream):
+            result = daily_workflow_job.main(("--run-id", secret), environ={})
+        self.assertEqual(result, 2)
+        self.assertNotIn(secret, stream.getvalue())
+        self.assertEqual(
+            json.loads(stream.getvalue()),
+            {"error_type": "DailyPaperWorkflowError", "status": "FAILED"},
         )
 
 

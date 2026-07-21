@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import replace
 from datetime import timedelta
 
@@ -22,13 +23,25 @@ from india_swing.paper_outcomes import (
     LocalPaperPortfolioStateStore,
     PaperPortfolioPipelineBridgeError,
     prepare_paper_portfolio_from_daily_pipeline,
+    run_paper_portfolio_operational_service,
 )
+from india_swing.notifications import TelegramBotConfig
 from india_swing.paper_trades import LocalPaperTradeLedger
 from india_swing.tick_sizes import LocalTickSizeSnapshotStore
 from india_swing.universe import LocalCollectionUniverseSnapshotStore
 from tests.test_daily_pipeline import DailyPipelineTests
 from tests.test_paper_outcomes import _registration
 from tests.test_reconciliation import CUTOFF, SESSION, _calendar
+from tests.test_paper_outcome_operational import _MemoryState
+
+
+class _TelegramTransport:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def post_json(self, **_: object) -> bytes:
+        self.calls += 1
+        return b'{"ok":true,"result":{"message_id":17}}'
 
 
 class PaperPortfolioPipelineBridgeTests(DailyPipelineTests):
@@ -218,6 +231,40 @@ class PaperPortfolioPipelineBridgeTests(DailyPipelineTests):
                 ),
             )
         self.assertFalse(early_preparations.specifications_root.exists())
+
+        evidence_root = self.root / "service_evidence"
+        evidence_root.mkdir()
+        for source, destination in (
+            (self.reference_root, evidence_root / "reference_data"),
+            (self.daily_root, evidence_root / "daily_reports"),
+            (self.history_root, evidence_root / "historical_prices"),
+            (self.root / "calendar_data", evidence_root / "calendar_data"),
+            (self.root / "tick_sizes", evidence_root / "tick_sizes"),
+        ):
+            shutil.copytree(source, destination)
+        writer = _MemoryState()
+        telegram = _TelegramTransport()
+        completed = run_paper_portfolio_operational_service(
+            spec=result.batch,
+            evidence_root=evidence_root,
+            state_root=self.root / "state",
+            bucket="paper-state-bucket",
+            writer=writer,
+            telegram_config=TelegramBotConfig(
+                bot_token="12345:" + "a" * 20,
+                chat_id="123456",
+            ),
+            telegram_transport=telegram,
+            clock=lambda: CUTOFF + timedelta(hours=1),
+        )
+        self.assertEqual(completed.state.batch_id, result.batch.batch_id)
+        self.assertEqual(len(completed.outcome_publications), 1)
+        self.assertEqual(
+            completed.portfolio_publication.manifest.state_id,
+            completed.state.state_id,
+        )
+        self.assertEqual(completed.telegram_receipt.delivery_key, completed.state.state_id)
+        self.assertEqual(telegram.calls, 1)
 
 
 if __name__ == "__main__":

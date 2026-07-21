@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sys
@@ -8,30 +7,18 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from india_swing.calendar_data.materialization_store import LocalCalendarMaterializationStore
 from india_swing.daily_pipeline.state_publication import GoogleCloudStorageStateObjectWriter
-from india_swing.historical_prices import LocalHistoricalPriceArtifactStore
 from india_swing.notifications import (
-    LocalTelegramDeliveryReceiptStore,
     TelegramBotConfig,
-    TelegramDeliveryRequest,
     UrllibTelegramHTTPTransport,
-    deliver_telegram_notification,
 )
 from india_swing.operations.job import validate_swing_operational_state_root
 from india_swing.paper_outcomes import (
-    LocalPaperOutcomeEvidenceSource,
-    LocalPaperOutcomeRunStore,
-    LocalPaperPortfolioStateStore,
     PaperPortfolioError,
     load_paper_portfolio_batch_spec_file,
-    publish_paper_outcome_state_to_gcs,
-    publish_paper_portfolio_state,
-    run_paper_portfolio_batch,
+    run_paper_portfolio_operational_service,
     validate_paper_outcome_state_bucket,
 )
-from india_swing.paper_trades import LocalPaperTradeLedger
-from india_swing.tick_sizes import LocalTickSizeSnapshotStore
 
 
 def _arguments(argv: Sequence[str]) -> tuple[Path, Path, Path]:
@@ -62,58 +49,28 @@ def main(argv: Sequence[str] | None = None, *, environ: Mapping[str, str] | None
         )
         telegram_config = TelegramBotConfig.from_env(runtime)
         spec = load_paper_portfolio_batch_spec_file(spec_path)
-        ledger = LocalPaperTradeLedger(state_root / "paper")
-        outcome_store = LocalPaperOutcomeRunStore(state_root / "paper_outcomes")
-        portfolio_store = LocalPaperPortfolioStateStore(state_root / "paper_portfolio")
-        source = LocalPaperOutcomeEvidenceSource(
-            paper_ledger=ledger,
-            calendar_store=LocalCalendarMaterializationStore(
-                evidence_root / "calendar_data", evidence_root / "daily_reports"
-            ),
-            tick_store=LocalTickSizeSnapshotStore(
-                evidence_root / "tick_sizes", evidence_root / "reference_data"
-            ),
-            historical_store=LocalHistoricalPriceArtifactStore(
-                evidence_root / "historical_prices", evidence_root / "daily_reports"
-            ),
-        )
-        state = run_paper_portfolio_batch(
-            spec=spec, evidence_source=source, ledger=ledger,
-            outcome_store=outcome_store, portfolio_store=portfolio_store,
-        )
-        writer = GoogleCloudStorageStateObjectWriter()
-        outcome_publications = []
-        for job in spec.outcome_jobs:
-            record = outcome_store.get(job.job_spec_id)
-            publication = publish_paper_outcome_state_to_gcs(
-                record=record, bucket=bucket, writer=writer, ledger=ledger,
-            )
-            outcome_publications.append(
-                {
-                    "job_spec_id": job.job_spec_id,
-                    "manifest_generation": publication.manifest_object.generation,
-                    "manifest_object_name": publication.manifest_object.object_name,
-                    "manifest_sha256": publication.manifest_object.sha256,
-                }
-            )
-        portfolio_publication = publish_paper_portfolio_state(
-            state=state, bucket=bucket, writer=writer,
-        )
-        text = state.report_message + f"\nPortfolio state ID: {state.state_id}\n"
-        receipt = deliver_telegram_notification(
-            request=TelegramDeliveryRequest(
-                delivery_key=state.state_id,
-                text=text,
-                message_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                category="PAPER_OUTCOME_RESULT",
-            ),
-            config=telegram_config,
-            transport=UrllibTelegramHTTPTransport(),
-            receipt_store=LocalTelegramDeliveryReceiptStore(
-                state_root / "notification_delivery" / "telegram"
-            ),
+        result = run_paper_portfolio_operational_service(
+            spec=spec,
+            evidence_root=evidence_root,
+            state_root=state_root,
+            bucket=bucket,
+            writer=GoogleCloudStorageStateObjectWriter(),
+            telegram_config=telegram_config,
+            telegram_transport=UrllibTelegramHTTPTransport(),
             clock=lambda: datetime.now(timezone.utc),
         )
+        state = result.state
+        outcome_publications = [
+            {
+                "job_spec_id": publication.manifest.job_spec_id,
+                "manifest_generation": publication.manifest_object.generation,
+                "manifest_object_name": publication.manifest_object.object_name,
+                "manifest_sha256": publication.manifest_object.sha256,
+            }
+            for publication in result.outcome_publications
+        ]
+        portfolio_publication = result.portfolio_publication
+        receipt = result.telegram_receipt
         print(json.dumps({
             "batch_id": state.batch_id,
             "cumulative_realized_pnl": str(state.cumulative_realized_pnl),
