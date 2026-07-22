@@ -17,6 +17,7 @@ from .baselines import (
     GeneratedSignalDecision,
     MomentumBaselineConfig,
     PointInTimeInstrument,
+    build_fold_comparison_summaries,
 )
 from .baseline_store import (
     DeterministicComparisonRunConflict,
@@ -131,6 +132,27 @@ from .regime_ensemble import (
     RegimeEnsembleIntentGenerator,
     RegimeEnsembleIntentRun,
 )
+from .regime_ensemble_report import (
+    REGIME_ENSEMBLE_EVALUATION_REPORT_SCHEMA_VERSION,
+    REGIME_ENSEMBLE_REPORT_CAVEATS,
+    RegimeEnsembleEvaluationReport,
+    RegimeEnsembleReportError,
+    build_regime_ensemble_evaluation_report,
+)
+from .regime_ensemble_report_store import (
+    REGIME_ENSEMBLE_REPORT_STORE_SCHEMA_VERSION,
+    LocalRegimeEnsembleEvaluationReportStore,
+    RegimeEnsembleReportStoreConflict,
+    RegimeEnsembleReportStoreNotFound,
+    decode_regime_ensemble_evaluation_report,
+    encode_regime_ensemble_evaluation_report,
+)
+from .regime_ensemble_run import (
+    RegimeEnsembleEvaluationEngine,
+    RegimeEnsembleEvaluationRun,
+    RegimeEnsembleRunError,
+    regime_ensemble_trial_configuration_hash,
+)
 from .result_store import (
     TRIAL_EVALUATION_RESULT_STORE_SCHEMA_VERSION,
     LocalTrialEvaluationResultStore,
@@ -210,12 +232,23 @@ __all__ = [
     "PointInTimePriceSession",
     "EffectiveTickSize",
     "AssembledEvaluationDataset",
+    "REGIME_ENSEMBLE_EVALUATION_REPORT_SCHEMA_VERSION",
+    "REGIME_ENSEMBLE_REPORT_CAVEATS",
+    "REGIME_ENSEMBLE_REPORT_STORE_SCHEMA_VERSION",
     "RegimeEnsembleDecisionReason",
+    "RegimeEnsembleEvaluationEngine",
     "RegimeEnsembleEvaluationError",
+    "RegimeEnsembleEvaluationReport",
+    "RegimeEnsembleEvaluationRun",
     "RegimeEnsembleFoldResult",
     "RegimeEnsembleIntentConfig",
     "RegimeEnsembleIntentGenerator",
     "RegimeEnsembleIntentRun",
+    "RegimeEnsembleReportError",
+    "RegimeEnsembleReportStoreConflict",
+    "RegimeEnsembleReportStoreNotFound",
+    "RegimeEnsembleRunError",
+    "LocalRegimeEnsembleEvaluationReportStore",
     "SplitMethod",
     "TERMINAL_OUTCOME_EVENT_TYPES",
     "TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION",
@@ -262,7 +295,12 @@ __all__ = [
     "TrialStage",
     "WalkForwardFold",
     "build_expanding_purged_walk_forward_plan",
+    "build_fold_comparison_summaries",
+    "build_regime_ensemble_evaluation_report",
+    "regime_ensemble_trial_configuration_hash",
     "assemble_evaluation_dataset",
+    "decode_regime_ensemble_evaluation_report",
+    "encode_regime_ensemble_evaluation_report",
     "decode_trial_registration",
     "decode_evaluation_dataset",
     "decode_generated_intent_batch",

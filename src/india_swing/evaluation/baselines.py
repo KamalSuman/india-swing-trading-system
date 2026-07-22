@@ -742,7 +742,7 @@ def _fold_metrics(
     return tuple(sorted(values.items()))
 
 
-def _fold_summaries(
+def build_fold_comparison_summaries(
     *,
     split_plan: PurgedWalkForwardPlan,
     strategy_batch: GeneratedIntentBatch,
@@ -1161,7 +1161,7 @@ class DeterministicBaselineEvaluationEngine:
             strategy_batch=strategy_batch,
             benchmark_batch=benchmark_batch,
             comparison=comparison,
-            fold_summaries=_fold_summaries(
+            fold_summaries=build_fold_comparison_summaries(
                 split_plan=split_plan,
                 strategy_batch=strategy_batch,
                 benchmark_batch=benchmark_batch,
