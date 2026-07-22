@@ -123,6 +123,14 @@ from .models import (
     SplitMethod,
     WalkForwardFold,
 )
+from .regime_ensemble import (
+    RegimeEnsembleDecisionReason,
+    RegimeEnsembleEvaluationError,
+    RegimeEnsembleFoldResult,
+    RegimeEnsembleIntentConfig,
+    RegimeEnsembleIntentGenerator,
+    RegimeEnsembleIntentRun,
+)
 from .result_store import (
     TRIAL_EVALUATION_RESULT_STORE_SCHEMA_VERSION,
     LocalTrialEvaluationResultStore,
@@ -202,6 +210,12 @@ __all__ = [
     "PointInTimePriceSession",
     "EffectiveTickSize",
     "AssembledEvaluationDataset",
+    "RegimeEnsembleDecisionReason",
+    "RegimeEnsembleEvaluationError",
+    "RegimeEnsembleFoldResult",
+    "RegimeEnsembleIntentConfig",
+    "RegimeEnsembleIntentGenerator",
+    "RegimeEnsembleIntentRun",
     "SplitMethod",
     "TERMINAL_OUTCOME_EVENT_TYPES",
     "TRIAL_LIFECYCLE_EVENT_SCHEMA_VERSION",

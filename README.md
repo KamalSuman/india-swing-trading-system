@@ -9,6 +9,11 @@ The current vertical slice implements:
 - strict point-in-time evidence validation;
 - NSE main-board eligibility without a market-cap cutoff;
 - explicit Kronos, signal, and TradingAgents adapter contracts;
+- a content-addressed regime-aware forecast challenger that classifies the
+  cross-section as trending, range-bound, high-volatility, or risk-off, then
+  combines momentum-breakout, pullback-continuation, volatility-contraction,
+  and liquidity-quality specialists without using instrument identifiers as
+  tie-break alpha or upgrading uncalibrated scores into probabilities;
 - a snapshot-bound deterministic swing signal provider that derives
   explainable momentum, trend, volume, liquidity, ATR entry/stop/target levels,
   rejects raw-unadjusted or future-known evidence, keeps uncalibrated
@@ -193,6 +198,8 @@ The explicit-input observation scanner is documented in
 `docs/SHADOW_SCANNER.md`.
 The deterministic signal and trade-level engine is documented in
 `docs/DETERMINISTIC_SWING_ENGINE.md`.
+The regime-aware multi-specialist alpha challenger is documented in
+`docs/ALPHA_ENGINE.md`.
 The final quote-to-decision and notification package is documented in
 `docs/SWING_DECISIONS.md`.
 The operational quote, publication, and paper-registration boundary is
