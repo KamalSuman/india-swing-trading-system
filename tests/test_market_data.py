@@ -230,6 +230,49 @@ class KiteInstrumentAdapterTests(unittest.TestCase):
                 with self.assertRaises(KiteDataIntegrityError):
                     adapter(FakeKiteClient(instruments=rows)).fetch_instruments("NSE")
 
+    def test_non_tradable_nse_index_rows_are_filtered_before_equity_validation(
+        self,
+    ) -> None:
+        client = FakeKiteClient(
+            instruments=[
+                instrument_row(
+                    instrument_token=256265,
+                    exchange_token="1001",
+                    tradingsymbol="NIFTY 50",
+                    name="NIFTY 50",
+                    tick_size=0.0,
+                    lot_size=0,
+                    instrument_type="EQ",
+                    segment="NSE-INDICES",
+                ),
+                instrument_row(),
+            ]
+        )
+
+        batch = adapter(client).fetch_instruments("NSE")
+
+        self.assertEqual(len(batch.instruments), 1)
+        self.assertEqual(batch.instruments[0].tradingsymbol, "INFY")
+
+    def test_dump_with_no_tradable_nse_equity_rows_fails_closed(self) -> None:
+        client = FakeKiteClient(
+            instruments=[
+                instrument_row(
+                    instrument_token=256265,
+                    exchange_token="1001",
+                    tradingsymbol="NIFTY 50",
+                    name="NIFTY 50",
+                    tick_size=0.0,
+                    lot_size=0,
+                    instrument_type="EQ",
+                    segment="NSE-INDICES",
+                )
+            ]
+        )
+
+        with self.assertRaises(KiteDataIntegrityError):
+            adapter(client).fetch_instruments("NSE")
+
     def test_instrument_integer_and_required_text_fields_are_strict(self) -> None:
         malformed_rows = (
             instrument_row(instrument_token=1.9),

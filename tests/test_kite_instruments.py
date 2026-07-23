@@ -89,7 +89,14 @@ class KiteInstrumentSnapshotResolverHappyPathTests(unittest.TestCase):
     def test_non_eq_kite_row_never_routes(self) -> None:
         stored = instrument_snapshot(
             self.root,
-            rows=[instrument_row(instrument_type="FUT")],
+            rows=[
+                instrument_row(instrument_type="FUT"),
+                instrument_row(
+                    instrument_token=2,
+                    exchange_token="2",
+                    tradingsymbol="TCS",
+                ),
+            ],
         )
         resolver = KiteInstrumentSnapshotResolver(stored)
 

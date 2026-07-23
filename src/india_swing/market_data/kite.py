@@ -307,6 +307,28 @@ class KiteMarketDataAdapter:
             if not isinstance(row, Mapping):
                 raise KiteDataIntegrityError("instruments", f"InvalidRow[{index}]")
             try:
+                row_exchange = _required_text(
+                    row["exchange"],
+                    "exchange",
+                    uppercase=True,
+                )
+                row_segment = _required_text(
+                    row["segment"],
+                    "segment",
+                    uppercase=True,
+                )
+                row_instrument_type = _required_text(
+                    row["instrument_type"],
+                    "instrument_type",
+                    uppercase=True,
+                )
+                if row_exchange != exchange:
+                    raise ValueError("instrument belongs to another exchange")
+                # The NSE dump also contains non-tradable index rows whose
+                # tick/lot fields are zero. They are valid upstream rows but
+                # are not provider-routing evidence for cash equities.
+                if row_segment != "NSE" or row_instrument_type != "EQ":
+                    continue
                 instrument = self._instrument(row)
             except (KeyError, TypeError, ValueError) as exc:
                 raise KiteDataIntegrityError(
@@ -317,6 +339,8 @@ class KiteMarketDataAdapter:
                 raise KiteDataIntegrityError("instruments", "UnexpectedExchange")
             instruments.append(instrument)
 
+        if not instruments:
+            raise KiteDataIntegrityError("instruments", "EmptyEligibleInstrumentDump")
         instruments.sort(key=lambda item: (item.listing_key, item.instrument_token))
         observed_at = self._observed_at()
         try:
