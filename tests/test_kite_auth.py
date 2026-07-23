@@ -500,6 +500,25 @@ class ParseKiteCallbackTests(unittest.TestCase):
         )
         self.assertEqual(result, {"status": "success", "request_token": "abc123"})
 
+    def test_documented_request_token_only_callback_is_accepted(self) -> None:
+        result = _parse_kite_callback(
+            LOOPBACK_CALLBACK_PATH,
+            "request_token=abc123",
+        )
+        self.assertEqual(result, {"status": "success", "request_token": "abc123"})
+
+    def test_each_optional_success_field_may_be_present_independently(self) -> None:
+        for query in (
+            "status=success&request_token=abc123",
+            "action=login&request_token=abc123",
+        ):
+            with self.subTest(query=query):
+                result = _parse_kite_callback(LOOPBACK_CALLBACK_PATH, query)
+                self.assertEqual(
+                    result,
+                    {"status": "success", "request_token": "abc123"},
+                )
+
     def test_wrong_path_is_rejected(self) -> None:
         result = _parse_kite_callback(
             "/wrong/path",
@@ -527,8 +546,6 @@ class ParseKiteCallbackTests(unittest.TestCase):
     def test_missing_or_duplicate_fields_are_malformed(self) -> None:
         cases = (
             "action=login&status=success",
-            "status=success&request_token=abc123",
-            "action=login&request_token=abc123",
             "action=login&status=success&request_token=a&request_token=b",
             "action=login&status=success&request_token=abc123&extra=1",
         )
