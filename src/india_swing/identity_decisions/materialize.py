@@ -10,6 +10,7 @@ from india_swing.identity_evidence import (
 from india_swing.identity_registry import (
     CrossVintageIdentityRegistry,
     IdentityAdjudicationQueue,
+    IdentityAdjudicationRequirement,
     IdentityCandidateBasis,
     IdentityCandidateStatus,
     build_identity_adjudication_queue,
@@ -61,6 +62,105 @@ def _stable_listing_id(stable_instrument_id: str, series: str) -> str:
         },
         length=64,
     )
+
+
+def _accepted_effective_isin(
+    *,
+    candidate: object,
+    case: object,
+    candidate_observations: tuple[object, ...],
+    pair_decisions: dict[object, object],
+    decision_claims: dict[tuple[str, IdentityAdjudicationRequirement], object],
+) -> str | None:
+    """Derive an ISIN only from the exact accepted evidence-review chain."""
+
+    if candidate.basis is IdentityCandidateBasis.VALIDATED_ISIN:
+        effective_isin = candidate.validated_isin
+        if candidate.status is IdentityCandidateStatus.CONFLICT:
+            conflict_decision = pair_decisions.get(
+                IdentityAdjudicationRequirement.OFFICIAL_CONFLICT_RESOLUTION
+            )
+            if (
+                conflict_decision is None
+                or conflict_decision.outcome is not IdentityReviewOutcome.ACCEPTED
+            ):
+                return None
+            conflict_claim = decision_claims[
+                (
+                    candidate.candidate_id,
+                    IdentityAdjudicationRequirement.OFFICIAL_CONFLICT_RESOLUTION,
+                )
+            ]
+            if conflict_claim.isin != effective_isin:
+                raise IdentityDecisionIntegrityError(
+                    "accepted conflict-resolution evidence does not confirm the candidate ISIN"
+                )
+        elif candidate.status not in {
+            IdentityCandidateStatus.SINGLE_VINTAGE,
+            IdentityCandidateStatus.CANDIDATE_CONTINUITY,
+        }:
+            return None
+    elif (
+        candidate.basis
+        is IdentityCandidateBasis.UNVALIDATED_SOURCE_IDENTIFIER
+        and candidate.status is IdentityCandidateStatus.UNRESOLVED_IDENTIFIER
+        and IdentityAdjudicationRequirement.VALIDATED_IDENTIFIER
+        in case.requirements
+    ):
+        identifier_decision = pair_decisions.get(
+            IdentityAdjudicationRequirement.VALIDATED_IDENTIFIER
+        )
+        if (
+            identifier_decision is None
+            or identifier_decision.outcome is not IdentityReviewOutcome.ACCEPTED
+        ):
+            return None
+        identifier_claim = decision_claims[
+            (
+                candidate.candidate_id,
+                IdentityAdjudicationRequirement.VALIDATED_IDENTIFIER,
+            )
+        ]
+        if identifier_claim.isin is None:
+            raise IdentityDecisionIntegrityError(
+                "accepted validated-identifier evidence does not contain an ISIN"
+            )
+        if len(candidate_observations) != 1 or (
+            identifier_claim.symbol,
+            identifier_claim.series,
+        ) != (
+            candidate_observations[0].ticker_symbol,
+            candidate_observations[0].security_series,
+        ):
+            raise IdentityDecisionIntegrityError(
+                "accepted validated-identifier evidence targets another listing"
+            )
+        effective_isin = identifier_claim.isin
+    else:
+        return None
+
+    if effective_isin is None:
+        return None
+    known_listing_pairs = {
+        (value.ticker_symbol, value.security_series)
+        for value in candidate_observations
+    }
+    for requirement, decision in pair_decisions.items():
+        if (
+            decision is None
+            or decision.outcome is not IdentityReviewOutcome.ACCEPTED
+        ):
+            continue
+        claim = decision_claims[(candidate.candidate_id, requirement)]
+        if claim.isin is not None and claim.isin != effective_isin:
+            raise IdentityDecisionIntegrityError(
+                "accepted identity evidence contains conflicting ISIN claims"
+            )
+        if (claim.symbol, claim.series) not in known_listing_pairs:
+            raise IdentityDecisionIntegrityError(
+                "accepted identity evidence targets an unknown candidate listing"
+            )
+    return effective_isin
 
 
 def materialize_adjudicated_identity_snapshot(
@@ -117,6 +217,7 @@ def materialize_adjudicated_identity_snapshot(
         for requirement in case.requirements
     }
     decisions = {}
+    decision_claims = {}
     for bundle in review_bundles:
         for decision in bundle.parsed.decisions:
             pair = (decision.candidate_id, decision.requirement)
@@ -133,6 +234,7 @@ def materialize_adjudicated_identity_snapshot(
             if artifact.manifest.validated_at > bundle.parsed.reviewed_at:
                 raise IdentityDecisionIntegrityError("review decision predates its evidence")
             decisions[pair] = decision
+            decision_claims[pair] = claim
 
     candidates = {value.candidate_id: value for value in registry.candidates}
     observations = {value.observation_id: value for value in registry.observations}
@@ -140,6 +242,9 @@ def materialize_adjudicated_identity_snapshot(
     listing_observations = []
     for case in queue.cases:
         candidate = candidates[case.candidate_id]
+        candidate_observations = tuple(
+            observations[value] for value in candidate.observation_ids
+        )
         pair_decisions = {
             requirement: decisions.get((case.candidate_id, requirement))
             for requirement in case.requirements
@@ -163,20 +268,18 @@ def materialize_adjudicated_identity_snapshot(
             blockers.add(IdentityResolutionBlocker.MISSING_REVIEW_DECISION)
         if rejected:
             blockers.add(IdentityResolutionBlocker.REJECTED_REVIEW_DECISION)
-        supported_shape = (
-            candidate.basis is IdentityCandidateBasis.VALIDATED_ISIN
-            and candidate.status in {
-                IdentityCandidateStatus.SINGLE_VINTAGE,
-                IdentityCandidateStatus.CANDIDATE_CONTINUITY,
-            }
-            and candidate.validated_isin is not None
+        effective_isin = _accepted_effective_isin(
+            candidate=candidate,
+            case=case,
+            candidate_observations=candidate_observations,
+            pair_decisions=pair_decisions,
+            decision_claims=decision_claims,
         )
-        if not supported_shape:
+        if effective_isin is None:
             blockers.add(IdentityResolutionBlocker.UNSUPPORTED_CANDIDATE_SHAPE)
         stable_instrument_id = None
         if not blockers:
-            assert candidate.validated_isin is not None
-            stable_instrument_id = _stable_instrument_id(candidate.validated_isin)
+            stable_instrument_id = _stable_instrument_id(effective_isin)
             for observation_id in candidate.observation_ids:
                 observation = observations[observation_id]
                 listing_observations.append(EffectiveStableListingObservation(
@@ -190,7 +293,7 @@ def materialize_adjudicated_identity_snapshot(
                     effective_on=observation.claimed_report_date,
                     symbol=observation.ticker_symbol,
                     series=observation.security_series,
-                    isin=candidate.validated_isin,
+                    isin=effective_isin,
                 ))
         resolutions.append(CandidateIdentityResolution(
             candidate_id=candidate.candidate_id,

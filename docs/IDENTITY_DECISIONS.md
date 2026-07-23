@@ -52,8 +52,23 @@ the same candidate/requirement pair.
 ## Stable-ID rules
 
 A candidate receives an ID only when every required pair has one accepted
-decision, none is rejected, and the registry candidate has a validated ISIN and
-is neither conflicted nor unresolved.
+decision and none is rejected. A source-validated ISIN continues to be used
+directly for an ordinary single-vintage or continuity candidate.
+
+An unresolved source identifier can be corrected only when its queue requires
+`VALIDATED_IDENTIFIER`, the accepted decision for that exact requirement cites
+an evidence claim containing a syntactically valid ISIN, and the claim's symbol
+and series exactly match the source observation. Every other accepted non-null
+ISIN claim for the candidate must agree. A conflicted validated-ISIN candidate
+can proceed only when its `OFFICIAL_CONFLICT_RESOLUTION` decision is accepted
+and that exact evidence claim confirms the candidate's existing ISIN. Accepted
+claims must refer to a symbol/series pair actually present in the candidate.
+Unvalidated conflict shapes remain unsupported because a conflict review is not
+itself a validated-identifier decision.
+
+These rules do not infer an ISIN from a ticker, a provider catalog, declaration
+order, or an unreviewed claim. Missing, rejected, mismatched, or contradictory
+evidence fails closed.
 
 The stable instrument ID is derived from NSE CM plus the validated ISIN. A
 stable listing ID is derived from that instrument ID plus the NSE series. A

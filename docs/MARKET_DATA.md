@@ -169,7 +169,78 @@ The adapter accepts only an Upstox binding whose provider instrument ID is
 exactly `NSE_EQ|<binding ISIN>`. It never lists instruments, selects a "latest"
 identifier, expands the requested universe, or silently accepts additional
 sessions. Production credentials and the live network are never activated by
-tests. CLI wiring remains a separate operational step.
+tests.
+
+After installing the package, the operational entry point is
+`india-swing-upstox-backfill`. From a source checkout, including the current
+development virtual environment, use the equivalent module form:
+
+```powershell
+.\.venv\Scripts\python.exe -m india_swing.market_data.backfill_cli --help
+```
+
+Planning is credential-free and requires exact pinned input IDs plus an explicit
+knowledge timestamp. First fetch and seal the public Upstox NSE BOD catalog:
+
+```powershell
+.\.venv\Scripts\python.exe -m india_swing.market_data.backfill_cli catalog-fetch
+```
+
+The command stores the original `NSE.json.gz` and a canonical normalized catalog
+under `var/market_data/upstox-nse-instrument-catalog/<catalog-id>`. Reads replay
+the normalized catalog from the raw gzip and reject path, content, or canonical
+encoding changes. No Upstox credential is read. A manually downloaded file can
+instead be sealed with `catalog-import --source-file <path> --observed-at
+<aware-ISO-datetime>`.
+
+Use the returned catalog ID and a `requested-at` timestamp at or after its
+`observed-at`:
+
+```powershell
+.\.venv\Scripts\python.exe -m india_swing.market_data.backfill_cli plan `
+  --identity-registry-id <registry-id> `
+  --identity-snapshot-id <optional-exact-reviewed-snapshot-id> `
+  --calendar-materialization-id <calendar-materialization-id> `
+  --upstox-catalog-id <catalog-id> `
+  --coverage-start 2026-07-15 `
+  --coverage-end 2026-07-16 `
+  --requested-at 2026-07-23T10:00:00+00:00
+```
+
+Reuse the identical arguments for every resume. Changing `requested-at`, an
+input ID, or a coverage bound intentionally creates a different plan ID.
+
+`--identity-snapshot-id` is optional and is never selected by directory order,
+modification time, or a "latest" lookup. When supplied, it must be a
+content-verified adjudicated snapshot for the exact registry and must have been
+known by `--requested-at`. Reviewed corrected identifiers and reviewed conflict
+cases may then contribute their exact effective ISIN. The plan binds the
+snapshot ID into its content identity and into request source lineage.
+Unreviewed claims, incomplete or rejected cases, listing mismatches, and
+snapshots known after the requested time remain blocked.
+
+Run one request as a live smoke test:
+
+```powershell
+$secureToken = Read-Host "Upstox token" -AsSecureString
+$env:INDIA_SWING_UPSTOX_ACCESS_TOKEN = `
+  [System.Net.NetworkCredential]::new("", $secureToken).Password
+
+.\.venv\Scripts\python.exe -m india_swing.market_data.backfill_cli run `
+  --identity-registry-id <registry-id> `
+  --identity-snapshot-id <optional-exact-reviewed-snapshot-id> `
+  --calendar-materialization-id <calendar-materialization-id> `
+  --upstox-catalog-id <catalog-id> `
+  --coverage-start 2026-07-15 `
+  --coverage-end 2026-07-16 `
+  --requested-at 2026-07-23T10:00:00+00:00 `
+  --maximum-requests 1
+```
+
+The run command refuses plans containing blocking coverage or identity issues
+before it reads credentials. `--allow-collection-with-issues` is available only
+for explicitly partial collection; its output continues to report
+`coverage_complete: false`.
 
 ## Historical backfill planning and restart
 
@@ -185,15 +256,86 @@ Accordingly, the planner remains collection-only and:
   on every session in the request run;
 - never fills a missing security-master vintage by carrying the previous or next
   identity forward;
-- separates symbol or series lanes;
-- blocks concurrent lanes that collapse to one provider key;
+- admits only the intended `EQ` main-board and `SM` SME listing lanes;
+- requires the dated row to have `DelFlg=N`, normal-market status `6`, and
+  normal-market eligibility `1`;
+- separates symbol and series lanes;
+- excludes retained deleted aliases, suspended rows, migrated-out SME rows, and
+  other normal-market-ineligible observations without deleting their evidence;
+- evaluates identity collisions among concurrently eligible observations on
+  each exact report date, rather than allowing a deleted historical alias to
+  block the active same-ISIN listing forever;
+- blocks duplicate active ISIN/series rows, financial-instrument-ID reuse,
+  listing-key reuse across identifiers, and concurrent eligible lanes that
+  collapse to one provider key;
 - records missing master dates, conflicts, unvalidated identifiers, delete
-  flags, unavailable provider keys, and unsupported listing lanes as immutable
-  plan issues.
+  flags, normal-market ineligibility, unavailable provider keys,
+  current-catalog absence, and unsupported listing lanes as immutable plan
+  issues.
 
-Plan issues mean safe requests can still be collected, but the result must not
-be described as complete-universe coverage. Historical breadth improves only
-when additional dated official evidence is supplied.
+Issue severity is explicit. Missing master vintages, identity conflicts,
+unvalidated identifiers, ambiguous keys, and unavailable routing block normal
+collection. Deleted securities, normal-market-ineligible rows, and unsupported
+series are expected exclusions. This exclusion is point-in-time: it is based
+only on the exact dated master row and never on today's provider membership.
+An ISIN absent from today's Upstox catalog is a warning, not an exclusion:
+current BOD files omit delisted instruments, so using current membership to
+filter historical NSE membership would introduce survivorship bias. The request
+still uses the deterministic `NSE_EQ|<historical validated ISIN>` key; any
+upstream rejection remains visible during collection.
+
+### Blocker work list
+
+Generate a content-addressed report containing only genuine blockers and their
+existing identity-adjudication cases:
+
+```powershell
+.\.venv\Scripts\python.exe -m india_swing.market_data.backfill_cli blockers `
+  --identity-registry-id <registry-id> `
+  --calendar-materialization-id <calendar-materialization-id> `
+  --upstox-catalog-id <catalog-id> `
+  --coverage-start 2026-07-15 `
+  --coverage-end 2026-07-16 `
+  --requested-at 2026-07-23T21:05:00+05:30
+```
+
+The report is sealed below
+`var/market_data/historical-backfill-blocker-reports/<report-id>/report.json`.
+It excludes normal deletion/series exclusions and current-catalog warnings. Each
+remaining issue is bound to its exact observation IDs, candidate IDs, existing
+adjudication case IDs, evidence requirements, and operator actions. It remains
+`actionable=false` and `evidence_satisfied=false`; it routes work into the
+official identity-evidence process but cannot invent an identity decision.
+
+Turn that exact report into a sealed procurement package and a
+spreadsheet-friendly work list:
+
+```powershell
+.\.venv\Scripts\python.exe -m india_swing.market_data.backfill_cli evidence-worklist `
+  --blocker-report-id <exact-blocker-report-id>
+```
+
+The command loads only the explicitly named blocker report and its exact
+registry/queue lineage. It writes:
+
+- `package.json`, the canonical content-identified system artifact; and
+- `worklist.csv`, one human-readable row per candidate observation and required
+  evidence pair.
+
+Both files live below
+`var/market_data/historical-backfill-evidence-work-packages/<package-id>/`.
+The CSV includes the observed symbol, series, name, report date, source
+identifier, validated ISIN when present, issue/case IDs, exact requirement,
+recommended official NSE document types, and required operator actions. A
+missing-vintage or other operational blocker remains a separate operational
+row; it is never forced into a fabricated identity case.
+
+Document recommendations distinguish dated security masters, adjacent
+security-master vintages, report-date provenance, listing circular PDFs, and
+corporate-action CSVs. They are procurement guidance only. Both
+`evidence_collected` and `review_completed` are emitted as false, and the
+package remains `actionable=false` and `evidence_satisfied=false`. Editing
+either JSON or CSV makes the stored package fail integrity verification.
 
 `HistoricalBackfillRunner` executes the safe requests through the same
 provider-neutral collector. After every request it atomically writes a
@@ -205,6 +347,27 @@ and records it without another provider call.
 The local progress store is deliberately single-runner. A Cloud Run deployment
 must replace its atomic local file update with generation-matched Cloud Storage
 or another compare-and-swap store before multiple workers are allowed.
+
+## Provider-versus-NSE reconciliation
+
+An API success is not treated as proof that a candle is correct. The
+reconciliation command compares provider OHLCV exactly against separately
+materialized NSE UDiFF/full-bhavcopy session artifacts:
+
+```powershell
+.\.venv\Scripts\python.exe -m india_swing.market_data.backfill_cli reconcile `
+  --provider UPSTOX `
+  --provider-snapshot-id <historical-provider-snapshot-id> `
+  --nse-artifact-id <exact-NSE-session-artifact-id> `
+  --reconciled-at 2026-07-23T10:30:00+00:00
+```
+
+Supply one `--nse-artifact-id` for every provider session. Missing or extra
+sessions fail before comparison. Listing symbol, security series, and ISIN must
+identify exactly one NSE bar. Open, high, low, close, and volume are compared as
+exact Decimal/integer values. A mismatch or missing NSE row produces a persisted
+failed report and process exit code 4. A passing report is also persisted, but
+remains non-actionable and cannot itself authorize a trade.
 
 ## Local snapshot semantics
 

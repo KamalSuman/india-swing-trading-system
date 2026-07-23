@@ -13,6 +13,11 @@ from .models import (
     NseSessionFinality,
 )
 from .provider import HistoricalDailyDataConnector
+from .reconciliation import (
+    HISTORICAL_RECONCILIATION_DATASET,
+    HISTORICAL_RECONCILIATION_PROVIDER,
+    HistoricalCandleReconciliationReport,
+)
 from .snapshot_store import (
     LocalMarketSnapshotStore,
     MarketSnapshotIntegrityError,
@@ -26,6 +31,29 @@ class InstrumentLineageError(ValueError):
 
 class HistoricalCollectionError(ValueError):
     pass
+
+
+class HistoricalReconciliationCollector:
+    def __init__(self, store: LocalMarketSnapshotStore) -> None:
+        self.store = store
+
+    def collect(
+        self,
+        report: HistoricalCandleReconciliationReport,
+    ) -> StoredMarketSnapshot:
+        if type(report) is not HistoricalCandleReconciliationReport:
+            raise TypeError(
+                "report must be an exact HistoricalCandleReconciliationReport"
+            )
+        report.verify_content_identity()
+        return self.store.put(
+            dataset=HISTORICAL_RECONCILIATION_DATASET,
+            selection_key=report.historical_batch_id,
+            provider=HISTORICAL_RECONCILIATION_PROVIDER,
+            provider_version=report.policy_version,
+            observed_at=report.reconciled_at,
+            normalized_payload=report,
+        )
 
 
 def historical_dataset_name(provider: str) -> str:

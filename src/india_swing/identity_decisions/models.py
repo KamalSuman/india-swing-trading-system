@@ -21,7 +21,18 @@ IDENTITY_REVIEW_POLICY_VERSION = "explicit-evidence-human-review/v1"
 IDENTITY_REVIEW_DATASET = "identity-review-bundles"
 
 ADJUDICATED_IDENTITY_SCHEMA_VERSION = "adjudicated-identity-snapshot/v1"
-ADJUDICATED_IDENTITY_POLICY_VERSION = "all-requirements-accepted-simple-candidates/v1"
+LEGACY_ADJUDICATED_IDENTITY_POLICY_VERSION = (
+    "all-requirements-accepted-simple-candidates/v1"
+)
+ADJUDICATED_IDENTITY_POLICY_VERSION = (
+    "all-requirements-accepted-reviewed-identifier-corrections/v2"
+)
+SUPPORTED_ADJUDICATED_IDENTITY_POLICY_VERSIONS = frozenset(
+    {
+        LEGACY_ADJUDICATED_IDENTITY_POLICY_VERSION,
+        ADJUDICATED_IDENTITY_POLICY_VERSION,
+    }
+)
 STABLE_INSTRUMENT_ID_SCHEME = "nse-cm-stable-instrument-by-validated-isin/v1"
 STABLE_LISTING_ID_SCHEME = "nse-cm-stable-listing-by-instrument-series/v1"
 
@@ -419,7 +430,8 @@ class AdjudicatedIdentitySnapshot:
             raise ValueError("adjudicated identity snapshot must remain collection-only")
         if (
             self.schema_version != ADJUDICATED_IDENTITY_SCHEMA_VERSION
-            or self.policy_version != ADJUDICATED_IDENTITY_POLICY_VERSION
+            or self.policy_version
+            not in SUPPORTED_ADJUDICATED_IDENTITY_POLICY_VERSIONS
         ):
             raise ValueError("unsupported adjudicated identity contract")
         object.__setattr__(self, "stable_identity_assigned", bool(self.listing_observations))

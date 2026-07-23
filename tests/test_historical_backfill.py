@@ -7,8 +7,17 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
+from india_swing.identity import content_id
+from india_swing.identity_decisions import (
+    STABLE_INSTRUMENT_ID_SCHEME,
+    STABLE_LISTING_ID_SCHEME,
+    AdjudicatedIdentitySnapshot,
+    CandidateIdentityResolution,
+    EffectiveStableListingObservation,
+)
 from india_swing.identity_registry import (
     CrossVintageIdentityRegistry,
+    build_identity_adjudication_queue,
     materialize_cross_vintage_identity_registry,
 )
 from india_swing.market_data.backfill import (
@@ -90,6 +99,16 @@ def registry(
     )
 
 
+def security_master_sources(
+    root: Path,
+    identity: CrossVintageIdentityRegistry,
+):
+    store = LocalReferenceArtifactStore(root / "reference")
+    return tuple(
+        store.get(value) for value in identity.source_artifact_ids
+    )
+
+
 def calendar(
     coverage_start: date = DAY_ONE,
     coverage_end: date = DAY_TWO,
@@ -154,12 +173,14 @@ def plan(
     coverage_end: date = DAY_TWO,
     resolver=None,
 ):
+    identity = registry(
+        root,
+        first_rows or [security_row(), tcs_row()],
+        second_rows or [security_row(), tcs_row()],
+    )
     return build_historical_backfill_plan(
-        registry=registry(
-            root,
-            first_rows or [security_row(), tcs_row()],
-            second_rows or [security_row(), tcs_row()],
-        ),
+        registry=identity,
+        security_master_sources=security_master_sources(root, identity),
         calendar=selected_calendar or calendar(coverage_start, coverage_end),
         resolver=resolver or UpstoxIsinInstrumentResolver(),
         coverage_start=coverage_start,
@@ -170,6 +191,99 @@ def plan(
 
 def two_session_body() -> bytes:
     return success_body([candle_row(DAY_TWO), candle_row(DAY_ONE)])
+
+
+def reviewed_snapshot(
+    value: CrossVintageIdentityRegistry,
+    *,
+    corrected_isin: str = "INE009A01021",
+    cutoff: datetime = CUTOFF,
+) -> AdjudicatedIdentitySnapshot:
+    queue = build_identity_adjudication_queue(value)
+    observations = {
+        item.observation_id: item for item in value.observations
+    }
+    resolutions = []
+    listings = []
+    for case in queue.cases:
+        stable_instrument_id = content_id(
+            {
+                "scheme": STABLE_INSTRUMENT_ID_SCHEME,
+                "exchange": "NSE",
+                "segment": "CM",
+                "validated_isin": corrected_isin,
+            },
+            length=64,
+        )
+        accepted = tuple(
+            sorted(
+                content_id(
+                    {
+                        "test": "accepted-review",
+                        "candidate_id": case.candidate_id,
+                        "requirement": requirement.value,
+                    },
+                    length=64,
+                )
+                for requirement in case.requirements
+            )
+        )
+        resolutions.append(
+            CandidateIdentityResolution(
+                candidate_id=case.candidate_id,
+                required_requirements=case.requirements,
+                accepted_decision_ids=accepted,
+                rejected_decision_ids=(),
+                missing_requirements=(),
+                blocker_codes=(),
+                stable_instrument_id=stable_instrument_id,
+            )
+        )
+        for observation_id in case.observation_ids:
+            observation = observations[observation_id]
+            stable_listing_id = content_id(
+                {
+                    "scheme": STABLE_LISTING_ID_SCHEME,
+                    "stable_instrument_id": stable_instrument_id,
+                    "exchange": "NSE",
+                    "segment": "CM",
+                    "series": observation.security_series,
+                },
+                length=64,
+            )
+            listings.append(
+                EffectiveStableListingObservation(
+                    candidate_id=case.candidate_id,
+                    source_observation_id=observation.observation_id,
+                    stable_instrument_id=stable_instrument_id,
+                    stable_listing_id=stable_listing_id,
+                    effective_on=observation.claimed_report_date,
+                    symbol=observation.ticker_symbol,
+                    series=observation.security_series,
+                    isin=corrected_isin,
+                )
+            )
+    return AdjudicatedIdentitySnapshot(
+        source_registry_id=value.registry_id,
+        source_queue_id=queue.queue_id,
+        cutoff=cutoff,
+        knowledge_time=cutoff,
+        evidence_artifact_ids=("e" * 64,),
+        review_bundle_ids=("f" * 64,),
+        resolutions=tuple(
+            sorted(resolutions, key=lambda item: item.candidate_id)
+        ),
+        listing_observations=tuple(
+            sorted(
+                listings,
+                key=lambda item: (
+                    item.effective_on,
+                    item.stable_listing_id,
+                    item.source_observation_id,
+                ),
+            )
+        ),
+    )
 
 
 class HistoricalBackfillPlanningTests(unittest.TestCase):
@@ -223,7 +337,7 @@ class HistoricalBackfillPlanningTests(unittest.TestCase):
     ) -> None:
         rows = [
             security_row(),
-            security_row(SctySrs="BE", FinInstrmId="1595"),
+            security_row(SctySrs="SM", FinInstrmId="1595"),
         ]
         with tempfile.TemporaryDirectory() as temp_dir:
             value = plan(
@@ -241,6 +355,80 @@ class HistoricalBackfillPlanningTests(unittest.TestCase):
             {issue.affected_dates for issue in value.issues},
             {(DAY_ONE,), (DAY_TWO,)},
         )
+
+    def test_deleted_legacy_alias_does_not_block_active_same_isin(self) -> None:
+        rows = [
+            security_row(
+                TckrSymb="OLDINFY",
+                FinInstrmId="2000",
+                DelFlg="Y",
+                SctyStsNrmlMkt="3",
+                ElgbltyNrmlMkt="0",
+            ),
+            security_row(),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            value = plan(
+                Path(temp_dir),
+                first_rows=rows,
+                second_rows=rows,
+            )
+
+        self.assertEqual(value.safe_request_count, 1)
+        self.assertEqual(value.safe_session_count, 2)
+        self.assertEqual(value.requests[0].binding.listing_key, "NSE:INFY")
+        self.assertEqual(
+            {issue.code for issue in value.issues},
+            {HistoricalBackfillIssueCode.DELETED_SECURITY},
+        )
+        self.assertFalse(value.has_blocking_issues)
+
+    def test_normal_market_ineligible_lane_is_explicitly_excluded(self) -> None:
+        suspended = security_row(
+            SctyStsNrmlMkt="1",
+            ElgbltyNrmlMkt="0",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            value = plan(
+                Path(temp_dir),
+                first_rows=[suspended],
+                second_rows=[suspended],
+            )
+
+        self.assertEqual(value.requests, ())
+        self.assertEqual(
+            {issue.code for issue in value.issues},
+            {HistoricalBackfillIssueCode.INELIGIBLE_NORMAL_MARKET},
+        )
+        self.assertEqual(value.exclusion_issue_count, 2)
+        self.assertFalse(value.has_blocking_issues)
+
+    def test_migrated_sme_lane_selects_only_normal_market_eligible_series(
+        self,
+    ) -> None:
+        rows = [
+            security_row(),
+            security_row(
+                SctySrs="SM",
+                FinInstrmId="1595",
+                SctyStsNrmlMkt="1",
+                ElgbltyNrmlMkt="0",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            value = plan(
+                Path(temp_dir),
+                first_rows=rows,
+                second_rows=rows,
+            )
+
+        self.assertEqual(value.safe_request_count, 1)
+        self.assertEqual(value.requests[0].binding.security_series, "EQ")
+        self.assertEqual(
+            {issue.code for issue in value.issues},
+            {HistoricalBackfillIssueCode.INELIGIBLE_NORMAL_MARKET},
+        )
+        self.assertFalse(value.has_blocking_issues)
 
     def test_custom_resolver_can_add_a_provider_without_changing_models(self) -> None:
         class CustomResolver:
@@ -263,6 +451,29 @@ class HistoricalBackfillPlanningTests(unittest.TestCase):
             )
         )
 
+    def test_valid_non_equity_isin_is_reported_not_sent_to_equity_provider(self) -> None:
+        non_equity = security_row(
+            TckrSymb="FUSIONPP",
+            SctySrs="E1",
+            ISIN="IN9139R01028",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            value = plan(
+                Path(temp_dir),
+                first_rows=[non_equity],
+                second_rows=[non_equity],
+            )
+
+        self.assertEqual(value.requests, ())
+        self.assertEqual(
+            {issue.code for issue in value.issues},
+            {HistoricalBackfillIssueCode.UNSUPPORTED_LISTING_LANE},
+        )
+        self.assertEqual(
+            {issue.affected_dates for issue in value.issues},
+            {(DAY_ONE,), (DAY_TWO,)},
+        )
+
     def test_future_knowledge_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -270,12 +481,136 @@ class HistoricalBackfillPlanningTests(unittest.TestCase):
             with self.assertRaisesRegex(HistoricalBackfillError, "not known"):
                 build_historical_backfill_plan(
                     registry=identity,
+                    security_master_sources=security_master_sources(
+                        root, identity
+                    ),
                     calendar=calendar(),
                     resolver=UpstoxIsinInstrumentResolver(),
                     coverage_start=DAY_ONE,
                     coverage_end=DAY_TWO,
                     requested_at=CUTOFF - timedelta(seconds=1),
                 )
+
+    def test_security_master_source_lineage_must_exactly_match_registry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            identity = registry(root, [security_row()], [security_row()])
+            sources = security_master_sources(root, identity)
+            with self.assertRaisesRegex(
+                HistoricalBackfillError,
+                "source lineage",
+            ):
+                build_historical_backfill_plan(
+                    registry=identity,
+                    security_master_sources=tuple(reversed(sources)),
+                    calendar=calendar(),
+                    resolver=UpstoxIsinInstrumentResolver(),
+                    coverage_start=DAY_ONE,
+                    coverage_end=DAY_TWO,
+                    requested_at=REQUESTED_AT,
+                )
+
+    def test_reviewed_identifier_correction_can_enter_a_bound_plan(self) -> None:
+        dummy = security_row(ISIN="DUMMY1594")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            identity = registry(root, [dummy], [dummy])
+            snapshot = reviewed_snapshot(identity)
+            value = build_historical_backfill_plan(
+                registry=identity,
+                security_master_sources=security_master_sources(
+                    root, identity
+                ),
+                calendar=calendar(),
+                resolver=UpstoxIsinInstrumentResolver(),
+                coverage_start=DAY_ONE,
+                coverage_end=DAY_TWO,
+                requested_at=REQUESTED_AT,
+                identity_snapshot=snapshot,
+            )
+
+        self.assertEqual(value.identity_snapshot_id, snapshot.snapshot_id)
+        self.assertEqual(value.safe_session_count, 2)
+        self.assertFalse(
+            any(
+                issue.code
+                is HistoricalBackfillIssueCode.UNVALIDATED_IDENTIFIER
+                for issue in value.issues
+            )
+        )
+        self.assertEqual(
+            {request.binding.isin for request in value.requests},
+            {"INE009A01021"},
+        )
+        self.assertTrue(
+            all(
+                snapshot.snapshot_id
+                in request.binding.source_snapshot_ids
+                for request in value.requests
+            )
+        )
+
+    def test_corrected_identity_requires_snapshot_known_by_requested_at(
+        self,
+    ) -> None:
+        dummy = security_row(ISIN="DUMMY1594")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            identity = registry(root, [dummy], [dummy])
+            snapshot = reviewed_snapshot(
+                identity,
+                cutoff=REQUESTED_AT + timedelta(seconds=1),
+            )
+            with self.assertRaisesRegex(
+                HistoricalBackfillError,
+                "incompatible",
+            ):
+                build_historical_backfill_plan(
+                    registry=identity,
+                    security_master_sources=security_master_sources(
+                        root, identity
+                    ),
+                    calendar=calendar(),
+                    resolver=UpstoxIsinInstrumentResolver(),
+                    coverage_start=DAY_ONE,
+                    coverage_end=DAY_TWO,
+                    requested_at=REQUESTED_AT,
+                    identity_snapshot=snapshot,
+                )
+
+    def test_corrected_identity_requires_provider_isin_capability(self) -> None:
+        class ObservationOnlyResolver:
+            provider = "CUSTOM_DATA"
+            resolver_version = "observation-only/v1"
+
+            @staticmethod
+            def resolve(observation):
+                return f"CUSTOM|{observation.validated_isin}"
+
+        dummy = security_row(ISIN="DUMMY1594")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            identity = registry(root, [dummy], [dummy])
+            value = build_historical_backfill_plan(
+                registry=identity,
+                security_master_sources=security_master_sources(
+                    root, identity
+                ),
+                calendar=calendar(),
+                resolver=ObservationOnlyResolver(),
+                coverage_start=DAY_ONE,
+                coverage_end=DAY_TWO,
+                requested_at=REQUESTED_AT,
+                identity_snapshot=reviewed_snapshot(identity),
+            )
+
+        self.assertEqual(value.requests, ())
+        self.assertEqual(
+            {issue.code for issue in value.issues},
+            {HistoricalBackfillIssueCode.PROVIDER_KEY_UNAVAILABLE},
+        )
 
 
 class HistoricalBackfillRunnerTests(unittest.TestCase):

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from typing import Any
 
 from .models import (
@@ -20,6 +21,12 @@ from .models import (
     InstrumentBatch,
     KiteInstrument,
     NseSessionFinality,
+)
+from .reconciliation import (
+    HistoricalCandleDifference,
+    HistoricalCandleReconciliationReport,
+    HistoricalCandleReconciliationRow,
+    HistoricalReconciliationStatus,
 )
 
 
@@ -62,12 +69,21 @@ _ALLOWED_DATACLASSES = (
     HistoricalDailyCandle,
     HistoricalResponsePage,
     HistoricalDailyCandleBatch,
+    HistoricalCandleDifference,
+    HistoricalCandleReconciliationRow,
+    HistoricalCandleReconciliationReport,
 )
 _TYPE_TO_TAG = {
     value_type: f"{value_type.__module__}.{value_type.__qualname__}"
     for value_type in _ALLOWED_DATACLASSES
 }
 _TAG_TO_TYPE = {tag: value_type for value_type, tag in _TYPE_TO_TAG.items()}
+_ALLOWED_ENUMS = (HistoricalReconciliationStatus,)
+_ENUM_TO_TAG = {
+    value_type: f"{value_type.__module__}.{value_type.__qualname__}"
+    for value_type in _ALLOWED_ENUMS
+}
+_TAG_TO_ENUM = {tag: value_type for value_type, tag in _ENUM_TO_TAG.items()}
 
 
 class MarketPayloadCodecError(ValueError):
@@ -91,6 +107,14 @@ def _check_text(value: str) -> None:
 def _encode(value: object, stack: set[int]) -> object:
     if value is None or isinstance(value, (bool, int)):
         return value
+    if isinstance(value, Enum):
+        tag = _ENUM_TO_TAG.get(type(value))
+        if tag is None:
+            raise MarketPayloadCodecError(
+                f"unsupported market payload enum: {type(value).__name__}"
+            )
+        _check_text(str(value.value))
+        return {"$enum": tag, "value": value.value}
     if isinstance(value, str):
         _check_text(value)
         return value
@@ -194,6 +218,18 @@ def _decode(value: object) -> object:
             return date.fromisoformat(str(value["$date"]))
         except ValueError as exc:
             raise MarketPayloadCodecError("invalid encoded date") from exc
+    if set(value) == {"$enum", "value"}:
+        tag = value["$enum"]
+        raw_value = value["value"]
+        if not isinstance(tag, str) or not isinstance(raw_value, str):
+            raise MarketPayloadCodecError("invalid encoded enum")
+        value_type = _TAG_TO_ENUM.get(tag)
+        if value_type is None:
+            raise MarketPayloadCodecError("unsupported encoded enum")
+        try:
+            return value_type(raw_value)
+        except ValueError as exc:
+            raise MarketPayloadCodecError("invalid encoded enum value") from exc
     if set(value) == {"$tuple"}:
         items = value["$tuple"]
         if not isinstance(items, list):
@@ -272,6 +308,8 @@ def market_payload_record_count(value: object) -> int:
     if isinstance(value, DailyCandleBatch):
         return len(value.candles)
     if isinstance(value, HistoricalDailyCandleBatch):
+        return value.record_count
+    if isinstance(value, HistoricalCandleReconciliationReport):
         return value.record_count
     if isinstance(value, Mapping):
         records = value.get("records")

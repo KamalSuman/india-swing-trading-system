@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from india_swing.identity_decisions import (
+    ADJUDICATED_IDENTITY_POLICY_VERSION,
     IDENTITY_REVIEW_DECLARATION_SCHEMA_VERSION,
     IdentityDecisionConflict,
     IdentityDecisionIntegrityError,
@@ -29,6 +30,7 @@ from india_swing.identity_evidence import (
     LocalIdentityEvidenceArtifactStore,
 )
 from india_swing.identity_registry import (
+    IdentityCandidateBasis,
     LocalIdentityAdjudicationQueueStore,
     LocalIdentityRegistryStore,
     build_identity_adjudication_queue,
@@ -299,6 +301,314 @@ class IdentityDecisionTests(unittest.TestCase):
                     "snapshot-show", "--snapshot-id", materialized["snapshot_id"],
                 ]), 0)
             self.assertEqual(json.loads(output.getvalue())["snapshot_id"], materialized["snapshot_id"])
+
+
+class ReviewedIdentityCorrectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _registry_and_queue(
+        self,
+        rows: list[list[str]],
+        rows_second: list[list[str]] | None = None,
+    ):
+        source = self.root / "NSE_CM_security_15072026.csv.gz"
+        source.write_bytes(master_bytes(rows))
+        clock_values = [DAY_ONE_FIRST, DAY_ONE_VALIDATED]
+        if rows_second is not None:
+            clock_values.extend([DAY_TWO_FIRST, DAY_TWO_VALIDATED])
+        store = LocalReferenceArtifactStore(
+            self.root / "reference",
+            clock=clock_sequence(*clock_values),
+        )
+        sources = [store.import_security_master(source)]
+        if rows_second is not None:
+            second = self.root / "NSE_CM_security_16072026.csv.gz"
+            second.write_bytes(master_bytes(rows_second))
+            sources.append(store.import_security_master(second))
+        registry = materialize_cross_vintage_identity_registry(
+            sources=tuple(sources),
+            cutoff=REGISTRY_CUTOFF,
+        )
+        return registry, build_identity_adjudication_queue(registry)
+
+    def _evidence_and_review(
+        self,
+        *,
+        registry,
+        queue,
+        case,
+        default_isin: str | None,
+        claim_isins: dict[str, str | None] | None = None,
+        claim_listings: dict[str, tuple[str, str]] | None = None,
+    ):
+        source = self.root / f"CML-{case.candidate_id[:8]}.pdf"
+        declaration = self.root / f"CML-{case.candidate_id[:8]}.evidence.json"
+        source.write_bytes(PDF_BYTES)
+        observations = {
+            value.observation_id: value for value in registry.observations
+        }
+        first_observation = observations[case.observation_ids[0]]
+        claims = []
+        for requirement in case.requirements:
+            symbol, series = (claim_listings or {}).get(
+                requirement.value,
+                (
+                    first_observation.ticker_symbol,
+                    first_observation.security_series,
+                ),
+            )
+            claims.append(
+                {
+                    "candidate_id": case.candidate_id,
+                    "requirement": requirement.value,
+                    "effective_date": (
+                        "2026-07-15"
+                        if requirement.value
+                        in {
+                            "OFFICIAL_LISTING_LIFECYCLE",
+                            "OFFICIAL_LISTING_STATUS",
+                        }
+                        else None
+                    ),
+                    "symbol": symbol,
+                    "series": series,
+                    "isin": (claim_isins or {}).get(
+                        requirement.value,
+                        default_isin,
+                    ),
+                    "locator": {
+                        "page": 1,
+                        "row": None,
+                        "section": requirement.value,
+                    },
+                    "claim_text": (
+                        f"Reviewed source statement for {requirement.value}."
+                    ),
+                }
+            )
+        declaration.write_text(
+            json.dumps(
+                {
+                    "schema_version": (
+                        IDENTITY_EVIDENCE_DECLARATION_SCHEMA_VERSION
+                    ),
+                    "exchange": "NSE",
+                    "segment": "CM",
+                    "claimed_authority": "NSE",
+                    "source_kind": "LISTING_CIRCULAR_PDF",
+                    "claimed_document_id": (
+                        f"NSE/LIST/C/2026/{case.candidate_id[:8].upper()}"
+                    ),
+                    "claimed_issue_date": "2026-07-15",
+                    "claimed_publication_at": None,
+                    "claimed_source_url": (
+                        "https://nsearchives.nseindia.com/content/circulars/"
+                        f"{source.name}"
+                    ),
+                    "source_filename": source.name,
+                    "source_media_type": "application/pdf",
+                    "source_byte_count": len(PDF_BYTES),
+                    "source_sha256": hashlib.sha256(PDF_BYTES).hexdigest(),
+                    "claims": claims,
+                }
+            ),
+            encoding="utf-8",
+        )
+        evidence = LocalIdentityEvidenceArtifactStore(
+            self.root / "evidence",
+            clock=clock_sequence(EVIDENCE_FIRST, EVIDENCE_VALIDATED),
+        ).import_source(source, declaration)
+        claims_by_requirement = {
+            value.requirement: value for value in evidence.parsed.claims
+        }
+        review_path = self.root / f"review-{case.candidate_id[:8]}.json"
+        review_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": IDENTITY_REVIEW_DECLARATION_SCHEMA_VERSION,
+                    "queue_id": queue.queue_id,
+                    "source_registry_id": registry.registry_id,
+                    "reviewer_id": "owner:kamal",
+                    "reviewed_at": REVIEWED_AT.isoformat(),
+                    "decisions": [
+                        {
+                            "candidate_id": case.candidate_id,
+                            "requirement": requirement.value,
+                            "outcome": "ACCEPTED",
+                            "evidence_artifact_id": (
+                                evidence.manifest.artifact_id
+                            ),
+                            "evidence_claim_id": (
+                                claims_by_requirement[requirement].claim_id
+                            ),
+                            "rationale": (
+                                f"Reviewed exact evidence for {requirement.value}."
+                            ),
+                        }
+                        for requirement in case.requirements
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        review = LocalIdentityReviewBundleStore(
+            self.root / "evidence",
+            clock=clock_sequence(REVIEW_FIRST, REVIEW_VALIDATED),
+        ).import_declaration(review_path)
+        return evidence, review
+
+    def _materialize(self, registry, queue, evidence, review):
+        return materialize_adjudicated_identity_snapshot(
+            registry=registry,
+            queue=queue,
+            evidence_artifacts=(evidence,),
+            review_bundles=(review,),
+            cutoff=SNAPSHOT_CUTOFF,
+        )
+
+    def test_reviewed_unvalidated_identifier_assigns_claimed_isin(self) -> None:
+        registry, queue = self._registry_and_queue(
+            [security_row(ISIN="DUMMY1594")]
+        )
+        case = queue.cases[0]
+        evidence, review = self._evidence_and_review(
+            registry=registry,
+            queue=queue,
+            case=case,
+            default_isin="INE009A01021",
+        )
+        snapshot = self._materialize(registry, queue, evidence, review)
+
+        self.assertEqual(
+            snapshot.policy_version,
+            ADJUDICATED_IDENTITY_POLICY_VERSION,
+        )
+        self.assertTrue(snapshot.stable_identity_assigned)
+        self.assertEqual(
+            {value.isin for value in snapshot.listing_observations},
+            {"INE009A01021"},
+        )
+        self.assertEqual(snapshot.resolutions[0].blocker_codes, ())
+
+    def test_accepted_identifier_claim_requires_an_isin(self) -> None:
+        registry, queue = self._registry_and_queue(
+            [security_row(ISIN="DUMMY1594")]
+        )
+        case = queue.cases[0]
+        evidence, review = self._evidence_and_review(
+            registry=registry,
+            queue=queue,
+            case=case,
+            default_isin=None,
+        )
+        with self.assertRaisesRegex(
+            IdentityDecisionIntegrityError,
+            "does not contain an ISIN",
+        ):
+            self._materialize(registry, queue, evidence, review)
+
+    def test_identifier_claim_must_target_the_source_listing(self) -> None:
+        registry, queue = self._registry_and_queue(
+            [security_row(ISIN="DUMMY1594")]
+        )
+        case = queue.cases[0]
+        evidence, review = self._evidence_and_review(
+            registry=registry,
+            queue=queue,
+            case=case,
+            default_isin="INE009A01021",
+            claim_listings={"VALIDATED_IDENTIFIER": ("TCS", "EQ")},
+        )
+        with self.assertRaisesRegex(
+            IdentityDecisionIntegrityError,
+            "another listing",
+        ):
+            self._materialize(registry, queue, evidence, review)
+
+    def test_all_accepted_non_null_isin_claims_must_agree(self) -> None:
+        registry, queue = self._registry_and_queue(
+            [security_row(ISIN="DUMMY1594")]
+        )
+        case = queue.cases[0]
+        evidence, review = self._evidence_and_review(
+            registry=registry,
+            queue=queue,
+            case=case,
+            default_isin="INE009A01021",
+            claim_isins={
+                "AUTHORIZED_SOURCE_PROVENANCE": "INE009A01039",
+            },
+        )
+        with self.assertRaisesRegex(
+            IdentityDecisionIntegrityError,
+            "conflicting ISIN",
+        ):
+            self._materialize(registry, queue, evidence, review)
+
+    def test_reviewed_validated_conflict_can_assign_stable_identity(self) -> None:
+        registry, queue = self._registry_and_queue(
+            [
+                security_row(),
+                security_row(FinInstrmId="2000", TckrSymb="INFYALT"),
+            ]
+        )
+        case = queue.cases[0]
+        evidence, review = self._evidence_and_review(
+            registry=registry,
+            queue=queue,
+            case=case,
+            default_isin="INE009A01021",
+        )
+        snapshot = self._materialize(registry, queue, evidence, review)
+
+        self.assertTrue(snapshot.stable_identity_assigned)
+        self.assertEqual(len(snapshot.listing_observations), 2)
+        self.assertEqual(snapshot.resolutions[0].blocker_codes, ())
+
+    def test_unvalidated_conflict_stays_unsupported_without_identifier_review(
+        self,
+    ) -> None:
+        registry, queue = self._registry_and_queue(
+            [security_row(ISIN="DUMMY1594")],
+            [
+                security_row(
+                    TckrSymb="INFYALT",
+                    ISIN="INE009A01021",
+                )
+            ],
+        )
+        candidate = next(
+            value
+            for value in registry.candidates
+            if value.basis
+            is IdentityCandidateBasis.UNVALIDATED_SOURCE_IDENTIFIER
+        )
+        case = next(
+            value for value in queue.cases if value.candidate_id == candidate.candidate_id
+        )
+        evidence, review = self._evidence_and_review(
+            registry=registry,
+            queue=queue,
+            case=case,
+            default_isin="INE009A01021",
+        )
+        snapshot = self._materialize(registry, queue, evidence, review)
+        resolution = next(
+            value
+            for value in snapshot.resolutions
+            if value.candidate_id == candidate.candidate_id
+        )
+
+        self.assertIn(
+            IdentityResolutionBlocker.UNSUPPORTED_CANDIDATE_SHAPE,
+            resolution.blocker_codes,
+        )
+        self.assertIsNone(resolution.stable_instrument_id)
 
 
 if __name__ == "__main__":

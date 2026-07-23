@@ -14,6 +14,13 @@ from typing import Protocol
 
 from india_swing.domain.models import INDIA_STANDARD_TIME
 from india_swing.identity import content_id
+from india_swing.identity_decisions import (
+    ADJUDICATED_IDENTITY_POLICY_VERSION,
+    STABLE_INSTRUMENT_ID_SCHEME,
+    STABLE_LISTING_ID_SCHEME,
+    AdjudicatedIdentitySnapshot,
+)
+from india_swing.identity_registry import build_identity_adjudication_queue
 from india_swing.identity_registry.models import (
     CrossVintageIdentityRegistry,
     IdentityCandidateBasis,
@@ -21,6 +28,10 @@ from india_swing.identity_registry.models import (
     IdentityObservation,
 )
 from india_swing.reference.calendar import CalendarSnapshot
+from india_swing.reference_data.artifact_store import (
+    verify_stored_reference_provenance,
+)
+from india_swing.reference_data.models import StoredReferenceArtifact
 
 from .collection import (
     HistoricalMarketDataCollector,
@@ -31,6 +42,7 @@ from .models import (
     HistoricalDailyRequest,
     HistoricalInstrumentBinding,
     MARKET_DATA_PROVIDER_PATTERN,
+    NSE_EQUITY_ISIN_PATTERN,
     NSE_SECURITY_SERIES_PATTERN,
     SHA256_IDENTIFIER,
 )
@@ -39,13 +51,16 @@ from .snapshot_store import (
     LocalMarketSnapshotStore,
     StoredMarketSnapshot,
 )
+from .upstox_instruments import UpstoxNseInstrumentCatalog
 
 
-HISTORICAL_BACKFILL_PLAN_SCHEMA_VERSION = "historical-backfill-plan/v1"
+HISTORICAL_BACKFILL_PLAN_SCHEMA_VERSION = "historical-backfill-plan/v2"
 HISTORICAL_BACKFILL_PROGRESS_SCHEMA_VERSION = "historical-backfill-progress/v1"
 HISTORICAL_BACKFILL_STATE_DATASET = "historical-backfill-state"
 UPSTOX_ISIN_RESOLVER_VERSION = "upstox-nse-eq-isin/v1"
+UPSTOX_CATALOG_RESOLVER_VERSION = "upstox-nse-pinned-catalog/v1"
 PROGRESS_FILENAME = "progress.json"
+SUPPORTED_SWING_SECURITY_SERIES = frozenset({"EQ", "SM"})
 
 _CANONICAL_TEXT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@:+\-]{0,127}\Z")
 
@@ -68,7 +83,9 @@ class HistoricalBackfillIssueCode(str, Enum):
     CONFLICTING_IDENTITY = "CONFLICTING_IDENTITY"
     UNVALIDATED_IDENTIFIER = "UNVALIDATED_IDENTIFIER"
     DELETED_SECURITY = "DELETED_SECURITY"
+    INELIGIBLE_NORMAL_MARKET = "INELIGIBLE_NORMAL_MARKET"
     PROVIDER_KEY_UNAVAILABLE = "PROVIDER_KEY_UNAVAILABLE"
+    PROVIDER_CATALOG_ABSENT = "PROVIDER_CATALOG_ABSENT"
     AMBIGUOUS_PROVIDER_KEY = "AMBIGUOUS_PROVIDER_KEY"
     UNSUPPORTED_LISTING_LANE = "UNSUPPORTED_LISTING_LANE"
 
@@ -100,6 +117,8 @@ class ProviderInstrumentResolver(Protocol):
 
     def resolve(self, observation: IdentityObservation) -> str: ...
 
+    def resolve_isin(self, isin: str) -> str: ...
+
 
 class UpstoxIsinInstrumentResolver:
     """Derive the documented Upstox NSE equity key from a validated ISIN."""
@@ -120,7 +139,99 @@ class UpstoxIsinInstrumentResolver:
             raise HistoricalBackfillIntegrityError(
                 "provider instrument resolution requires a validated ISIN"
             )
-        return f"NSE_EQ|{observation.validated_isin}"
+        return self.resolve_isin(observation.validated_isin)
+
+    def resolve_isin(self, isin: str) -> str:
+        if (
+            type(isin) is not str
+            or NSE_EQUITY_ISIN_PATTERN.fullmatch(isin) is None
+        ):
+            raise HistoricalBackfillIntegrityError(
+                "provider instrument resolution requires a validated ISIN"
+            )
+        return f"NSE_EQ|{isin}"
+
+
+class UpstoxCatalogInstrumentResolver:
+    """Validate Upstox ISIN routing through a sealed current BOD catalog.
+
+    The catalog is provider-routing evidence observed at collection time. NSE
+    point-in-time security masters remain the authority for historical universe
+    membership, so a catalog miss is reported rather than silently deleting the
+    historical listing.
+    """
+
+    def __init__(self, catalog: UpstoxNseInstrumentCatalog) -> None:
+        if type(catalog) is not UpstoxNseInstrumentCatalog:
+            raise TypeError("catalog must be an exact UpstoxNseInstrumentCatalog")
+        catalog.verify_content_identity()
+        self.catalog = catalog
+        by_isin: dict[str, list[str]] = defaultdict(list)
+        for value in catalog.instruments:
+            by_isin[value.isin].append(value.instrument_key)
+        self._by_isin = {
+            key: tuple(sorted(set(values)))
+            for key, values in by_isin.items()
+        }
+
+    @property
+    def provider(self) -> str:
+        return "UPSTOX"
+
+    @property
+    def resolver_version(self) -> str:
+        return (
+            f"{UPSTOX_CATALOG_RESOLVER_VERSION}@sha256:"
+            f"{self.catalog.catalog_id}"
+        )
+
+    @property
+    def knowledge_time(self) -> datetime:
+        return self.catalog.observed_at
+
+    def resolve(self, observation: IdentityObservation) -> str:
+        if type(observation) is not IdentityObservation:
+            raise TypeError("observation must be an exact IdentityObservation")
+        observation.verify_content_identity()
+        if observation.validated_isin is None:
+            raise HistoricalBackfillIntegrityError(
+                "provider instrument resolution requires a validated ISIN"
+            )
+        return self.resolve_isin(observation.validated_isin)
+
+    def resolve_isin(self, isin: str) -> str:
+        if (
+            type(isin) is not str
+            or NSE_EQUITY_ISIN_PATTERN.fullmatch(isin) is None
+        ):
+            raise HistoricalBackfillIntegrityError(
+                "provider instrument resolution requires a validated ISIN"
+            )
+        expected = f"NSE_EQ|{isin}"
+        matches = self._by_isin.get(isin, ())
+        if matches and matches != (expected,):
+            raise HistoricalBackfillIntegrityError(
+                "pinned Upstox catalog contains inconsistent ISIN routing"
+            )
+        return expected
+
+    def catalog_contains(self, observation: IdentityObservation) -> bool:
+        if type(observation) is not IdentityObservation:
+            raise TypeError("observation must be an exact IdentityObservation")
+        observation.verify_content_identity()
+        return observation.validated_isin is not None and (
+            self.catalog_contains_isin(observation.validated_isin)
+        )
+
+    def catalog_contains_isin(self, isin: str) -> bool:
+        if (
+            type(isin) is not str
+            or NSE_EQUITY_ISIN_PATTERN.fullmatch(isin) is None
+        ):
+            raise HistoricalBackfillIntegrityError(
+                "catalog membership requires a validated ISIN"
+            )
+        return isin in self._by_isin
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +277,15 @@ class HistoricalBackfillIssue:
                 "historical backfill issue identity failed"
             )
 
+    @property
+    def blocks_collection(self) -> bool:
+        return self.code not in {
+            HistoricalBackfillIssueCode.DELETED_SECURITY,
+            HistoricalBackfillIssueCode.INELIGIBLE_NORMAL_MARKET,
+            HistoricalBackfillIssueCode.PROVIDER_CATALOG_ABSENT,
+            HistoricalBackfillIssueCode.UNSUPPORTED_LISTING_LANE,
+        }
+
 
 def _request_sort_key(request: HistoricalDailyRequest) -> tuple[object, ...]:
     return (
@@ -189,6 +309,7 @@ class HistoricalBackfillPlan:
     requested_at: datetime
     requests: tuple[HistoricalDailyRequest, ...]
     issues: tuple[HistoricalBackfillIssue, ...]
+    identity_snapshot_id: str | None = None
     collection_only: bool = True
     schema_version: str = HISTORICAL_BACKFILL_PLAN_SCHEMA_VERSION
     plan_id: str = field(init=False)
@@ -201,6 +322,8 @@ class HistoricalBackfillPlan:
         ):
             raise ValueError("resolver_version must be bounded canonical text")
         _sha256(self.identity_registry_id, "identity_registry_id")
+        if self.identity_snapshot_id is not None:
+            _sha256(self.identity_snapshot_id, "identity_snapshot_id")
         _sha256(self.calendar_snapshot_id, "calendar_snapshot_id")
         if type(self.coverage_start) is not date or type(self.coverage_end) is not date:
             raise TypeError("plan coverage bounds must be exact dates")
@@ -271,6 +394,33 @@ class HistoricalBackfillPlan:
     def has_coverage_issues(self) -> bool:
         return bool(self.issues)
 
+    @property
+    def blocking_issue_count(self) -> int:
+        return sum(value.blocks_collection for value in self.issues)
+
+    @property
+    def exclusion_issue_count(self) -> int:
+        return sum(
+            value.code
+            in {
+                HistoricalBackfillIssueCode.DELETED_SECURITY,
+                HistoricalBackfillIssueCode.INELIGIBLE_NORMAL_MARKET,
+                HistoricalBackfillIssueCode.UNSUPPORTED_LISTING_LANE,
+            }
+            for value in self.issues
+        )
+
+    @property
+    def warning_issue_count(self) -> int:
+        return sum(
+            value.code is HistoricalBackfillIssueCode.PROVIDER_CATALOG_ABSENT
+            for value in self.issues
+        )
+
+    @property
+    def has_blocking_issues(self) -> bool:
+        return any(value.blocks_collection for value in self.issues)
+
     def _calculated_id(self) -> str:
         return content_id(
             {
@@ -325,11 +475,13 @@ def _runs(
 def build_historical_backfill_plan(
     *,
     registry: CrossVintageIdentityRegistry,
+    security_master_sources: tuple[StoredReferenceArtifact, ...],
     calendar: CalendarSnapshot,
     resolver: ProviderInstrumentResolver,
     coverage_start: date,
     coverage_end: date,
     requested_at: datetime,
+    identity_snapshot: AdjudicatedIdentitySnapshot | None = None,
 ) -> HistoricalBackfillPlan:
     """Build only exact positive-observation runs; never interpolate absence."""
 
@@ -339,6 +491,60 @@ def build_historical_backfill_plan(
         raise TypeError("calendar must be an exact CalendarSnapshot")
     registry.verify_content_identity()
     calendar.verify_content_identity()
+    if (
+        type(security_master_sources) is not tuple
+        or not security_master_sources
+        or any(
+            type(value) is not StoredReferenceArtifact
+            for value in security_master_sources
+        )
+    ):
+        raise TypeError(
+            "security_master_sources must be a non-empty exact artifact tuple"
+        )
+    for source in security_master_sources:
+        verify_stored_reference_provenance(source)
+    if (
+        tuple(
+            value.manifest.artifact_id for value in security_master_sources
+        )
+        != registry.source_artifact_ids
+        or tuple(value.manifest for value in security_master_sources)
+        != registry.source_manifests
+    ):
+        raise HistoricalBackfillError(
+            "security-master source lineage disagrees with the identity registry"
+        )
+    records_by_source = {
+        source.manifest.artifact_id: {
+            value.source_record_id: value for value in source.parsed.records
+        }
+        for source in security_master_sources
+    }
+    source_record_by_observation = {}
+    for observation in registry.observations:
+        record = records_by_source.get(
+            observation.source_artifact_id,
+            {},
+        ).get(observation.source_record_id)
+        if (
+            record is None
+            or record.normalized_row_sha256
+            != observation.normalized_row_sha256
+            or record.financial_instrument_id
+            != observation.financial_instrument_id
+            or record.ticker_symbol != observation.ticker_symbol
+            or record.security_series != observation.security_series
+            or record.instrument_name != observation.instrument_name
+            or record.raw_source_identifier
+            != observation.raw_source_identifier
+            or record.validated_isin != observation.validated_isin
+            or record.delete_flag != observation.delete_flag
+        ):
+            raise HistoricalBackfillError(
+                "security-master source record disagrees with identity observation"
+            )
+        source_record_by_observation[observation.observation_id] = record
     if (calendar.exchange, calendar.segment) != ("NSE", "CM"):
         raise HistoricalBackfillError("historical backfill calendar must be NSE CM")
     if type(coverage_start) is not date or type(coverage_end) is not date:
@@ -360,6 +566,128 @@ def build_historical_backfill_plan(
         raise HistoricalBackfillError(
             "historical backfill coverage cannot include current or future dates"
         )
+    observations_by_id = {
+        value.observation_id: value for value in registry.observations
+    }
+    candidates_by_id = {
+        value.candidate_id: value for value in registry.candidates
+    }
+    candidate_id_by_observation = {
+        observation_id: candidate.candidate_id
+        for candidate in registry.candidates
+        for observation_id in candidate.observation_ids
+    }
+    adjudicated_by_observation = {}
+    if identity_snapshot is not None:
+        if type(identity_snapshot) is not AdjudicatedIdentitySnapshot:
+            raise TypeError(
+                "identity_snapshot must be an exact AdjudicatedIdentitySnapshot"
+            )
+        identity_snapshot.verify_content_identity()
+        if (
+            identity_snapshot.source_registry_id != registry.registry_id
+            or identity_snapshot.cutoff > requested_at
+            or identity_snapshot.knowledge_time > requested_at
+            or {
+                value.candidate_id for value in identity_snapshot.resolutions
+            }
+            != set(candidates_by_id)
+        ):
+            raise HistoricalBackfillError(
+                "adjudicated identity snapshot lineage is incompatible with the plan"
+            )
+        resolutions = {
+            value.candidate_id: value
+            for value in identity_snapshot.resolutions
+        }
+        queue = build_identity_adjudication_queue(registry)
+        if identity_snapshot.source_queue_id != queue.queue_id:
+            raise HistoricalBackfillError(
+                "adjudicated identity snapshot targets another queue"
+            )
+        cases = {value.candidate_id: value for value in queue.cases}
+        for candidate_id, resolution in resolutions.items():
+            case = cases[candidate_id]
+            if (
+                resolution.required_requirements != case.requirements
+                or len(resolution.accepted_decision_ids)
+                != len(case.requirements)
+                - len(resolution.missing_requirements)
+                or resolution.rejected_decision_ids
+                and resolution.stable_instrument_id is not None
+            ):
+                raise HistoricalBackfillError(
+                    "adjudicated identity resolution disagrees with its queue"
+                )
+        for value in identity_snapshot.listing_observations:
+            observation = observations_by_id.get(value.source_observation_id)
+            candidate_id = candidate_id_by_observation.get(
+                value.source_observation_id
+            )
+            candidate = candidates_by_id.get(value.candidate_id)
+            resolution = resolutions.get(value.candidate_id)
+            expected_instrument_id = content_id(
+                {
+                    "scheme": STABLE_INSTRUMENT_ID_SCHEME,
+                    "exchange": "NSE",
+                    "segment": "CM",
+                    "validated_isin": value.isin,
+                },
+                length=64,
+            )
+            expected_listing_id = content_id(
+                {
+                    "scheme": STABLE_LISTING_ID_SCHEME,
+                    "stable_instrument_id": expected_instrument_id,
+                    "exchange": "NSE",
+                    "segment": "CM",
+                    "series": value.series,
+                },
+                length=64,
+            )
+            if (
+                observation is None
+                or candidate is None
+                or candidate_id != value.candidate_id
+                or resolution is None
+                or resolution.blocker_codes
+                or resolution.missing_requirements
+                or resolution.rejected_decision_ids
+                or len(resolution.accepted_decision_ids)
+                != len(resolution.required_requirements)
+                or resolution.stable_instrument_id
+                != value.stable_instrument_id
+                or value.stable_instrument_id != expected_instrument_id
+                or value.stable_listing_id != expected_listing_id
+                or observation.claimed_report_date != value.effective_on
+                or observation.ticker_symbol != value.symbol
+                or observation.security_series != value.series
+                or value.source_observation_id in adjudicated_by_observation
+                or (
+                    (
+                        candidate.basis
+                        is not IdentityCandidateBasis.VALIDATED_ISIN
+                        or candidate.status is IdentityCandidateStatus.CONFLICT
+                    )
+                    and identity_snapshot.policy_version
+                    != ADJUDICATED_IDENTITY_POLICY_VERSION
+                )
+                or (
+                    (
+                        candidate.basis
+                        is not IdentityCandidateBasis.VALIDATED_ISIN
+                        or candidate.status is IdentityCandidateStatus.CONFLICT
+                    )
+                    and (
+                        not identity_snapshot.evidence_artifact_ids
+                        or not identity_snapshot.review_bundle_ids
+                    )
+                )
+            ):
+                raise HistoricalBackfillError(
+                    "adjudicated listing evidence disagrees with the identity registry"
+                )
+            adjudicated_by_observation[value.source_observation_id] = value
     try:
         provider = resolver.provider
         resolver_version = resolver.resolver_version
@@ -375,6 +703,21 @@ def build_historical_backfill_plan(
         raise HistoricalBackfillError(
             "historical provider resolver version is invalid"
         )
+    resolver_knowledge_time = getattr(resolver, "knowledge_time", None)
+    if resolver_knowledge_time is not None:
+        try:
+            resolver_knowledge_time = _utc(
+                resolver_knowledge_time,
+                "historical provider resolver knowledge_time",
+            )
+        except (TypeError, ValueError):
+            raise HistoricalBackfillError(
+                "historical provider resolver knowledge time is invalid"
+            ) from None
+        if resolver_knowledge_time > requested_at:
+            raise HistoricalBackfillError(
+                "historical provider resolver was not known at requested_at"
+            )
 
     selected_days = tuple(
         value
@@ -416,33 +759,68 @@ def build_historical_backfill_plan(
 
     resolved: dict[
         tuple[date, str],
-        list[tuple[IdentityObservation, str]],
+        list[tuple[IdentityObservation, str, str]],
     ] = defaultdict(list)
+    hard_conflicts_by_session: dict[date, set[str]] = defaultdict(set)
+    for session in sessions:
+        eligible = tuple(
+            value
+            for value in observations_by_date.get(session, ())
+            if (
+                value.delete_flag == "N"
+                and source_record_by_observation[
+                    value.observation_id
+                ].market_eligibility[0].status
+                == 6
+                and source_record_by_observation[
+                    value.observation_id
+                ].market_eligibility[0].eligible
+                and value.security_series in SUPPORTED_SWING_SECURITY_SERIES
+                and re.fullmatch(
+                    r"[A-Z0-9][A-Z0-9&\-]{0,31}",
+                    value.ticker_symbol,
+                )
+                is not None
+            )
+        )
+        by_isin_series: dict[
+            tuple[str, str], list[IdentityObservation]
+        ] = defaultdict(list)
+        by_financial_id: dict[int, list[IdentityObservation]] = defaultdict(list)
+        by_listing_key: dict[str, list[IdentityObservation]] = defaultdict(list)
+        for observation in eligible:
+            if observation.validated_isin is not None:
+                by_isin_series[
+                    (
+                        observation.validated_isin,
+                        observation.security_series,
+                    )
+                ].append(observation)
+            by_financial_id[observation.financial_instrument_id].append(
+                observation
+            )
+            by_listing_key[observation.listing_key].append(observation)
+        for values in by_isin_series.values():
+            if len(values) > 1:
+                hard_conflicts_by_session[session].update(
+                    value.observation_id for value in values
+                )
+        for values in (
+            *by_financial_id.values(),
+            *by_listing_key.values(),
+        ):
+            if len({value.identifier_key for value in values}) > 1:
+                hard_conflicts_by_session[session].update(
+                    value.observation_id for value in values
+                )
+
     rejected_observations: set[str] = set()
     for session in sessions:
         for observation in observations_by_date.get(session, ()):
             candidate = candidates_by_observation[observation.observation_id]
-            if candidate.status is IdentityCandidateStatus.CONFLICT:
-                issue = _issue(
-                    HistoricalBackfillIssueCode.CONFLICTING_IDENTITY,
-                    (session,),
-                    (observation,),
-                )
-                issues[issue.issue_id] = issue
-                rejected_observations.add(observation.observation_id)
-                continue
-            if (
-                candidate.basis is not IdentityCandidateBasis.VALIDATED_ISIN
-                or observation.validated_isin is None
-            ):
-                issue = _issue(
-                    HistoricalBackfillIssueCode.UNVALIDATED_IDENTIFIER,
-                    (session,),
-                    (observation,),
-                )
-                issues[issue.issue_id] = issue
-                rejected_observations.add(observation.observation_id)
-                continue
+            adjudicated = adjudicated_by_observation.get(
+                observation.observation_id
+            )
             if observation.delete_flag != "N":
                 issue = _issue(
                     HistoricalBackfillIssueCode.DELETED_SECURITY,
@@ -453,7 +831,77 @@ def build_historical_backfill_plan(
                 rejected_observations.add(observation.observation_id)
                 continue
             if (
-                re.fullmatch(r"[A-Z0-9][A-Z0-9&\-]{0,31}", observation.ticker_symbol)
+                observation.security_series
+                not in SUPPORTED_SWING_SECURITY_SERIES
+                or re.fullmatch(
+                    r"[A-Z0-9][A-Z0-9&\-]{0,31}",
+                    observation.ticker_symbol,
+                )
+                is None
+            ):
+                issue = _issue(
+                    HistoricalBackfillIssueCode.UNSUPPORTED_LISTING_LANE,
+                    (session,),
+                    (observation,),
+                )
+                issues[issue.issue_id] = issue
+                rejected_observations.add(observation.observation_id)
+                continue
+            if (
+                source_record_by_observation[
+                    observation.observation_id
+                ].market_eligibility[0].status
+                != 6
+                or not source_record_by_observation[
+                    observation.observation_id
+                ].market_eligibility[0].eligible
+            ):
+                issue = _issue(
+                    HistoricalBackfillIssueCode.INELIGIBLE_NORMAL_MARKET,
+                    (session,),
+                    (observation,),
+                )
+                issues[issue.issue_id] = issue
+                rejected_observations.add(observation.observation_id)
+                continue
+            if (
+                observation.observation_id
+                in hard_conflicts_by_session.get(session, set())
+                and adjudicated is None
+            ):
+                issue = _issue(
+                    HistoricalBackfillIssueCode.CONFLICTING_IDENTITY,
+                    (session,),
+                    (observation,),
+                )
+                issues[issue.issue_id] = issue
+                rejected_observations.add(observation.observation_id)
+                continue
+            effective_isin = (
+                adjudicated.isin
+                if adjudicated is not None
+                else observation.validated_isin
+            )
+            if (
+                effective_isin is None
+                or (
+                    candidate.basis
+                    is not IdentityCandidateBasis.VALIDATED_ISIN
+                    and adjudicated is None
+                )
+            ):
+                issue = _issue(
+                    HistoricalBackfillIssueCode.UNVALIDATED_IDENTIFIER,
+                    (session,),
+                    (observation,),
+                )
+                issues[issue.issue_id] = issue
+                rejected_observations.add(observation.observation_id)
+                continue
+            if (
+                NSE_EQUITY_ISIN_PATTERN.fullmatch(
+                    effective_isin
+                )
                 is None
                 or NSE_SECURITY_SERIES_PATTERN.fullmatch(
                     observation.security_series
@@ -469,7 +917,15 @@ def build_historical_backfill_plan(
                 rejected_observations.add(observation.observation_id)
                 continue
             try:
-                provider_key = resolver.resolve(observation)
+                if effective_isin == observation.validated_isin:
+                    provider_key = resolver.resolve(observation)
+                else:
+                    resolve_isin = getattr(resolver, "resolve_isin", None)
+                    if not callable(resolve_isin):
+                        raise HistoricalBackfillIntegrityError(
+                            "provider resolver cannot use adjudicated ISIN evidence"
+                        )
+                    provider_key = resolve_isin(effective_isin)
             except Exception:
                 issue = _issue(
                     HistoricalBackfillIssueCode.PROVIDER_KEY_UNAVAILABLE,
@@ -493,9 +949,52 @@ def build_historical_backfill_plan(
                 issues[issue.issue_id] = issue
                 rejected_observations.add(observation.observation_id)
                 continue
-            resolved[(session, provider_key)].append((observation, provider_key))
+            catalog_contains = getattr(resolver, "catalog_contains", None)
+            if callable(catalog_contains):
+                try:
+                    if effective_isin == observation.validated_isin:
+                        present = catalog_contains(observation)
+                    else:
+                        contains_isin = getattr(
+                            resolver,
+                            "catalog_contains_isin",
+                            None,
+                        )
+                        if not callable(contains_isin):
+                            raise HistoricalBackfillIntegrityError(
+                                "provider catalog cannot use adjudicated ISIN evidence"
+                            )
+                        present = contains_isin(effective_isin)
+                except Exception:
+                    issue = _issue(
+                        HistoricalBackfillIssueCode.PROVIDER_KEY_UNAVAILABLE,
+                        (session,),
+                        (observation,),
+                    )
+                    issues[issue.issue_id] = issue
+                    rejected_observations.add(observation.observation_id)
+                    continue
+                if type(present) is not bool:
+                    issue = _issue(
+                        HistoricalBackfillIssueCode.PROVIDER_KEY_UNAVAILABLE,
+                        (session,),
+                        (observation,),
+                    )
+                    issues[issue.issue_id] = issue
+                    rejected_observations.add(observation.observation_id)
+                    continue
+                if not present:
+                    issue = _issue(
+                        HistoricalBackfillIssueCode.PROVIDER_CATALOG_ABSENT,
+                        (session,),
+                        (observation,),
+                    )
+                    issues[issue.issue_id] = issue
+            resolved[(session, provider_key)].append(
+                (observation, provider_key, effective_isin)
+            )
 
-    accepted: list[tuple[IdentityObservation, str]] = []
+    accepted: list[tuple[IdentityObservation, str, str]] = []
     for (session, _), values in sorted(resolved.items()):
         if len(values) != 1:
             observations = tuple(item[0] for item in values)
@@ -514,14 +1013,13 @@ def build_historical_backfill_plan(
         tuple[str, str, str, str, str],
         list[IdentityObservation],
     ] = defaultdict(list)
-    for observation, provider_key in accepted:
+    for observation, provider_key, effective_isin in accepted:
         candidate = candidates_by_observation[observation.observation_id]
-        assert observation.validated_isin is not None
         lane = (
             candidate.candidate_id,
             observation.ticker_symbol,
             observation.security_series,
-            observation.validated_isin,
+            effective_isin,
             provider_key,
         )
         lanes[lane].append(observation)
@@ -553,6 +1051,11 @@ def build_historical_backfill_plan(
                             registry.registry_id,
                             calendar.snapshot_id,
                             *(
+                                (identity_snapshot.snapshot_id,)
+                                if identity_snapshot is not None
+                                else ()
+                            ),
+                            *(
                                 value.source_artifact_id
                                 for value in run_observations
                             ),
@@ -578,6 +1081,11 @@ def build_historical_backfill_plan(
         requested_at=requested_at,
         requests=tuple(sorted(requests, key=_request_sort_key)),
         issues=tuple(issues[value] for value in sorted(issues)),
+        identity_snapshot_id=(
+            identity_snapshot.snapshot_id
+            if identity_snapshot is not None
+            else None
+        ),
     )
 
 

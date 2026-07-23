@@ -283,6 +283,8 @@ class LocalIdentityRegistryStore:
             raise IdentityRegistryIntegrityError(
                 "identity registry does not replay from sealed source artifacts"
             )
+        del replayed
+        del sources
         payload = encode_identity_registry(registry)
         provisional = IdentityRegistryStoreManifest(
             schema_version=IDENTITY_REGISTRY_STORE_SCHEMA_VERSION,
@@ -349,7 +351,10 @@ class LocalIdentityRegistryStore:
             raise IdentityRegistryStoreConflict(
                 "identity-registry store is currently unavailable"
             ) from exc
-        return self._read_path(target)
+        return self._read_path(
+            target,
+            expected_created=(manifest, registry, payload),
+        )
 
     def get(self, registry_id: str) -> StoredIdentityRegistry:
         if not isinstance(registry_id, str) or _SHA256.fullmatch(registry_id) is None:
@@ -361,7 +366,17 @@ class LocalIdentityRegistryStore:
             )
         return self._read_path(target)
 
-    def _read_path(self, path: Path) -> StoredIdentityRegistry:
+    def _read_path(
+        self,
+        path: Path,
+        *,
+        expected_created: tuple[
+            IdentityRegistryStoreManifest,
+            CrossVintageIdentityRegistry,
+            bytes,
+        ]
+        | None = None,
+    ) -> StoredIdentityRegistry:
         try:
             if not path.is_dir() or _is_link_like(path):
                 raise IdentityRegistryIntegrityError(
@@ -397,6 +412,34 @@ class LocalIdentityRegistryStore:
             or _sha256(payload) != manifest.payload_sha256
         ):
             raise IdentityRegistryIntegrityError("registry payload integrity mismatch")
+        if expected_created is not None:
+            expected_manifest, expected_registry, expected_payload = (
+                expected_created
+            )
+            expected_registry.verify_content_identity()
+            if (
+                manifest != expected_manifest
+                or payload != expected_payload
+                or expected_registry.registry_id != manifest.registry_id
+                or expected_registry.knowledge_time != manifest.knowledge_time
+                or len(expected_registry.observations)
+                != manifest.observation_count
+                or len(expected_registry.candidates)
+                != manifest.candidate_count
+                or len(expected_registry.transitions)
+                != manifest.transition_count
+                or len(expected_registry.conflicts)
+                != manifest.conflict_count
+            ):
+                raise IdentityRegistryIntegrityError(
+                    "newly stored registry disagrees with verified content"
+                )
+            return StoredIdentityRegistry(
+                path=path,
+                manifest=manifest,
+                registry=expected_registry,
+                payload_bytes=payload,
+            )
 
         source_store = LocalReferenceArtifactStore(self.reference_data_root)
         sources = tuple(source_store.get(value) for value in manifest.source_artifact_ids)
@@ -429,4 +472,3 @@ class LocalIdentityRegistryStore:
             registry=replayed,
             payload_bytes=payload,
         )
-
