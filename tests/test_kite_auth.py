@@ -543,16 +543,24 @@ class ParseKiteCallbackTests(unittest.TestCase):
         )
         self.assertEqual(result, {"error": "unsuccessful_callback"})
 
-    def test_missing_or_duplicate_fields_are_malformed(self) -> None:
+    def test_missing_or_duplicate_authority_fields_are_malformed(self) -> None:
         cases = (
             "action=login&status=success",
             "action=login&status=success&request_token=a&request_token=b",
-            "action=login&status=success&request_token=abc123&extra=1",
+            "action=login&action=login&status=success&request_token=abc123",
+            "action=login&status=success&status=success&request_token=abc123",
         )
         for query in cases:
             with self.subTest(query=query):
                 result = _parse_kite_callback(LOOPBACK_CALLBACK_PATH, query)
                 self.assertEqual(result, {"error": "malformed_query"})
+
+    def test_unknown_redirect_parameters_are_ignored_without_echoing(self) -> None:
+        result = _parse_kite_callback(
+            LOOPBACK_CALLBACK_PATH,
+            "request_token=abc123&status=success&action=login&client_ref=value",
+        )
+        self.assertEqual(result, {"status": "success", "request_token": "abc123"})
 
     def test_unparsable_query_is_malformed(self) -> None:
         result = _parse_kite_callback(LOOPBACK_CALLBACK_PATH, "not-a-valid-query&&")

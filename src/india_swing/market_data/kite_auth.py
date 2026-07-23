@@ -174,11 +174,13 @@ def _parse_kite_callback(path: str, query: str) -> dict[str, str]:
         )
     except ValueError:
         return {"error": "malformed_query"}
-    allowed_keys = {"request_token", "action", "status"}
     if (
         "request_token" not in parsed
-        or not set(parsed).issubset(allowed_keys)
-        or any(len(values) != 1 for values in parsed.values())
+        or len(parsed["request_token"]) != 1
+        or any(
+            key in parsed and len(parsed[key]) != 1
+            for key in ("action", "status")
+        )
     ):
         return {"error": "malformed_query"}
     request_token = parsed["request_token"][0]
