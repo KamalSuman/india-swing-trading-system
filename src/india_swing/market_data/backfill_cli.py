@@ -38,10 +38,6 @@ from .backfill import (
     UpstoxCatalogInstrumentResolver,
     build_historical_backfill_plan,
 )
-from .collection import (
-    HistoricalReconciliationCollector,
-    historical_dataset_name,
-)
 from .backfill_blockers import (
     HISTORICAL_BACKFILL_BLOCKER_POLICY_VERSION,
     LocalHistoricalBackfillBlockerReportStore,
@@ -56,11 +52,28 @@ from .backfill_evidence_worklist import (
     LocalHistoricalBackfillEvidenceWorkPackageStore,
     build_historical_backfill_evidence_work_package,
 )
-from .config import MarketDataConfig, UpstoxCredentials
+from .collection import (
+    HistoricalReconciliationCollector,
+    MarketDataCollector,
+    historical_dataset_name,
+)
+from .config import (
+    KiteCredentials,
+    KiteLoginCredentials,
+    MarketDataConfig,
+    UpstoxCredentials,
+)
+from .kite import KiteMarketDataAdapter
+from .kite_auth import KiteInteractiveAuthenticator, LoopbackKiteCallbackReceiver
+from .kite_instruments import (
+    KITE_INSTRUMENTS_DATASET,
+    KITE_PROVIDER,
+    KiteInstrumentSnapshotResolver,
+)
 from .models import HistoricalDailyCandleBatch
 from .reconciliation import reconcile_historical_batch
 from .snapshot_store import LocalMarketSnapshotStore
-from .upstox import UpstoxHistoricalDataAdapter
+from .upstox import UPSTOX_PROVIDER, UpstoxHistoricalDataAdapter
 from .upstox_instruments import (
     LocalUpstoxInstrumentCatalogStore,
     fetch_upstox_nse_instrument_catalog,
@@ -95,10 +108,34 @@ def _add_plan_arguments(command: argparse.ArgumentParser) -> None:
         ),
     )
     command.add_argument("--calendar-materialization-id", required=True)
-    command.add_argument("--upstox-catalog-id", required=True)
+    command.add_argument(
+        "--provider",
+        choices=(UPSTOX_PROVIDER, KITE_PROVIDER),
+        default=UPSTOX_PROVIDER,
+        help="historical provider; defaults to UPSTOX for backward compatibility",
+    )
+    command.add_argument(
+        "--upstox-catalog-id",
+        help="required exactly when --provider is UPSTOX",
+    )
+    command.add_argument(
+        "--kite-instrument-snapshot-id",
+        help="required exactly when --provider is ZERODHA_KITE",
+    )
     command.add_argument("--coverage-start", type=_date, required=True)
     command.add_argument("--coverage-end", type=_date, required=True)
     command.add_argument("--requested-at", type=_aware_datetime, required=True)
+
+
+def _add_kite_interactive_login_argument(command: argparse.ArgumentParser) -> None:
+    command.add_argument(
+        "--kite-interactive-login",
+        action="store_true",
+        help=(
+            "obtain Kite credentials through one local interactive SDK "
+            "login instead of the environment; rejected for provider UPSTOX"
+        ),
+    )
 
 
 def parser() -> argparse.ArgumentParser:
@@ -124,6 +161,7 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="collect safe requests despite explicitly reported coverage issues",
     )
+    _add_kite_interactive_login_argument(run)
 
     pilot = commands.add_parser(
         "pilot",
@@ -150,6 +188,7 @@ def parser() -> argparse.ArgumentParser:
         type=_aware_datetime,
         required=True,
     )
+    _add_kite_interactive_login_argument(pilot)
 
     blockers = commands.add_parser(
         "blockers",
@@ -200,10 +239,56 @@ def parser() -> argparse.ArgumentParser:
         type=_aware_datetime,
         required=True,
     )
+
+    kite_instruments_fetch = commands.add_parser(
+        "kite-instruments-fetch",
+        help="collect and seal one exact Kite NSE instrument snapshot",
+    )
+    _add_kite_interactive_login_argument(kite_instruments_fetch)
     return root
 
 
+def _require_provider_evidence(args: argparse.Namespace) -> None:
+    if args.provider == UPSTOX_PROVIDER:
+        if args.upstox_catalog_id is None:
+            raise ValueError(
+                "--upstox-catalog-id is required when --provider is UPSTOX"
+            )
+        if args.kite_instrument_snapshot_id is not None:
+            raise ValueError(
+                "--kite-instrument-snapshot-id cannot be used with --provider UPSTOX"
+            )
+    elif args.provider == KITE_PROVIDER:
+        if args.kite_instrument_snapshot_id is None:
+            raise ValueError(
+                "--kite-instrument-snapshot-id is required when --provider "
+                "is ZERODHA_KITE"
+            )
+        if args.upstox_catalog_id is not None:
+            raise ValueError(
+                "--upstox-catalog-id cannot be used with --provider ZERODHA_KITE"
+            )
+    else:
+        raise ValueError("unsupported historical provider")
+
+
+def _resolver_for_provider(args: argparse.Namespace, market_config: MarketDataConfig):
+    if args.provider == UPSTOX_PROVIDER:
+        catalog = LocalUpstoxInstrumentCatalogStore(
+            market_config.data_root
+        ).get(args.upstox_catalog_id)
+        return UpstoxCatalogInstrumentResolver(catalog)
+    if args.provider == KITE_PROVIDER:
+        snapshot = LocalMarketSnapshotStore(market_config.data_root).get(
+            KITE_INSTRUMENTS_DATASET,
+            args.kite_instrument_snapshot_id,
+        )
+        return KiteInstrumentSnapshotResolver(snapshot)
+    raise ValueError("unsupported historical provider")
+
+
 def _configured_plan_context(args: argparse.Namespace):
+    _require_provider_evidence(args)
     reference_config = ReferenceDataConfig.from_env()
     identity_config = IdentityRegistryConfig.from_env()
     calendar_config = CalendarDataConfig.from_env()
@@ -225,9 +310,7 @@ def _configured_plan_context(args: argparse.Namespace):
         daily_config.data_root,
     ).get(args.calendar_materialization_id).materialization
     market_config = MarketDataConfig.from_env()
-    catalog = LocalUpstoxInstrumentCatalogStore(
-        market_config.data_root
-    ).get(args.upstox_catalog_id)
+    resolver = _resolver_for_provider(args, market_config)
     identity_snapshot = (
         LocalAdjudicatedIdentitySnapshotStore(
             IdentityEvidenceConfig.from_env().data_root
@@ -239,7 +322,7 @@ def _configured_plan_context(args: argparse.Namespace):
         registry=registry,
         security_master_sources=security_master_sources,
         calendar=materialization.calendar_snapshot,
-        resolver=UpstoxCatalogInstrumentResolver(catalog),
+        resolver=resolver,
         coverage_start=args.coverage_start,
         coverage_end=args.coverage_end,
         requested_at=args.requested_at,
@@ -275,6 +358,31 @@ def _plan_value(plan: HistoricalBackfillPlan) -> dict[str, object]:
     }
 
 
+def _kite_credentials(args: argparse.Namespace) -> KiteCredentials:
+    if getattr(args, "kite_interactive_login", False):
+        login_credentials = KiteLoginCredentials.from_env()
+        receiver = LoopbackKiteCallbackReceiver()
+        authenticator = KiteInteractiveAuthenticator.from_official_sdk(
+            login_credentials,
+            receiver,
+        )
+        return authenticator.login()
+    return KiteCredentials.from_env()
+
+
+def _connector_for_plan(plan: HistoricalBackfillPlan, args: argparse.Namespace):
+    if plan.provider == UPSTOX_PROVIDER:
+        if getattr(args, "kite_interactive_login", False):
+            raise ValueError(
+                "--kite-interactive-login is only valid for the ZERODHA_KITE "
+                "provider"
+            )
+        return UpstoxHistoricalDataAdapter(UpstoxCredentials.from_env())
+    if plan.provider == KITE_PROVIDER:
+        return KiteMarketDataAdapter.from_official_sdk(_kite_credentials(args))
+    raise ValueError("unsupported historical provider")
+
+
 def _run_plan(
     plan: HistoricalBackfillPlan,
     args: argparse.Namespace,
@@ -291,7 +399,7 @@ def _run_plan(
         }
 
     config = MarketDataConfig.from_env()
-    connector = UpstoxHistoricalDataAdapter(UpstoxCredentials.from_env())
+    connector = _connector_for_plan(plan, args)
     runner = HistoricalBackfillRunner(
         connector,
         LocalMarketSnapshotStore(config.data_root),
@@ -373,7 +481,7 @@ def _pilot(
     market_config = MarketDataConfig.from_env()
     historical_config = HistoricalPricesConfig.from_env()
     snapshot_store = LocalMarketSnapshotStore(market_config.data_root)
-    connector = UpstoxHistoricalDataAdapter(UpstoxCredentials.from_env())
+    connector = _connector_for_plan(plan, args)
     runner = HistoricalBackfillRunner(
         connector,
         snapshot_store,
@@ -417,6 +525,25 @@ def _pilot(
         "passed": result.passed,
         "collection_only": result.collection_only,
         "actionable": result.actionable,
+    }
+
+
+def _kite_instruments_fetch(
+    args: argparse.Namespace,
+) -> tuple[int, dict[str, object]]:
+    market_config = MarketDataConfig.from_env()
+    credentials = _kite_credentials(args)
+    adapter = KiteMarketDataAdapter.from_official_sdk(credentials)
+    store = LocalMarketSnapshotStore(market_config.data_root)
+    stored = MarketDataCollector(adapter, store).collect_instruments("NSE")
+    payload = stored.normalized_payload
+    return 0, {
+        "status": "KITE_INSTRUMENTS_READY",
+        "snapshot_id": stored.manifest.snapshot_id,
+        "observed_at": stored.manifest.observed_at.isoformat(),
+        "provider_version": stored.manifest.provider_version,
+        "exchange": payload.exchange,
+        "instrument_count": len(payload.instruments),
     }
 
 
@@ -602,8 +729,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             exit_code, value = _evidence_worklist(args)
         elif args.command == "catalog-fetch":
             exit_code, value = _catalog_fetch()
-        else:
+        elif args.command == "catalog-import":
             exit_code, value = _catalog_import(args)
+        else:
+            exit_code, value = _kite_instruments_fetch(args)
     except Exception as exc:
         print(
             json.dumps(

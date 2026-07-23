@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import tempfile
@@ -8,16 +9,43 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from datetime import datetime, timezone
+from decimal import Decimal
+
 from india_swing.historical_prices import LocalHistoricalPriceArtifactStore
-from india_swing.market_data.backfill_cli import main, parser
+from india_swing.market_data.backfill import build_historical_backfill_plan
+from india_swing.market_data.backfill_cli import (
+    main,
+    parser,
+    _connector_for_plan,
+    _kite_credentials,
+    _require_provider_evidence,
+    _resolver_for_provider,
+)
 from india_swing.market_data.backfill_pilot import MAXIMUM_PILOT_TOTAL_REQUESTS
 from india_swing.market_data.collection import historical_dataset_name
+from india_swing.market_data.config import KiteCredentials, KiteLoginCredentials
+from india_swing.market_data.kite import KiteMarketDataAdapter
+from india_swing.market_data.kite_auth import KiteInteractiveAuthenticator
+from india_swing.market_data.kite_instruments import (
+    KITE_PROVIDER,
+    KiteInstrumentSnapshotResolver,
+)
+from india_swing.market_data.models import (
+    HistoricalDailyCandle,
+    HistoricalDailyCandleBatch,
+    HistoricalResponsePage,
+)
 from india_swing.market_data.snapshot_store import LocalMarketSnapshotStore
+from india_swing.market_data.upstox import UPSTOX_PROVIDER, UpstoxHistoricalDataAdapter
 from tests.test_historical_backfill import (
     DAY_ONE,
     DAY_TWO,
     REQUESTED_AT,
+    calendar,
     plan,
+    registry,
+    security_master_sources,
     two_session_body,
 )
 from tests.test_historical_backfill_pilot import (
@@ -31,6 +59,10 @@ from tests.test_historical_reconciliation import (
     nse_artifact,
     provider_batch,
 )
+from tests.test_identity_registry import security_row
+from tests.test_kite_instruments import instrument_snapshot
+from tests.test_market_data import FakeKiteClient
+from tests.test_market_data import adapter as kite_test_adapter
 from tests.test_upstox_market_data import FakeTransport, adapter, response
 from tests.test_upstox_instruments import (
     OBSERVED_AT as CATALOG_OBSERVED_AT,
@@ -445,6 +477,411 @@ class HistoricalBackfillPilotCliTests(unittest.TestCase):
         payload = json.loads(stderr.getvalue())
         self.assertEqual(payload["status"], "FAILED")
         self.assertNotIn("token", json.dumps(payload).lower())
+
+
+class FakeKiteHistoricalConnector:
+    provider = KITE_PROVIDER
+    provider_version = "fake-kite-historical-connector/v1"
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def fetch_historical_daily(self, request) -> HistoricalDailyCandleBatch:
+        self.calls.append(request)
+        candles = tuple(
+            HistoricalDailyCandle(
+                session=session,
+                open=Decimal("1600.00"),
+                high=Decimal("1620.00"),
+                low=Decimal("1590.00"),
+                close=Decimal("1610.00"),
+                volume=100,
+            )
+            for session in request.sessions
+        )
+        page = HistoricalResponsePage(
+            first_session=request.sessions[0],
+            last_session=request.sessions[-1],
+            payload_sha256="b" * 64,
+            row_count=len(request.sessions),
+        )
+        return HistoricalDailyCandleBatch(
+            request=request,
+            observed_at=datetime(2026, 7, 17, 11, 0, tzinfo=timezone.utc),
+            provider_version=self.provider_version,
+            candles=candles,
+            response_pages=(page,),
+        )
+
+
+def kite_plan(root):
+    identity = registry(root / "identity", [security_row()], [security_row()])
+    stored_snapshot = instrument_snapshot(root / "kite-snapshot")
+    resolver = KiteInstrumentSnapshotResolver(stored_snapshot)
+    value = build_historical_backfill_plan(
+        registry=identity,
+        security_master_sources=security_master_sources(root / "identity", identity),
+        calendar=calendar(DAY_ONE, DAY_ONE),
+        resolver=resolver,
+        coverage_start=DAY_ONE,
+        coverage_end=DAY_ONE,
+        requested_at=REQUESTED_AT,
+    )
+    return value, stored_snapshot
+
+
+class ProviderEvidenceValidationTests(unittest.TestCase):
+    def _args(self, **overrides):
+        values = {
+            "provider": UPSTOX_PROVIDER,
+            "upstox_catalog_id": "c" * 64,
+            "kite_instrument_snapshot_id": None,
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def test_upstox_requires_its_own_evidence_id(self) -> None:
+        with self.assertRaises(ValueError):
+            _require_provider_evidence(
+                self._args(upstox_catalog_id=None)
+            )
+
+    def test_upstox_rejects_kite_evidence_id(self) -> None:
+        with self.assertRaises(ValueError):
+            _require_provider_evidence(
+                self._args(kite_instrument_snapshot_id="d" * 64)
+            )
+
+    def test_kite_requires_its_own_evidence_id(self) -> None:
+        with self.assertRaises(ValueError):
+            _require_provider_evidence(
+                self._args(
+                    provider=KITE_PROVIDER,
+                    upstox_catalog_id=None,
+                    kite_instrument_snapshot_id=None,
+                )
+            )
+
+    def test_kite_rejects_upstox_evidence_id(self) -> None:
+        with self.assertRaises(ValueError):
+            _require_provider_evidence(
+                self._args(
+                    provider=KITE_PROVIDER,
+                    upstox_catalog_id="c" * 64,
+                    kite_instrument_snapshot_id="d" * 64,
+                )
+            )
+
+    def test_exact_matching_evidence_id_passes(self) -> None:
+        _require_provider_evidence(self._args())
+        _require_provider_evidence(
+            self._args(
+                provider=KITE_PROVIDER,
+                upstox_catalog_id=None,
+                kite_instrument_snapshot_id="d" * 64,
+            )
+        )
+
+    def test_unsupported_provider_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            _require_provider_evidence(self._args(provider="ZERODHA_FUTURES"))
+
+
+class ProviderParserTests(unittest.TestCase):
+    def test_provider_defaults_to_upstox_for_backward_compatibility(self) -> None:
+        args = parser().parse_args(plan_arguments("plan"))
+        self.assertEqual(args.provider, UPSTOX_PROVIDER)
+        self.assertIsNone(args.kite_instrument_snapshot_id)
+
+    def test_explicit_kite_provider_parses(self) -> None:
+        args_list = plan_arguments("plan")
+        args_list += ["--provider", KITE_PROVIDER]
+        args = parser().parse_args(args_list)
+        self.assertEqual(args.provider, KITE_PROVIDER)
+
+    def test_unsupported_provider_choice_is_rejected_by_argparse(self) -> None:
+        args_list = plan_arguments("plan") + ["--provider", "ZERODHA_FUTURES"]
+        with self.assertRaises(SystemExit):
+            parser().parse_args(args_list)
+
+    def test_kite_interactive_login_flag_available_on_run_pilot_and_fetch(
+        self,
+    ) -> None:
+        run_args = parser().parse_args(
+            plan_arguments("run") + ["--kite-interactive-login"]
+        )
+        self.assertTrue(run_args.kite_interactive_login)
+
+        pilot_args = parser().parse_args(
+            plan_arguments("pilot")
+            + [
+                "--maximum-total-requests",
+                "1",
+                "--nse-artifact-id",
+                "a" * 64,
+                "--reconciled-at",
+                PILOT_RECONCILED_AT.isoformat(),
+                "--kite-interactive-login",
+            ]
+        )
+        self.assertTrue(pilot_args.kite_interactive_login)
+
+        fetch_args = parser().parse_args(
+            ["kite-instruments-fetch", "--kite-interactive-login"]
+        )
+        self.assertTrue(fetch_args.kite_interactive_login)
+
+
+class ResolverForProviderTests(unittest.TestCase):
+    def test_kite_resolver_wiring_is_credential_free(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            stored_snapshot = instrument_snapshot(root)
+            market_config = type(
+                "Config", (), {"data_root": root}
+            )()
+            args = argparse.Namespace(
+                provider=KITE_PROVIDER,
+                kite_instrument_snapshot_id=stored_snapshot.manifest.snapshot_id,
+            )
+            with patch(
+                "india_swing.market_data.backfill_cli.KiteCredentials.from_env",
+                side_effect=AssertionError("credentials must not be read"),
+            ):
+                resolver = _resolver_for_provider(args, market_config)
+
+        self.assertIsInstance(resolver, KiteInstrumentSnapshotResolver)
+        self.assertEqual(resolver.provider, KITE_PROVIDER)
+
+
+class ConnectorFactoryTests(unittest.TestCase):
+    def test_upstox_plan_uses_upstox_credentials_and_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            value = plan(Path(temp_dir))
+            args = argparse.Namespace(kite_interactive_login=False)
+            fake_connector = object()
+            with (
+                patch(
+                    "india_swing.market_data.backfill_cli.UpstoxCredentials.from_env",
+                    return_value="fake-credentials",
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.UpstoxHistoricalDataAdapter",
+                    return_value=fake_connector,
+                ) as adapter_cls,
+            ):
+                connector = _connector_for_plan(value, args)
+
+        self.assertIs(connector, fake_connector)
+        adapter_cls.assert_called_once_with("fake-credentials")
+
+    def test_kite_interactive_login_is_rejected_for_upstox_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            value = plan(Path(temp_dir))
+            args = argparse.Namespace(kite_interactive_login=True)
+            with self.assertRaises(ValueError):
+                _connector_for_plan(value, args)
+
+    def test_kite_plan_uses_environment_credentials_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            value, _ = kite_plan(Path(temp_dir))
+            args = argparse.Namespace(kite_interactive_login=False)
+            fake_connector = object()
+            with (
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteCredentials.from_env",
+                    return_value="fake-kite-credentials",
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteMarketDataAdapter"
+                    ".from_official_sdk",
+                    return_value=fake_connector,
+                ) as adapter_cls,
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteInteractiveAuthenticator"
+                    ".from_official_sdk",
+                    side_effect=AssertionError(
+                        "interactive login must not be used"
+                    ),
+                ),
+            ):
+                connector = _connector_for_plan(value, args)
+
+        self.assertIs(connector, fake_connector)
+        adapter_cls.assert_called_once_with("fake-kite-credentials")
+
+    def test_kite_plan_uses_interactive_login_only_when_flag_is_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            value, _ = kite_plan(Path(temp_dir))
+            args = argparse.Namespace(kite_interactive_login=True)
+            fake_authenticator = type(
+                "FakeAuthenticator",
+                (),
+                {"login": lambda self: "interactive-credentials"},
+            )()
+            fake_connector = object()
+            with (
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteLoginCredentials.from_env",
+                    return_value="fake-login-credentials",
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.LoopbackKiteCallbackReceiver",
+                    return_value="fake-receiver",
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteInteractiveAuthenticator"
+                    ".from_official_sdk",
+                    return_value=fake_authenticator,
+                ) as authenticator_factory,
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteCredentials.from_env",
+                    side_effect=AssertionError(
+                        "non-interactive credentials must not be used"
+                    ),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteMarketDataAdapter"
+                    ".from_official_sdk",
+                    return_value=fake_connector,
+                ) as adapter_cls,
+            ):
+                connector = _connector_for_plan(value, args)
+
+        self.assertIs(connector, fake_connector)
+        authenticator_factory.assert_called_once_with(
+            "fake-login-credentials", "fake-receiver"
+        )
+        adapter_cls.assert_called_once_with("interactive-credentials")
+
+
+class KiteInstrumentsFetchCliTests(unittest.TestCase):
+    def test_kite_instruments_fetch_stores_one_batch_and_returns_only_metadata(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            client = FakeKiteClient()
+            fake_adapter = kite_test_adapter(client)
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(root),
+                "INDIA_SWING_KITE_API_KEY": "runtime-key",
+                "INDIA_SWING_KITE_ACCESS_TOKEN": "runtime-only-secret-token",
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteMarketDataAdapter"
+                    ".from_official_sdk",
+                    return_value=fake_adapter,
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(["kite-instruments-fetch"])
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "KITE_INSTRUMENTS_READY")
+        self.assertEqual(payload["exchange"], "NSE")
+        self.assertEqual(payload["instrument_count"], 1)
+        self.assertNotIn("runtime-only-secret-token", json.dumps(payload))
+        self.assertEqual(client.instrument_calls, 1)
+
+    def test_kite_instruments_fetch_uses_interactive_login_only_when_flagged(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            client = FakeKiteClient()
+            fake_adapter = kite_test_adapter(client)
+
+            class FakeAuthenticator:
+                def login(self) -> KiteCredentials:
+                    return KiteCredentials("interactive-key", "interactive-token")
+
+            environment = {"INDIA_SWING_MARKET_DATA_ROOT": str(root)}
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteLoginCredentials.from_env",
+                    return_value=KiteLoginCredentials("app-key", "app-secret"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.LoopbackKiteCallbackReceiver",
+                    return_value=object(),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteInteractiveAuthenticator"
+                    ".from_official_sdk",
+                    return_value=FakeAuthenticator(),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteCredentials.from_env",
+                    side_effect=AssertionError(
+                        "non-interactive credentials must not be used"
+                    ),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteMarketDataAdapter"
+                    ".from_official_sdk",
+                    return_value=fake_adapter,
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(
+                    ["kite-instruments-fetch", "--kite-interactive-login"]
+                )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "KITE_INSTRUMENTS_READY")
+
+
+class KitePlanRunPilotCliTests(unittest.TestCase):
+    def test_kite_run_command_is_credential_wired_through_the_closed_factory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            value, _ = kite_plan(root / "inputs")
+            connector = FakeKiteHistoricalConnector()
+            environment = {"INDIA_SWING_MARKET_DATA_ROOT": str(root / "market")}
+            args = plan_arguments("run") + [
+                "--provider",
+                KITE_PROVIDER,
+                "--kite-instrument-snapshot-id",
+                "d" * 64,
+            ]
+            args.remove("--upstox-catalog-id")
+            args.remove("c" * 64)
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=value,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteMarketDataAdapter"
+                    ".from_official_sdk",
+                    return_value=connector,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteCredentials.from_env",
+                    return_value=KiteCredentials("k", "runtime-only-secret"),
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(args)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "SAFE_REQUESTS_COMPLETE")
+        self.assertEqual(payload["provider"], KITE_PROVIDER)
+        self.assertGreater(len(connector.calls), 0)
+        self.assertNotIn("runtime-only-secret", output.getvalue())
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from pathlib import Path
 
 KITE_API_KEY_ENV = "INDIA_SWING_KITE_API_KEY"
 KITE_ACCESS_TOKEN_ENV = "INDIA_SWING_KITE_ACCESS_TOKEN"
+KITE_API_SECRET_ENV = "INDIA_SWING_KITE_API_SECRET"
 UPSTOX_ACCESS_TOKEN_ENV = "INDIA_SWING_UPSTOX_ACCESS_TOKEN"
 MARKET_DATA_ROOT_ENV = "INDIA_SWING_MARKET_DATA_ROOT"
 
@@ -55,6 +56,52 @@ class KiteCredentials:
 
     def __repr__(self) -> str:
         return "KiteCredentials(api_key=<redacted>, access_token=<redacted>)"
+
+
+class KiteLoginCredentials:
+    """Runtime-only Kite Connect app credentials used solely to log in.
+
+    Deliberately not a dataclass and exposes no serializable secret state, so
+    it can never be written into content-addressed identity material or a
+    stored artifact by accident.
+    """
+
+    __slots__ = ("_api_key", "_api_secret")
+
+    def __init__(self, api_key: str, api_secret: str) -> None:
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise MissingMarketDataConfiguration("Kite API key is empty")
+        if not isinstance(api_secret, str) or not api_secret.strip():
+            raise MissingMarketDataConfiguration("Kite API secret is empty")
+        self._api_key = api_key
+        self._api_secret = api_secret
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> KiteLoginCredentials:
+        values = os.environ if environ is None else environ
+        missing = [
+            name
+            for name in (KITE_API_KEY_ENV, KITE_API_SECRET_ENV)
+            if not values.get(name, "").strip()
+        ]
+        if missing:
+            raise MissingMarketDataConfiguration(
+                "missing required environment variables: " + ", ".join(missing)
+            )
+        return cls(values[KITE_API_KEY_ENV], values[KITE_API_SECRET_ENV])
+
+    def api_key(self) -> str:
+        return self._api_key
+
+    def api_secret(self) -> str:
+        return self._api_secret
+
+    @property
+    def identity_material(self) -> dict[str, str]:
+        return {"provider": "ZERODHA_KITE", "auth_scheme": "interactive_login_app"}
+
+    def __repr__(self) -> str:
+        return "KiteLoginCredentials(api_key=<redacted>, api_secret=<redacted>)"
 
 
 class UpstoxCredentials:
