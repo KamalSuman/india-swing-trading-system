@@ -15,6 +15,7 @@ NSE_REGULAR_MARKET_CLOSE = time(15, 30)
 NSE_REGULAR_DATA_READY = time(16, 0)
 NSE_REGULAR_FINALITY_POLICY_VERSION = "nse-regular-eod-collection-guard/v1"
 LISTING_KEY_PATTERN = re.compile(r"NSE:[A-Z0-9][A-Z0-9&\-]{0,31}\Z")
+NSE_SECURITY_SERIES_PATTERN = re.compile(r"[A-Z0-9]{1,8}\Z")
 MARKET_DATA_PROVIDER_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{1,31}\Z")
 NSE_EQUITY_ISIN_PATTERN = re.compile(r"INE[A-Z0-9]{9}\Z")
 MAXIMUM_QUOTE_KEYS = 500
@@ -217,6 +218,7 @@ class HistoricalInstrumentBinding:
     provider_instrument_id: str
     exchange: str
     listing_key: str
+    security_series: str
     isin: str
     valid_from: date
     valid_through: date
@@ -246,6 +248,11 @@ class HistoricalInstrumentBinding:
             self.listing_key
         ) is None:
             raise ValueError("listing_key must be canonical NSE:TRADINGSYMBOL text")
+        if (
+            type(self.security_series) is not str
+            or NSE_SECURITY_SERIES_PATTERN.fullmatch(self.security_series) is None
+        ):
+            raise ValueError("security_series must be canonical NSE series text")
         if type(self.isin) is not str or NSE_EQUITY_ISIN_PATTERN.fullmatch(self.isin) is None:
             raise ValueError("isin must be a canonical Indian equity ISIN")
         if type(self.valid_from) is not date or type(self.valid_through) is not date:

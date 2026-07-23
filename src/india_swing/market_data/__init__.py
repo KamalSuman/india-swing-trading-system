@@ -1,5 +1,20 @@
 """Read-only, point-in-time market-data adapters and snapshot storage."""
 
+from .backfill import (
+    HistoricalBackfillCompletion,
+    HistoricalBackfillError,
+    HistoricalBackfillIntegrityError,
+    HistoricalBackfillIssue,
+    HistoricalBackfillIssueCode,
+    HistoricalBackfillPlan,
+    HistoricalBackfillProgress,
+    HistoricalBackfillRunner,
+    HistoricalBackfillStateError,
+    LocalHistoricalBackfillProgressStore,
+    ProviderInstrumentResolver,
+    UpstoxIsinInstrumentResolver,
+    build_historical_backfill_plan,
+)
 from .config import (
     KiteCredentials,
     MarketDataConfig,
@@ -40,6 +55,15 @@ __all__ = [
     "DailyCandleArchive",
     "DailyCandleBatch",
     "FullQuoteBatch",
+    "HistoricalBackfillCompletion",
+    "HistoricalBackfillError",
+    "HistoricalBackfillIntegrityError",
+    "HistoricalBackfillIssue",
+    "HistoricalBackfillIssueCode",
+    "HistoricalBackfillPlan",
+    "HistoricalBackfillProgress",
+    "HistoricalBackfillRunner",
+    "HistoricalBackfillStateError",
     "HistoricalDailyCandle",
     "HistoricalDailyCandleBatch",
     "HistoricalDailyDataConnector",
@@ -54,6 +78,8 @@ __all__ = [
     "MarketDataConfig",
     "MissingMarketDataConfiguration",
     "NseSessionFinality",
+    "LocalHistoricalBackfillProgressStore",
+    "ProviderInstrumentResolver",
     "RetryPolicy",
     "UPSTOX_PROVIDER",
     "UpstoxAuthenticationError",
@@ -65,4 +91,6 @@ __all__ = [
     "UpstoxPermissionError",
     "UpstoxRateLimitError",
     "UpstoxRequestError",
+    "UpstoxIsinInstrumentResolver",
+    "build_historical_backfill_plan",
 ]

@@ -251,6 +251,34 @@ class LocalMarketSnapshotStore:
             raise MarketSnapshotIntegrityError("snapshot ID appears in multiple vintages")
         return self._read_path(matches[0], expected_dataset=dataset)
 
+    def find_by_selection_key(
+        self,
+        dataset: str,
+        selection_key: str,
+    ) -> tuple[StoredMarketSnapshot, ...]:
+        """Return every verified snapshot for one exact semantic selection."""
+
+        dataset = _safe_component(dataset, "dataset")
+        selection_key = _selection_key(selection_key)
+        base = self.root / dataset
+        if not base.exists():
+            return ()
+        matches: list[StoredMarketSnapshot] = []
+        for path in sorted(base.glob("*/*")):
+            if path.is_dir() and not path.name.startswith("."):
+                stored = self._read_path(path, expected_dataset=dataset)
+                if stored.manifest.selection_key == selection_key:
+                    matches.append(stored)
+        return tuple(
+            sorted(
+                matches,
+                key=lambda value: (
+                    value.manifest.observed_at,
+                    value.manifest.snapshot_id,
+                ),
+            )
+        )
+
     def latest_at_or_before(
         self,
         dataset: str,

@@ -28,6 +28,17 @@ class HistoricalCollectionError(ValueError):
     pass
 
 
+def historical_dataset_name(provider: str) -> str:
+    if (
+        type(provider) is not str
+        or not provider
+        or provider != provider.strip().upper()
+        or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for character in provider)
+    ):
+        raise ValueError("provider must be canonical uppercase provider text")
+    return f"historical-daily-{provider.casefold().replace('_', '-')}-nse"
+
+
 class HistoricalMarketDataCollector:
     """Persist provider-neutral history without weakening point-in-time lineage."""
 
@@ -73,9 +84,8 @@ class HistoricalMarketDataCollector:
                 "historical connector response lineage does not match the request"
             )
 
-        provider_component = batch.provider.casefold().replace("_", "-")
         return self.store.put(
-            dataset=f"historical-daily-{provider_component}-nse",
+            dataset=historical_dataset_name(batch.provider),
             selection_key=request.request_id,
             provider=batch.provider,
             provider_version=batch.provider_version,

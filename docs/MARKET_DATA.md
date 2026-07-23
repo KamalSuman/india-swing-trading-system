@@ -168,8 +168,43 @@ versioned trading calendar. Pass the request to
 The adapter accepts only an Upstox binding whose provider instrument ID is
 exactly `NSE_EQ|<binding ISIN>`. It never lists instruments, selects a "latest"
 identifier, expands the requested universe, or silently accepts additional
-sessions. A production credential and runner/CLI are intentionally not activated
-by tests.
+sessions. Production credentials and the live network are never activated by
+tests. CLI wiring remains a separate operational step.
+
+## Historical backfill planning and restart
+
+`build_historical_backfill_plan` combines an exact cross-vintage identity
+registry, a pinned NSE CM calendar, a provider instrument resolver, a requested
+date interval, and a knowledge timestamp.
+
+The current identity registry contains positive observations and unverified
+claimed report dates; it cannot prove absence, listing inception, or delisting.
+Accordingly, the planner remains collection-only and:
+
+- creates a request only when that security has an exact positive observation
+  on every session in the request run;
+- never fills a missing security-master vintage by carrying the previous or next
+  identity forward;
+- separates symbol or series lanes;
+- blocks concurrent lanes that collapse to one provider key;
+- records missing master dates, conflicts, unvalidated identifiers, delete
+  flags, unavailable provider keys, and unsupported listing lanes as immutable
+  plan issues.
+
+Plan issues mean safe requests can still be collected, but the result must not
+be described as complete-universe coverage. Historical breadth improves only
+when additional dated official evidence is supplied.
+
+`HistoricalBackfillRunner` executes the safe requests through the same
+provider-neutral collector. After every request it atomically writes a
+content-identified local progress document. A restart verifies all completed
+snapshots before proceeding. If a process stopped after publishing a snapshot
+but before updating progress, the runner discovers the exact request snapshot
+and records it without another provider call.
+
+The local progress store is deliberately single-runner. A Cloud Run deployment
+must replace its atomic local file update with generation-matched Cloud Storage
+or another compare-and-swap store before multiple workers are allowed.
 
 ## Local snapshot semantics
 

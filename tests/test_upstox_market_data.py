@@ -104,6 +104,7 @@ def binding(
         provider_instrument_id=provider_instrument_id,
         exchange="NSE",
         listing_key=LISTING_KEY,
+        security_series="EQ",
         isin=ISIN,
         valid_from=valid_from,
         valid_through=valid_through,
