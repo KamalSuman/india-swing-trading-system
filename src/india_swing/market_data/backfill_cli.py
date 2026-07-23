@@ -26,6 +26,7 @@ from india_swing.identity_registry.adjudication_store import (
     LocalIdentityAdjudicationQueueStore,
 )
 from india_swing.identity_registry.config import IdentityRegistryConfig
+from india_swing.identity_registry.models import CrossVintageIdentityRegistry
 from india_swing.reference_data.config import ReferenceDataConfig
 from india_swing.reference_data.artifact_store import (
     LocalReferenceArtifactStore,
@@ -272,7 +273,11 @@ def _require_provider_evidence(args: argparse.Namespace) -> None:
         raise ValueError("unsupported historical provider")
 
 
-def _resolver_for_provider(args: argparse.Namespace, market_config: MarketDataConfig):
+def _resolver_for_provider(
+    args: argparse.Namespace,
+    market_config: MarketDataConfig,
+    identity_registry: CrossVintageIdentityRegistry | None = None,
+):
     if args.provider == UPSTOX_PROVIDER:
         catalog = LocalUpstoxInstrumentCatalogStore(
             market_config.data_root
@@ -283,7 +288,7 @@ def _resolver_for_provider(args: argparse.Namespace, market_config: MarketDataCo
             KITE_INSTRUMENTS_DATASET,
             args.kite_instrument_snapshot_id,
         )
-        return KiteInstrumentSnapshotResolver(snapshot)
+        return KiteInstrumentSnapshotResolver(snapshot, identity_registry)
     raise ValueError("unsupported historical provider")
 
 
@@ -310,7 +315,7 @@ def _configured_plan_context(args: argparse.Namespace):
         daily_config.data_root,
     ).get(args.calendar_materialization_id).materialization
     market_config = MarketDataConfig.from_env()
-    resolver = _resolver_for_provider(args, market_config)
+    resolver = _resolver_for_provider(args, market_config, registry)
     identity_snapshot = (
         LocalAdjudicatedIdentitySnapshotStore(
             IdentityEvidenceConfig.from_env().data_root

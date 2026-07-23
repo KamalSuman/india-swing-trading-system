@@ -3,13 +3,16 @@ from __future__ import annotations
 from datetime import datetime
 
 from india_swing.identity import content_id
-from india_swing.identity_registry.models import IdentityObservation
+from india_swing.identity_registry.models import (
+    CrossVintageIdentityRegistry,
+    IdentityObservation,
+)
 
 from .models import InstrumentBatch, KiteInstrument
 from .snapshot_store import StoredMarketSnapshot
 
 
-KITE_INSTRUMENT_RESOLVER_POLICY_VERSION = "kite-nse-series-current-routing/v2"
+KITE_INSTRUMENT_RESOLVER_POLICY_VERSION = "kite-nse-series-current-routing/v3"
 KITE_INSTRUMENTS_DATASET = "kite-instruments-NSE"
 KITE_INSTRUMENTS_SELECTION_KEY = "exchange=NSE"
 KITE_PROVIDER = "ZERODHA_KITE"
@@ -30,7 +33,11 @@ class KiteInstrumentSnapshotResolver:
     replacement or deletion.
     """
 
-    def __init__(self, snapshot: StoredMarketSnapshot) -> None:
+    def __init__(
+        self,
+        snapshot: StoredMarketSnapshot,
+        identity_registry: CrossVintageIdentityRegistry | None = None,
+    ) -> None:
         if type(snapshot) is not StoredMarketSnapshot:
             raise TypeError("snapshot must be an exact StoredMarketSnapshot")
         manifest = snapshot.manifest
@@ -79,6 +86,11 @@ class KiteInstrumentSnapshotResolver:
         self._snapshot_id = manifest.snapshot_id
         self._provider_version = manifest.provider_version
         self._observed_at = manifest.observed_at
+        self._identity_registry_id: str | None = None
+        self._registry_observations: dict[str, IdentityObservation] = {}
+        self._current_matches_by_isin: dict[
+            str, tuple[KiteInstrument, ...]
+        ] = {}
         by_symbol: dict[str, list[KiteInstrument]] = {}
         for instrument in payload.instruments:
             if instrument.is_nse_eq_record:
@@ -86,6 +98,8 @@ class KiteInstrumentSnapshotResolver:
         self._by_symbol: dict[str, tuple[KiteInstrument, ...]] = {
             symbol: tuple(values) for symbol, values in by_symbol.items()
         }
+        if identity_registry is not None:
+            self._bind_identity_registry(identity_registry)
 
     @property
     def provider(self) -> str:
@@ -97,6 +111,7 @@ class KiteInstrumentSnapshotResolver:
             {
                 "snapshot_id": self._snapshot_id,
                 "provider_version": self._provider_version,
+                "identity_registry_id": self._identity_registry_id,
             },
             length=64,
         )
@@ -139,9 +154,70 @@ class KiteInstrumentSnapshotResolver:
             raise KiteInstrumentResolverError(
                 "identity observation failed identity verification"
             ) from exc
-        tradingsymbol = observation.ticker_symbol
-        if observation.security_series != "EQ":
-            tradingsymbol = (
-                f"{observation.ticker_symbol}-{observation.security_series}"
+        direct = self._by_symbol.get(self._tradingsymbol(observation), ())
+        if self._identity_registry_id is None:
+            return direct
+        registered = self._registry_observations.get(observation.observation_id)
+        if registered != observation or observation.validated_isin is None:
+            return ()
+        return self._current_matches_by_isin.get(
+            observation.validated_isin,
+            (),
+        )
+
+    @staticmethod
+    def _tradingsymbol(observation: IdentityObservation) -> str:
+        if observation.security_series == "EQ":
+            return observation.ticker_symbol
+        return f"{observation.ticker_symbol}-{observation.security_series}"
+
+    def _bind_identity_registry(
+        self,
+        identity_registry: CrossVintageIdentityRegistry,
+    ) -> None:
+        if type(identity_registry) is not CrossVintageIdentityRegistry:
+            raise TypeError(
+                "identity_registry must be an exact CrossVintageIdentityRegistry"
             )
-        return self._by_symbol.get(tradingsymbol, ())
+        try:
+            identity_registry.verify_content_identity()
+        except Exception as exc:
+            raise KiteInstrumentResolverError(
+                "identity registry failed identity verification"
+            ) from exc
+        self._identity_registry_id = identity_registry.registry_id
+        self._observed_at = max(
+            self._observed_at,
+            identity_registry.cutoff,
+        )
+        self._registry_observations = {
+            value.observation_id: value
+            for value in identity_registry.observations
+        }
+        current_date = max(
+            value.claimed_report_date
+            for value in identity_registry.source_manifests
+        )
+        matches_by_isin: dict[str, dict[int, KiteInstrument]] = {}
+        for observation in identity_registry.observations_on_claimed_date(
+            current_date
+        ):
+            if (
+                observation.delete_flag != "N"
+                or observation.validated_isin is None
+            ):
+                continue
+            for instrument in self._by_symbol.get(
+                self._tradingsymbol(observation),
+                (),
+            ):
+                matches_by_isin.setdefault(
+                    observation.validated_isin,
+                    {},
+                )[instrument.instrument_token] = instrument
+        self._current_matches_by_isin = {
+            isin: tuple(
+                values[token] for token in sorted(values)
+            )
+            for isin, values in matches_by_isin.items()
+        }

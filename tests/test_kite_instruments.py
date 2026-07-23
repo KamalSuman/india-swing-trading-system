@@ -22,6 +22,8 @@ from india_swing.market_data.snapshot_store import (
     LocalMarketSnapshotStore,
     MarketSnapshotIntegrityError,
 )
+from tests.test_historical_backfill import DAY_ONE, DAY_TWO, registry
+from tests.test_identity_registry import security_row
 from tests.test_market_data import FakeKiteClient, adapter, instrument_row
 
 
@@ -108,6 +110,86 @@ class KiteInstrumentSnapshotResolverHappyPathTests(unittest.TestCase):
 
         self.assertEqual(resolver.resolve(value), "987654")
         self.assertTrue(resolver.catalog_contains(value))
+
+    def test_registry_routes_historical_symbol_to_exact_current_isin_match(
+        self,
+    ) -> None:
+        identity = registry(
+            self.root / "registry",
+            [
+                security_row(
+                    FinInstrmId="1001",
+                    TckrSymb="OLDCO",
+                    SctySrs="EQ",
+                    FinInstrmNm="OLD COMPANY NAME",
+                    ISIN="INE009A01021",
+                )
+            ],
+            [
+                security_row(
+                    FinInstrmId="1002",
+                    TckrSymb="NEWCO",
+                    SctySrs="BE",
+                    FinInstrmNm="NEW COMPANY NAME",
+                    ISIN="INE009A01021",
+                )
+            ],
+        )
+        stored = instrument_snapshot(
+            self.root / "market",
+            rows=[
+                instrument_row(
+                    instrument_token=123456,
+                    exchange_token="123456",
+                    tradingsymbol="OLDCO",
+                ),
+                instrument_row(
+                    instrument_token=456789,
+                    exchange_token="456789",
+                    tradingsymbol="NEWCO-BE",
+                )
+            ],
+        )
+        resolver = KiteInstrumentSnapshotResolver(stored, identity)
+        historical = identity.observations_on_claimed_date(DAY_ONE)[0]
+
+        self.assertEqual(resolver.resolve(historical), "456789")
+        self.assertTrue(resolver.catalog_contains(historical))
+        self.assertGreaterEqual(resolver.knowledge_time, identity.cutoff)
+
+        current = identity.observations_on_claimed_date(DAY_TWO)[0]
+        self.assertEqual(resolver.resolve(current), "456789")
+
+    def test_registry_alias_never_routes_when_current_symbol_is_absent(
+        self,
+    ) -> None:
+        identity = registry(
+            self.root / "registry",
+            [
+                security_row(
+                    FinInstrmId="1001",
+                    TckrSymb="OLDCO",
+                    ISIN="INE009A01021",
+                )
+            ],
+            [
+                security_row(
+                    FinInstrmId="1002",
+                    TckrSymb="SUSPEND",
+                    ISIN="INE009A01021",
+                )
+            ],
+        )
+        stored = instrument_snapshot(
+            self.root / "market",
+            rows=[instrument_row(tradingsymbol="OTHERCO")],
+        )
+        resolver = KiteInstrumentSnapshotResolver(stored, identity)
+        historical = identity.observations_on_claimed_date(DAY_ONE)[0]
+
+        with self.assertRaises(KiteInstrumentResolverError):
+            resolver.resolve(historical)
+        self.assertFalse(resolver.catalog_contains(historical))
 
     def test_non_eq_kite_row_never_routes(self) -> None:
         stored = instrument_snapshot(
