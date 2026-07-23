@@ -86,6 +86,29 @@ class KiteInstrumentSnapshotResolverHappyPathTests(unittest.TestCase):
             resolver.catalog_contains(observation(ticker_symbol="MISSING"))
         )
 
+    def test_non_eq_series_routes_only_to_exact_suffixed_symbol(self) -> None:
+        stored = instrument_snapshot(
+            self.root,
+            rows=[
+                instrument_row(
+                    instrument_token=987654,
+                    exchange_token="987654",
+                    tradingsymbol="SMALLCO-BE",
+                ),
+                instrument_row(
+                    instrument_token=987655,
+                    exchange_token="987655",
+                    tradingsymbol="SMALLCO",
+                ),
+            ],
+        )
+        resolver = KiteInstrumentSnapshotResolver(stored)
+
+        value = observation(ticker_symbol="SMALLCO", security_series="BE")
+
+        self.assertEqual(resolver.resolve(value), "987654")
+        self.assertTrue(resolver.catalog_contains(value))
+
     def test_non_eq_kite_row_never_routes(self) -> None:
         stored = instrument_snapshot(
             self.root,
@@ -225,12 +248,13 @@ class KiteInstrumentSnapshotResolverRejectionTests(unittest.TestCase):
         with self.assertRaises(KiteInstrumentResolverError):
             KiteInstrumentSnapshotResolver(self.stored).resolve(observation())
 
-    def test_non_eq_observation_series_is_rejected(self) -> None:
+    def test_non_eq_observation_requires_exact_suffixed_symbol(self) -> None:
         resolver = KiteInstrumentSnapshotResolver(self.stored)
         with self.assertRaises(KiteInstrumentResolverError):
             resolver.resolve(observation(security_series="SM"))
-        with self.assertRaises(KiteInstrumentResolverError):
+        self.assertFalse(
             resolver.catalog_contains(observation(security_series="SM"))
+        )
 
     def test_missing_symbol_is_rejected(self) -> None:
         resolver = KiteInstrumentSnapshotResolver(self.stored)

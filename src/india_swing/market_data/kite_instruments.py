@@ -9,7 +9,7 @@ from .models import InstrumentBatch, KiteInstrument
 from .snapshot_store import StoredMarketSnapshot
 
 
-KITE_INSTRUMENT_RESOLVER_POLICY_VERSION = "kite-nse-eq-current-routing/v1"
+KITE_INSTRUMENT_RESOLVER_POLICY_VERSION = "kite-nse-series-current-routing/v2"
 KITE_INSTRUMENTS_DATASET = "kite-instruments-NSE"
 KITE_INSTRUMENTS_SELECTION_KEY = "exchange=NSE"
 KITE_PROVIDER = "ZERODHA_KITE"
@@ -20,12 +20,14 @@ class KiteInstrumentResolverError(ValueError):
 
 
 class KiteInstrumentSnapshotResolver:
-    """Route a current NSE EQ tradingsymbol to a Kite instrument_token.
+    """Route an exact current NSE series symbol to a Kite instrument_token.
 
     This is provider-routing evidence only. NSE point-in-time security
     masters remain the sole authority for historical universe membership;
-    an absent or ambiguous current Kite symbol becomes an explicit issue in
-    the caller's plan, never an inferred replacement or deletion.
+    the series-aware Kite symbol is derived deterministically (``SYMBOL`` for
+    EQ, ``SYMBOL-SERIES`` otherwise). An absent or ambiguous current Kite
+    symbol becomes an explicit issue in the caller's plan, never an inferred
+    replacement or deletion.
     """
 
     def __init__(self, snapshot: StoredMarketSnapshot) -> None:
@@ -109,7 +111,7 @@ class KiteInstrumentSnapshotResolver:
         if len(matches) != 1:
             raise KiteInstrumentResolverError(
                 "current NSE tradingsymbol does not resolve to exactly one "
-                "Kite EQ instrument"
+                "Kite cash-market instrument"
             )
         return str(matches[0].instrument_token)
 
@@ -137,8 +139,9 @@ class KiteInstrumentSnapshotResolver:
             raise KiteInstrumentResolverError(
                 "identity observation failed identity verification"
             ) from exc
+        tradingsymbol = observation.ticker_symbol
         if observation.security_series != "EQ":
-            raise KiteInstrumentResolverError(
-                "Kite routing requires an exact EQ security series"
+            tradingsymbol = (
+                f"{observation.ticker_symbol}-{observation.security_series}"
             )
-        return self._by_symbol.get(observation.ticker_symbol, ())
+        return self._by_symbol.get(tradingsymbol, ())
