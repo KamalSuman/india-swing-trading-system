@@ -15,7 +15,10 @@ NSE_REGULAR_MARKET_CLOSE = time(15, 30)
 NSE_REGULAR_DATA_READY = time(16, 0)
 NSE_REGULAR_FINALITY_POLICY_VERSION = "nse-regular-eod-collection-guard/v1"
 LISTING_KEY_PATTERN = re.compile(r"NSE:[A-Z0-9][A-Z0-9&\-]{0,31}\Z")
+MARKET_DATA_PROVIDER_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{1,31}\Z")
+NSE_EQUITY_ISIN_PATTERN = re.compile(r"INE[A-Z0-9]{9}\Z")
 MAXIMUM_QUOTE_KEYS = 500
+MAXIMUM_HISTORICAL_SESSIONS = 10000
 
 
 def _require_decimal(value: object, field_name: str) -> None:
@@ -204,6 +207,263 @@ class DailyCandle:
     @property
     def session(self) -> date:
         return self.timestamp.date()
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalInstrumentBinding:
+    """Provider key bound to one point-in-time NSE listing identity interval."""
+
+    provider: str
+    provider_instrument_id: str
+    exchange: str
+    listing_key: str
+    isin: str
+    valid_from: date
+    valid_through: date
+    source_snapshot_ids: tuple[str, ...]
+    binding_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._validate()
+        object.__setattr__(self, "binding_id", self._calculated_id())
+
+    def _validate(self) -> None:
+        if type(self.provider) is not str or MARKET_DATA_PROVIDER_PATTERN.fullmatch(
+            self.provider
+        ) is None:
+            raise ValueError("provider must be canonical uppercase provider text")
+        if (
+            type(self.provider_instrument_id) is not str
+            or not self.provider_instrument_id
+            or len(self.provider_instrument_id) > 128
+            or self.provider_instrument_id != self.provider_instrument_id.strip()
+            or any(ord(character) < 32 for character in self.provider_instrument_id)
+        ):
+            raise ValueError("provider_instrument_id must be bounded canonical text")
+        if self.exchange != "NSE":
+            raise ValueError("historical binding currently supports NSE only")
+        if type(self.listing_key) is not str or LISTING_KEY_PATTERN.fullmatch(
+            self.listing_key
+        ) is None:
+            raise ValueError("listing_key must be canonical NSE:TRADINGSYMBOL text")
+        if type(self.isin) is not str or NSE_EQUITY_ISIN_PATTERN.fullmatch(self.isin) is None:
+            raise ValueError("isin must be a canonical Indian equity ISIN")
+        if type(self.valid_from) is not date or type(self.valid_through) is not date:
+            raise TypeError("binding validity values must be exact dates")
+        if self.valid_through < self.valid_from:
+            raise ValueError("binding validity interval is reversed")
+        if (
+            type(self.source_snapshot_ids) is not tuple
+            or not self.source_snapshot_ids
+            or self.source_snapshot_ids != tuple(sorted(set(self.source_snapshot_ids)))
+            or any(
+                type(value) is not str or SHA256_IDENTIFIER.fullmatch(value) is None
+                for value in self.source_snapshot_ids
+            )
+        ):
+            raise ValueError(
+                "source_snapshot_ids must be a non-empty sorted unique SHA-256 tuple"
+            )
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                item.name: getattr(self, item.name)
+                for item in fields(self)
+                if item.name != "binding_id"
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        self._validate()
+        if self.binding_id != self._calculated_id():
+            raise ValueError("historical instrument binding identity failed")
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalDailyRequest:
+    """Exact historical sessions requested for one point-in-time listing binding."""
+
+    binding: HistoricalInstrumentBinding
+    sessions: tuple[date, ...]
+    requested_at: datetime
+    request_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._validate()
+        object.__setattr__(self, "requested_at", self.requested_at.astimezone(timezone.utc))
+        object.__setattr__(self, "request_id", self._calculated_id())
+
+    def _validate(self) -> None:
+        if type(self.binding) is not HistoricalInstrumentBinding:
+            raise TypeError("binding must be an exact HistoricalInstrumentBinding")
+        self.binding.verify_content_identity()
+        require_aware(self.requested_at, "historical_request.requested_at")
+        if (
+            type(self.sessions) is not tuple
+            or not self.sessions
+            or len(self.sessions) > MAXIMUM_HISTORICAL_SESSIONS
+            or any(type(value) is not date for value in self.sessions)
+            or self.sessions != tuple(sorted(set(self.sessions)))
+        ):
+            raise ValueError(
+                "sessions must be a non-empty sorted unique bounded exact-date tuple"
+            )
+        if (
+            self.sessions[0] < self.binding.valid_from
+            or self.sessions[-1] > self.binding.valid_through
+        ):
+            raise ValueError("requested sessions exceed the listing binding interval")
+        request_session = self.requested_at.astimezone(INDIA_STANDARD_TIME).date()
+        if self.sessions[-1] >= request_session:
+            raise ValueError("historical requests cannot include the current or a future session")
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                "schema": "historical-daily-request/v1",
+                "binding_id": self.binding.binding_id,
+                "sessions": self.sessions,
+                "requested_at": self.requested_at,
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        self._validate()
+        if self.request_id != self._calculated_id():
+            raise ValueError("historical daily request identity failed")
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalDailyCandle:
+    session: date
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int
+    open_interest: int | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.session) is not date:
+            raise TypeError("historical candle session must be an exact date")
+        for name in ("open", "high", "low", "close"):
+            value = getattr(self, name)
+            if type(value) is not Decimal or not value.is_finite() or value <= ZERO:
+                raise ValueError(f"historical candle {name} must be a positive finite Decimal")
+        if self.high < max(self.open, self.low, self.close):
+            raise ValueError("historical candle high is inconsistent with OHLC")
+        if self.low > min(self.open, self.high, self.close):
+            raise ValueError("historical candle low is inconsistent with OHLC")
+        if type(self.volume) is not int or self.volume < 0:
+            raise ValueError("historical candle volume must be a non-negative exact integer")
+        if self.open_interest is not None and (
+            type(self.open_interest) is not int or self.open_interest < 0
+        ):
+            raise ValueError(
+                "historical candle open_interest must be a non-negative exact integer"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalResponsePage:
+    first_session: date
+    last_session: date
+    payload_sha256: str
+    row_count: int
+
+    def __post_init__(self) -> None:
+        if type(self.first_session) is not date or type(self.last_session) is not date:
+            raise TypeError("response page boundaries must be exact dates")
+        if self.last_session < self.first_session:
+            raise ValueError("response page boundaries are reversed")
+        if type(self.payload_sha256) is not str or SHA256_IDENTIFIER.fullmatch(
+            self.payload_sha256
+        ) is None:
+            raise ValueError("response page payload_sha256 must be lowercase SHA-256")
+        if type(self.row_count) is not int or self.row_count <= 0:
+            raise ValueError("response page row_count must be a positive exact integer")
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalDailyCandleBatch:
+    request: HistoricalDailyRequest
+    observed_at: datetime
+    provider_version: str
+    candles: tuple[HistoricalDailyCandle, ...]
+    response_pages: tuple[HistoricalResponsePage, ...]
+    batch_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._validate()
+        object.__setattr__(self, "observed_at", self.observed_at.astimezone(timezone.utc))
+        object.__setattr__(self, "batch_id", self._calculated_id())
+
+    def _validate(self) -> None:
+        if type(self.request) is not HistoricalDailyRequest:
+            raise TypeError("request must be an exact HistoricalDailyRequest")
+        self.request.verify_content_identity()
+        require_aware(self.observed_at, "historical_batch.observed_at")
+        if self.observed_at < self.request.requested_at:
+            raise ValueError("historical batch cannot predate its request")
+        if type(self.provider_version) is not str or not self.provider_version.strip():
+            raise ValueError("provider_version is required")
+        if type(self.candles) is not tuple or any(
+            type(value) is not HistoricalDailyCandle for value in self.candles
+        ):
+            raise TypeError("candles must be an exact HistoricalDailyCandle tuple")
+        if tuple(value.session for value in self.candles) != self.request.sessions:
+            raise ValueError("historical candles must exactly cover the requested sessions")
+        if type(self.response_pages) is not tuple or not self.response_pages or any(
+            type(value) is not HistoricalResponsePage for value in self.response_pages
+        ):
+            raise TypeError("response_pages must be a non-empty exact tuple")
+        covered_sessions: list[date] = []
+        previous_last: date | None = None
+        for page in self.response_pages:
+            if previous_last is not None and page.first_session <= previous_last:
+                raise ValueError("historical response pages overlap or are unordered")
+            page_sessions = tuple(
+                session
+                for session in self.request.sessions
+                if page.first_session <= session <= page.last_session
+            )
+            if (
+                not page_sessions
+                or page_sessions[0] != page.first_session
+                or page_sessions[-1] != page.last_session
+                or len(page_sessions) != page.row_count
+            ):
+                raise ValueError("historical response page coverage is inconsistent")
+            covered_sessions.extend(page_sessions)
+            previous_last = page.last_session
+        if tuple(covered_sessions) != self.request.sessions:
+            raise ValueError("historical response pages do not cover the full request")
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                item.name: getattr(self, item.name)
+                for item in fields(self)
+                if item.name != "batch_id"
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        self._validate()
+        if self.batch_id != self._calculated_id():
+            raise ValueError("historical daily batch identity failed")
+
+    @property
+    def provider(self) -> str:
+        return self.request.binding.provider
+
+    @property
+    def record_count(self) -> int:
+        return len(self.candles)
 
 
 @dataclass(frozen=True, slots=True)

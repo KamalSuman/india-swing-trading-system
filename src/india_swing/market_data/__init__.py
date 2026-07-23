@@ -1,16 +1,38 @@
 """Read-only, point-in-time market-data adapters and snapshot storage."""
 
-from .config import KiteCredentials, MarketDataConfig, MissingMarketDataConfiguration
+from .config import (
+    KiteCredentials,
+    MarketDataConfig,
+    MissingMarketDataConfiguration,
+    UpstoxCredentials,
+)
 from .models import (
     DailyCandle,
     DailyCandleArchive,
     DailyCandleBatch,
     FullQuoteBatch,
+    HistoricalDailyCandle,
+    HistoricalDailyCandleBatch,
+    HistoricalDailyRequest,
+    HistoricalInstrumentBinding,
+    HistoricalResponsePage,
     InstrumentBatch,
     KiteDepthLevel,
     KiteFullQuote,
     KiteInstrument,
     NseSessionFinality,
+)
+from .provider import HistoricalDailyDataConnector, RetryPolicy
+from .upstox import (
+    UPSTOX_PROVIDER,
+    UpstoxAuthenticationError,
+    UpstoxAvailabilityError,
+    UpstoxDataIntegrityError,
+    UpstoxHistoricalDataAdapter,
+    UpstoxMarketDataError,
+    UpstoxPermissionError,
+    UpstoxRateLimitError,
+    UpstoxRequestError,
 )
 
 __all__ = [
@@ -18,6 +40,12 @@ __all__ = [
     "DailyCandleArchive",
     "DailyCandleBatch",
     "FullQuoteBatch",
+    "HistoricalDailyCandle",
+    "HistoricalDailyCandleBatch",
+    "HistoricalDailyDataConnector",
+    "HistoricalDailyRequest",
+    "HistoricalInstrumentBinding",
+    "HistoricalResponsePage",
     "InstrumentBatch",
     "KiteCredentials",
     "KiteDepthLevel",
@@ -26,4 +54,15 @@ __all__ = [
     "MarketDataConfig",
     "MissingMarketDataConfiguration",
     "NseSessionFinality",
+    "RetryPolicy",
+    "UPSTOX_PROVIDER",
+    "UpstoxAuthenticationError",
+    "UpstoxAvailabilityError",
+    "UpstoxCredentials",
+    "UpstoxDataIntegrityError",
+    "UpstoxHistoricalDataAdapter",
+    "UpstoxMarketDataError",
+    "UpstoxPermissionError",
+    "UpstoxRateLimitError",
+    "UpstoxRequestError",
 ]

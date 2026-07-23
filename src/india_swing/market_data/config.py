@@ -8,6 +8,7 @@ from pathlib import Path
 
 KITE_API_KEY_ENV = "INDIA_SWING_KITE_API_KEY"
 KITE_ACCESS_TOKEN_ENV = "INDIA_SWING_KITE_ACCESS_TOKEN"
+UPSTOX_ACCESS_TOKEN_ENV = "INDIA_SWING_UPSTOX_ACCESS_TOKEN"
 MARKET_DATA_ROOT_ENV = "INDIA_SWING_MARKET_DATA_ROOT"
 
 
@@ -54,6 +55,36 @@ class KiteCredentials:
 
     def __repr__(self) -> str:
         return "KiteCredentials(api_key=<redacted>, access_token=<redacted>)"
+
+
+class UpstoxCredentials:
+    """Runtime-only bearer/analytics token with no serializable fields."""
+
+    __slots__ = ("_access_token",)
+
+    def __init__(self, access_token: str) -> None:
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise MissingMarketDataConfiguration("Upstox access token is empty")
+        self._access_token = access_token
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> UpstoxCredentials:
+        values = os.environ if environ is None else environ
+        if not values.get(UPSTOX_ACCESS_TOKEN_ENV, "").strip():
+            raise MissingMarketDataConfiguration(
+                f"missing required environment variable: {UPSTOX_ACCESS_TOKEN_ENV}"
+            )
+        return cls(values[UPSTOX_ACCESS_TOKEN_ENV])
+
+    def access_token(self) -> str:
+        return self._access_token
+
+    @property
+    def identity_material(self) -> dict[str, str]:
+        return {"provider": "UPSTOX", "auth_scheme": "bearer_or_analytics_token"}
+
+    def __repr__(self) -> str:
+        return "UpstoxCredentials(access_token=<redacted>)"
 
 
 @dataclass(frozen=True, slots=True)

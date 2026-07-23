@@ -7,9 +7,12 @@ from india_swing.identity import content_id
 from .kite import KiteMarketDataAdapter
 from .models import (
     DailyCandleArchive,
+    HistoricalDailyCandleBatch,
+    HistoricalDailyRequest,
     InstrumentBatch,
     NseSessionFinality,
 )
+from .provider import HistoricalDailyDataConnector
 from .snapshot_store import (
     LocalMarketSnapshotStore,
     MarketSnapshotIntegrityError,
@@ -19,6 +22,66 @@ from .snapshot_store import (
 
 class InstrumentLineageError(ValueError):
     pass
+
+
+class HistoricalCollectionError(ValueError):
+    pass
+
+
+class HistoricalMarketDataCollector:
+    """Persist provider-neutral history without weakening point-in-time lineage."""
+
+    def __init__(
+        self,
+        connector: HistoricalDailyDataConnector,
+        store: LocalMarketSnapshotStore,
+    ) -> None:
+        self.connector = connector
+        self.store = store
+
+    def collect(self, request: HistoricalDailyRequest) -> StoredMarketSnapshot:
+        if type(request) is not HistoricalDailyRequest:
+            raise TypeError("request must be an exact HistoricalDailyRequest")
+        try:
+            request.verify_content_identity()
+        except (TypeError, ValueError):
+            raise HistoricalCollectionError(
+                "historical request failed canonical identity verification"
+            ) from None
+        if self.connector.provider != request.binding.provider:
+            raise HistoricalCollectionError(
+                "historical connector and instrument binding providers disagree"
+            )
+
+        batch = self.connector.fetch_historical_daily(request)
+        if type(batch) is not HistoricalDailyCandleBatch:
+            raise HistoricalCollectionError(
+                "historical connector returned an unsupported payload"
+            )
+        try:
+            batch.verify_content_identity()
+        except (TypeError, ValueError):
+            raise HistoricalCollectionError(
+                "historical batch failed canonical identity verification"
+            ) from None
+        if (
+            batch.request.request_id != request.request_id
+            or batch.provider != self.connector.provider
+            or batch.provider_version != self.connector.provider_version
+        ):
+            raise HistoricalCollectionError(
+                "historical connector response lineage does not match the request"
+            )
+
+        provider_component = batch.provider.casefold().replace("_", "-")
+        return self.store.put(
+            dataset=f"historical-daily-{provider_component}-nse",
+            selection_key=request.request_id,
+            provider=batch.provider,
+            provider_version=batch.provider_version,
+            observed_at=batch.observed_at,
+            normalized_payload=batch,
+        )
 
 
 class MarketDataCollector:

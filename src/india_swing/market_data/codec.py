@@ -12,6 +12,11 @@ from .models import (
     DailyCandle,
     DailyCandleArchive,
     DailyCandleBatch,
+    HistoricalDailyCandle,
+    HistoricalDailyCandleBatch,
+    HistoricalDailyRequest,
+    HistoricalInstrumentBinding,
+    HistoricalResponsePage,
     InstrumentBatch,
     KiteInstrument,
     NseSessionFinality,
@@ -52,6 +57,11 @@ _ALLOWED_DATACLASSES = (
     DailyCandle,
     DailyCandleBatch,
     DailyCandleArchive,
+    HistoricalInstrumentBinding,
+    HistoricalDailyRequest,
+    HistoricalDailyCandle,
+    HistoricalResponsePage,
+    HistoricalDailyCandleBatch,
 )
 _TYPE_TO_TAG = {
     value_type: f"{value_type.__module__}.{value_type.__qualname__}"
@@ -215,14 +225,30 @@ def _decode(value: object) -> object:
         value_type = _TAG_TO_TYPE.get(tag)
         if value_type is None:
             raise MarketPayloadCodecError("unsupported encoded dataclass")
-        expected_fields = {field.name for field in fields(value_type)}
+        dataclass_fields = fields(value_type)
+        expected_fields = {field.name for field in dataclass_fields}
         if set(encoded_fields) != expected_fields:
             raise MarketPayloadCodecError("encoded dataclass fields do not match its schema")
         decoded_fields = {name: _decode(item) for name, item in encoded_fields.items()}
         try:
-            return value_type(**decoded_fields)
+            reconstructed = value_type(
+                **{
+                    field.name: decoded_fields[field.name]
+                    for field in dataclass_fields
+                    if field.init
+                }
+            )
         except (TypeError, ValueError) as exc:
             raise MarketPayloadCodecError("encoded dataclass violates its schema") from exc
+        if any(
+            getattr(reconstructed, field.name) != decoded_fields[field.name]
+            for field in dataclass_fields
+            if not field.init
+        ):
+            raise MarketPayloadCodecError(
+                "encoded dataclass derived identity does not match its content"
+            )
+        return reconstructed
     raise MarketPayloadCodecError("unknown market payload tag")
 
 
@@ -245,6 +271,8 @@ def market_payload_record_count(value: object) -> int:
         return len(value.batch.candles)
     if isinstance(value, DailyCandleBatch):
         return len(value.candles)
+    if isinstance(value, HistoricalDailyCandleBatch):
+        return value.record_count
     if isinstance(value, Mapping):
         records = value.get("records")
         if isinstance(records, (list, tuple)):

@@ -4,7 +4,6 @@ import random
 import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal, InvalidOperation
 from importlib import metadata
@@ -12,12 +11,17 @@ from time import monotonic, sleep
 from typing import Any, Protocol
 
 from india_swing.domain.models import INDIA_STANDARD_TIME
+from india_swing.identity import content_id
 
 from .config import KiteCredentials
 from .models import (
     DailyCandle,
     DailyCandleBatch,
     FullQuoteBatch,
+    HistoricalDailyCandle,
+    HistoricalDailyCandleBatch,
+    HistoricalDailyRequest,
+    HistoricalResponsePage,
     InstrumentBatch,
     KiteDepthLevel,
     KiteFullQuote,
@@ -26,6 +30,7 @@ from .models import (
     MAXIMUM_QUOTE_KEYS,
     require_canonical_listing_keys,
 )
+from .provider import RequestRateLimiter, RetryPolicy
 
 
 PINNED_KITE_SDK_VERSION = "5.2.0"
@@ -47,28 +52,6 @@ class KiteReadClient(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     def quote(self, *instruments: str) -> dict[str, dict[str, Any]]: ...
-
-
-class RequestRateLimiter(Protocol):
-    def wait(self, operation: str) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class RetryPolicy:
-    max_attempts: int = 3
-    base_delay_seconds: float = 0.5
-    maximum_delay_seconds: float = 4.0
-    jitter_seconds: float = 0.25
-
-    def __post_init__(self) -> None:
-        if self.max_attempts <= 0:
-            raise ValueError("max_attempts must be positive")
-        if min(
-            self.base_delay_seconds,
-            self.maximum_delay_seconds,
-            self.jitter_seconds,
-        ) < 0:
-            raise ValueError("retry delays cannot be negative")
 
 
 class EndpointRateLimiter:
@@ -301,6 +284,14 @@ class KiteMarketDataAdapter:
             "order_access": False,
         }
 
+    @property
+    def provider(self) -> str:
+        return "ZERODHA_KITE"
+
+    @property
+    def provider_version(self) -> str:
+        return self.model_version
+
     def fetch_instruments(self, exchange: str = "NSE") -> InstrumentBatch:
         exchange = exchange.strip().upper()
         if not exchange:
@@ -406,6 +397,90 @@ class KiteMarketDataAdapter:
             raise KiteDataIntegrityError(
                 "historical_data",
                 f"InvalidBatch:{type(exc).__name__}",
+            ) from None
+
+    def fetch_historical_daily(
+        self,
+        request: HistoricalDailyRequest,
+    ) -> HistoricalDailyCandleBatch:
+        """Translate Kite daily candles into the shared historical-data model.
+
+        The request's binding interval is the authority for token vintage. This
+        method never obtains a current instrument dump or silently rebinds a
+        historical listing to today's token.
+        """
+
+        if type(request) is not HistoricalDailyRequest:
+            raise TypeError("request must be an exact HistoricalDailyRequest")
+        try:
+            request.verify_content_identity()
+        except (TypeError, ValueError):
+            raise KiteDataIntegrityError(
+                "historical_data",
+                "InvalidCanonicalRequest",
+            ) from None
+        if request.binding.provider != self.provider:
+            raise KiteDataIntegrityError("historical_data", "ProviderBindingMismatch")
+        if re.fullmatch(r"[1-9]\d*", request.binding.provider_instrument_id) is None:
+            raise KiteDataIntegrityError("historical_data", "InvalidProviderInstrumentId")
+
+        request_started_at = self._observed_at()
+        if request_started_at < request.requested_at:
+            raise KiteDataIntegrityError("historical_data", "RequestClockMismatch")
+        instrument_token = int(request.binding.provider_instrument_id)
+        candles: list[HistoricalDailyCandle] = []
+        pages: list[HistoricalResponsePage] = []
+        previous_observed_at = request_started_at
+        for session in request.sessions:
+            batch = self.fetch_daily_candle(
+                instrument_token,
+                session,
+                session_finality=NseSessionFinality.regular_collection_guard(session),
+            )
+            if batch.observed_at < previous_observed_at:
+                raise KiteDataIntegrityError(
+                    "historical_data",
+                    "NonMonotonicAcquisitionClock",
+                )
+            value = batch.candles[0]
+            candles.append(
+                HistoricalDailyCandle(
+                    session=value.session,
+                    open=value.open,
+                    high=value.high,
+                    low=value.low,
+                    close=value.close,
+                    volume=value.volume,
+                    open_interest=value.open_interest,
+                )
+            )
+            pages.append(
+                HistoricalResponsePage(
+                    first_session=session,
+                    last_session=session,
+                    payload_sha256=content_id(
+                        {
+                            "schema": "kite-normalized-daily-response/v1",
+                            "batch": batch,
+                        },
+                        length=64,
+                    ),
+                    row_count=1,
+                )
+            )
+            previous_observed_at = batch.observed_at
+        try:
+            return HistoricalDailyCandleBatch(
+                request=request,
+                observed_at=previous_observed_at,
+                provider_version=self.provider_version,
+                candles=tuple(candles),
+                response_pages=tuple(pages),
+            )
+        except (TypeError, ValueError):
+            raise KiteDataIntegrityError(
+                "historical_data",
+                "InvalidCanonicalBatch",
             ) from None
 
     def fetch_full_quotes(self, listing_keys: tuple[str, ...]) -> FullQuoteBatch:
