@@ -16,6 +16,16 @@ from .backfill import (
     UpstoxIsinInstrumentResolver,
     build_historical_backfill_plan,
 )
+from .backfill_gaps import (
+    HISTORICAL_BACKFILL_SESSION_GAP_DATASET,
+    HISTORICAL_BACKFILL_SESSION_GAP_POLICY_VERSION,
+    HISTORICAL_BACKFILL_SESSION_GAP_SCHEMA_VERSION,
+    HistoricalBackfillGapClassification,
+    HistoricalBackfillGapError,
+    HistoricalBackfillGapIntegrityError,
+    HistoricalBackfillSessionGapEvidence,
+    LocalHistoricalBackfillSessionGapStore,
+)
 from .config import (
     KITE_API_SECRET_ENV,
     KiteCredentials,
@@ -93,7 +103,11 @@ from .models import (
     KiteInstrument,
     NseSessionFinality,
 )
-from .provider import HistoricalDailyDataConnector, RetryPolicy
+from .provider import (
+    HistoricalDailyDataConnector,
+    HistoricalEmptyProviderResponseError,
+    RetryPolicy,
+)
 from .reconciliation import (
     HISTORICAL_RECONCILIATION_DATASET,
     HISTORICAL_RECONCILIATION_POLICY_VERSION,
@@ -135,6 +149,9 @@ __all__ = [
     "DailyCandleArchive",
     "DailyCandleBatch",
     "FullQuoteBatch",
+    "HISTORICAL_BACKFILL_SESSION_GAP_DATASET",
+    "HISTORICAL_BACKFILL_SESSION_GAP_POLICY_VERSION",
+    "HISTORICAL_BACKFILL_SESSION_GAP_SCHEMA_VERSION",
     "HistoricalBackfillCompletion",
     "HistoricalBackfillBlockerAction",
     "HistoricalBackfillBlockerEntry",
@@ -143,6 +160,11 @@ __all__ = [
     "HistoricalBackfillBlockerReport",
     "HistoricalBackfillError",
     "HistoricalBackfillEvidenceCaseRequest",
+    "HistoricalBackfillGapClassification",
+    "HistoricalBackfillGapError",
+    "HistoricalBackfillGapIntegrityError",
+    "HistoricalBackfillSessionGapEvidence",
+    "LocalHistoricalBackfillSessionGapStore",
     "HistoricalBackfillEvidenceDocumentNeed",
     "HistoricalBackfillEvidenceObservation",
     "HistoricalBackfillEvidenceWorkPackage",
@@ -172,6 +194,7 @@ __all__ = [
     "HistoricalDailyCandleBatch",
     "HistoricalDailyDataConnector",
     "HistoricalDailyRequest",
+    "HistoricalEmptyProviderResponseError",
     "HistoricalInstrumentBinding",
     "HistoricalResponsePage",
     "HistoricalReconciliationCollector",

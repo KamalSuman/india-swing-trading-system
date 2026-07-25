@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from india_swing.identity import content_id
@@ -22,6 +23,7 @@ from india_swing.identity_registry import (
 )
 from india_swing.market_data.backfill import (
     HistoricalBackfillError,
+    HistoricalBackfillIntegrityError,
     HistoricalBackfillIssueCode,
     HistoricalBackfillRunner,
     HistoricalBackfillStateError,
@@ -29,7 +31,17 @@ from india_swing.market_data.backfill import (
     UpstoxIsinInstrumentResolver,
     build_historical_backfill_plan,
 )
+from india_swing.market_data.backfill_gaps import (
+    HistoricalBackfillSessionGapEvidence,
+    LocalHistoricalBackfillSessionGapStore,
+)
 from india_swing.market_data.collection import HistoricalMarketDataCollector
+from india_swing.market_data.models import (
+    HistoricalDailyCandle,
+    HistoricalDailyCandleBatch,
+    HistoricalResponsePage,
+)
+from india_swing.market_data.provider import HistoricalEmptyProviderResponseError
 from india_swing.market_data.snapshot_store import LocalMarketSnapshotStore
 from india_swing.reference.calendar import (
     CalendarDay,
@@ -745,6 +757,331 @@ class HistoricalBackfillRunnerTests(unittest.TestCase):
 
         self.assertEqual(connector.calls, 0)
         self.assertIsNone(self.progress_store.load(self.plan.plan_id))
+
+
+class FakeGapConnector:
+    provider = "UPSTOX"
+    provider_version = "fake-gap-connector/v1"
+
+    def __init__(self, outcomes: dict | None = None) -> None:
+        self.outcomes = outcomes or {}
+        self.calls: list[str] = []
+
+    def fetch_historical_daily(self, request) -> HistoricalDailyCandleBatch:
+        self.calls.append(request.request_id)
+        outcome = self.outcomes.get(request.request_id)
+        if isinstance(outcome, Exception):
+            raise outcome
+        if outcome == "raise":
+            raise HistoricalEmptyProviderResponseError(
+                provider=self.provider,
+                provider_version=self.provider_version,
+                provider_instrument_id=request.binding.provider_instrument_id,
+                session=request.sessions[-1],
+                observed_at=request.requested_at,
+                normalized_response_sha256="c" * 64,
+            )
+        candles = tuple(
+            HistoricalDailyCandle(
+                session=session,
+                open=Decimal("100.00"),
+                high=Decimal("101.00"),
+                low=Decimal("99.00"),
+                close=Decimal("100.50"),
+                volume=1000,
+            )
+            for session in request.sessions
+        )
+        page = HistoricalResponsePage(
+            first_session=request.sessions[0],
+            last_session=request.sessions[-1],
+            payload_sha256="b" * 64,
+            row_count=len(request.sessions),
+        )
+        return HistoricalDailyCandleBatch(
+            request=request,
+            observed_at=request.requested_at,
+            provider_version=self.provider_version,
+            candles=candles,
+            response_pages=(page,),
+        )
+
+
+class HistoricalBackfillRunnerQuarantineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.plan = plan(self.root / "inputs")
+        self.snapshot_store = LocalMarketSnapshotStore(self.root / "snapshots")
+        self.progress_store = LocalHistoricalBackfillProgressStore(
+            self.root / "progress"
+        )
+        self.gapped_request = self.plan.requests[0]
+        self.safe_request = self.plan.requests[1]
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _gap_evidence(self, request, **overrides):
+        values = dict(
+            plan_id=self.plan.plan_id,
+            request_id=request.request_id,
+            provider=request.binding.provider,
+            provider_version="fake-gap-connector/v1",
+            provider_instrument_id=request.binding.provider_instrument_id,
+            listing_key=request.binding.listing_key,
+            security_series=request.binding.security_series,
+            isin=request.binding.isin,
+            session=request.sessions[-1],
+            response_observed_at=request.requested_at,
+            normalized_response_sha256="c" * 64,
+        )
+        values.update(overrides)
+        return HistoricalBackfillSessionGapEvidence(**values)
+
+    def test_default_behavior_aborts_with_no_gap_or_completion(self) -> None:
+        connector = FakeGapConnector({self.gapped_request.request_id: "raise"})
+        runner = HistoricalBackfillRunner(
+            connector,
+            self.snapshot_store,
+            self.progress_store,
+            clock=lambda: RUN_CLOCK,
+        )
+
+        with self.assertRaises(HistoricalEmptyProviderResponseError):
+            runner.run(self.plan)
+
+        progress = self.progress_store.load(self.plan.plan_id)
+        self.assertEqual(progress.completions, ())
+
+    def test_quarantine_flag_requires_an_injected_gap_store(self) -> None:
+        connector = FakeGapConnector()
+        runner = HistoricalBackfillRunner(
+            connector,
+            self.snapshot_store,
+            self.progress_store,
+            clock=lambda: RUN_CLOCK,
+        )
+
+        with self.assertRaises(ValueError):
+            runner.run(self.plan, quarantine_empty_responses=True)
+
+    def test_one_empty_response_persists_one_gap_and_collection_continues(
+        self,
+    ) -> None:
+        connector = FakeGapConnector({self.gapped_request.request_id: "raise"})
+        gap_store = LocalHistoricalBackfillSessionGapStore(self.root / "gaps")
+        runner = HistoricalBackfillRunner(
+            connector,
+            self.snapshot_store,
+            self.progress_store,
+            gap_store=gap_store,
+            clock=lambda: RUN_CLOCK,
+        )
+
+        progress = runner.run(self.plan, quarantine_empty_responses=True)
+
+        self.assertEqual(
+            {value.request_id for value in progress.completions},
+            {self.safe_request.request_id},
+        )
+        gaps = gap_store.load_unresolved(self.plan.plan_id)
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual(gaps[0].request_id, self.gapped_request.request_id)
+        self.assertGreater(len(self.gapped_request.sessions), 1)
+        self.assertEqual(gaps[0].session, self.gapped_request.sessions[-1])
+        self.assertFalse(HistoricalBackfillRunner.is_complete(self.plan, progress))
+
+    def test_rerun_skips_the_quarantined_request_and_reaches_later_work(
+        self,
+    ) -> None:
+        connector = FakeGapConnector({self.gapped_request.request_id: "raise"})
+        gap_store = LocalHistoricalBackfillSessionGapStore(self.root / "gaps")
+        first_runner = HistoricalBackfillRunner(
+            connector,
+            self.snapshot_store,
+            self.progress_store,
+            gap_store=gap_store,
+            clock=lambda: RUN_CLOCK,
+        )
+
+        first_runner.run(self.plan, maximum_requests=1, quarantine_empty_responses=True)
+
+        self.assertEqual(connector.calls.count(self.gapped_request.request_id), 1)
+        self.assertEqual(len(gap_store.load_unresolved(self.plan.plan_id)), 1)
+
+        second_runner = HistoricalBackfillRunner(
+            connector,
+            self.snapshot_store,
+            self.progress_store,
+            gap_store=gap_store,
+            clock=lambda: RUN_CLOCK,
+        )
+        progress = second_runner.run(
+            self.plan, maximum_requests=1, quarantine_empty_responses=True
+        )
+
+        self.assertEqual(connector.calls.count(self.gapped_request.request_id), 1)
+        self.assertEqual(
+            {value.request_id for value in progress.completions},
+            {self.safe_request.request_id},
+        )
+
+    def test_lineage_mismatches_abort_before_a_gap_is_accepted(self) -> None:
+        target = self.gapped_request
+
+        def make_error(**overrides):
+            values = dict(
+                provider=target.binding.provider,
+                provider_version="fake-gap-connector/v1",
+                provider_instrument_id=target.binding.provider_instrument_id,
+                session=target.sessions[-1],
+                observed_at=target.requested_at,
+                normalized_response_sha256="c" * 64,
+            )
+            values.update(overrides)
+            return HistoricalEmptyProviderResponseError(**values)
+
+        cases = {
+            "wrong_provider": make_error(provider="ZERODHA_KITE"),
+            "wrong_provider_version": make_error(provider_version="other-connector/v1"),
+            "wrong_provider_instrument_id": make_error(provider_instrument_id="999999"),
+            "session_outside_request": make_error(session=date(2099, 1, 1)),
+            "pre_request_observed_at": make_error(
+                observed_at=target.requested_at - timedelta(days=1)
+            ),
+        }
+        for name, error in cases.items():
+            with self.subTest(case=name):
+                gap_store = LocalHistoricalBackfillSessionGapStore(
+                    self.root / "gaps" / name
+                )
+                progress_store = LocalHistoricalBackfillProgressStore(
+                    self.root / "progress" / name
+                )
+                connector = FakeGapConnector({target.request_id: error})
+                runner = HistoricalBackfillRunner(
+                    connector,
+                    self.snapshot_store,
+                    progress_store,
+                    gap_store=gap_store,
+                    clock=lambda: RUN_CLOCK,
+                )
+
+                with self.assertRaises(HistoricalBackfillIntegrityError):
+                    runner.run(self.plan, quarantine_empty_responses=True)
+
+                self.assertEqual(gap_store.load_unresolved(self.plan.plan_id), ())
+
+        malformed_hash_error = make_error()
+        malformed_hash_error.normalized_response_sha256 = "not-a-hash"
+        gap_store = LocalHistoricalBackfillSessionGapStore(
+            self.root / "gaps" / "malformed_hash"
+        )
+        progress_store = LocalHistoricalBackfillProgressStore(
+            self.root / "progress" / "malformed_hash"
+        )
+        connector = FakeGapConnector({target.request_id: malformed_hash_error})
+        runner = HistoricalBackfillRunner(
+            connector,
+            self.snapshot_store,
+            progress_store,
+            gap_store=gap_store,
+            clock=lambda: RUN_CLOCK,
+        )
+
+        with self.assertRaises(ValueError):
+            runner.run(self.plan, quarantine_empty_responses=True)
+
+        self.assertEqual(gap_store.load_unresolved(self.plan.plan_id), ())
+
+    def test_existing_gap_lineage_is_reverified_before_provider_calls(self) -> None:
+        target = self.gapped_request
+        cases = {
+            "wrong_provider_version": self._gap_evidence(
+                target, provider_version="other-connector/v1"
+            ),
+            "pre_request_observed_at": self._gap_evidence(
+                target,
+                response_observed_at=target.requested_at - timedelta(seconds=1),
+            ),
+            "future_observed_at": self._gap_evidence(
+                target, response_observed_at=RUN_CLOCK + timedelta(seconds=1)
+            ),
+        }
+        for index, (name, evidence) in enumerate(cases.items()):
+            with self.subTest(case=name):
+                gap_store = LocalHistoricalBackfillSessionGapStore(
+                    self.root / "existing-gap" / str(index)
+                )
+                gap_store.put(evidence)
+                connector = FakeGapConnector()
+                runner = HistoricalBackfillRunner(
+                    connector,
+                    self.snapshot_store,
+                    LocalHistoricalBackfillProgressStore(
+                        self.root / "existing-progress" / str(index)
+                    ),
+                    gap_store=gap_store,
+                    clock=lambda: RUN_CLOCK,
+                )
+
+                with self.assertRaises(HistoricalBackfillStateError):
+                    runner.run(self.plan, quarantine_empty_responses=True)
+
+                self.assertEqual(connector.calls, [])
+
+    def test_completed_request_cannot_also_have_an_unresolved_gap(self) -> None:
+        connector = FakeGapConnector()
+        runner = HistoricalBackfillRunner(
+            connector,
+            self.snapshot_store,
+            self.progress_store,
+            clock=lambda: RUN_CLOCK,
+        )
+        progress = runner.run(self.plan)
+        self.assertTrue(HistoricalBackfillRunner.is_complete(self.plan, progress))
+
+        gap_store = LocalHistoricalBackfillSessionGapStore(self.root / "overlap-gaps")
+        gap_store.put(self._gap_evidence(self.gapped_request))
+        connector.calls.clear()
+        overlap_runner = HistoricalBackfillRunner(
+            connector,
+            self.snapshot_store,
+            self.progress_store,
+            gap_store=gap_store,
+            clock=lambda: RUN_CLOCK,
+        )
+
+        with self.assertRaises(HistoricalBackfillStateError):
+            overlap_runner.run(self.plan, quarantine_empty_responses=True)
+
+        self.assertEqual(connector.calls, [])
+
+    def test_fresh_future_empty_response_is_not_persisted(self) -> None:
+        target = self.gapped_request
+        error = HistoricalEmptyProviderResponseError(
+            provider=target.binding.provider,
+            provider_version="fake-gap-connector/v1",
+            provider_instrument_id=target.binding.provider_instrument_id,
+            session=target.sessions[-1],
+            observed_at=RUN_CLOCK + timedelta(seconds=1),
+            normalized_response_sha256="c" * 64,
+        )
+        connector = FakeGapConnector({target.request_id: error})
+        gap_store = LocalHistoricalBackfillSessionGapStore(self.root / "future-gap")
+        runner = HistoricalBackfillRunner(
+            connector,
+            self.snapshot_store,
+            self.progress_store,
+            gap_store=gap_store,
+            clock=lambda: RUN_CLOCK,
+        )
+
+        with self.assertRaises(HistoricalBackfillStateError):
+            runner.run(self.plan, quarantine_empty_responses=True)
+
+        self.assertEqual(gap_store.load_unresolved(self.plan.plan_id), ())
 
 
 if __name__ == "__main__":
