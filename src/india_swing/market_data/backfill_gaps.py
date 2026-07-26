@@ -37,6 +37,7 @@ class HistoricalBackfillGapIntegrityError(HistoricalBackfillGapError):
 
 class HistoricalBackfillGapClassification(str, Enum):
     UNRESOLVED_EMPTY_PROVIDER_RESPONSE = "UNRESOLVED_EMPTY_PROVIDER_RESPONSE"
+    UNRESOLVED_PROVIDER_REQUEST_REJECTION = "UNRESOLVED_PROVIDER_REQUEST_REJECTION"
 
 
 def _sha256(value: object, field_name: str) -> None:
@@ -59,11 +60,12 @@ def _utc(value: object, field_name: str) -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class HistoricalBackfillSessionGapEvidence:
-    """Durable, collection-only evidence that one provider session was empty.
+    """Durable, collection-only evidence of one unresolved provider session.
 
-    This is never proof of zero trading. NSE EOD or other official evidence
-    is required by a future task to adjudicate a gap; this evidence cannot be
-    deleted, resolved, accepted, or mutated by this module.
+    An empty response or request rejection is never proof of zero trading or
+    an invalid listing. NSE EOD and provider-routing evidence are required by
+    a future task to adjudicate a gap; this evidence cannot be deleted,
+    resolved, accepted, or mutated by this module.
     """
 
     plan_id: str
@@ -132,11 +134,7 @@ class HistoricalBackfillSessionGapEvidence:
             or SHA256_IDENTIFIER.fullmatch(self.normalized_response_sha256) is None
         ):
             raise ValueError("gap normalized_response_sha256 must be a lowercase SHA-256")
-        if (
-            type(self.classification) is not HistoricalBackfillGapClassification
-            or self.classification
-            is not HistoricalBackfillGapClassification.UNRESOLVED_EMPTY_PROVIDER_RESPONSE
-        ):
+        if type(self.classification) is not HistoricalBackfillGapClassification:
             raise ValueError("unsupported historical backfill gap classification")
         if self.collection_only is not True:
             raise ValueError("historical backfill session gaps must remain collection-only")

@@ -36,11 +36,19 @@ from .config import (
 )
 from .kite import KiteMarketDataAdapter, PINNED_KITE_SDK_VERSION
 from .kite_auth import (
+    KiteCachedCredentialValidator,
     KiteInteractiveAuthenticator,
     KiteLoginCallbackReceiver,
     KiteLoginError,
     KiteLoginSessionClient,
     LoopbackKiteCallbackReceiver,
+)
+from .kite_session_cache import (
+    KITE_SESSION_CACHE_SCHEMA_VERSION,
+    KiteDailySessionCache,
+    KiteSessionCacheError,
+    WindowsDPAPISecretProtector,
+    default_kite_session_cache_path,
 )
 from .kite_instruments import (
     KITE_INSTRUMENT_RESOLVER_POLICY_VERSION,
@@ -106,6 +114,7 @@ from .models import (
 from .provider import (
     HistoricalDailyDataConnector,
     HistoricalEmptyProviderResponseError,
+    HistoricalProviderRequestRejectedError,
     RetryPolicy,
 )
 from .reconciliation import (
@@ -195,6 +204,7 @@ __all__ = [
     "HistoricalDailyDataConnector",
     "HistoricalDailyRequest",
     "HistoricalEmptyProviderResponseError",
+    "HistoricalProviderRequestRejectedError",
     "HistoricalInstrumentBinding",
     "HistoricalResponsePage",
     "HistoricalReconciliationCollector",
@@ -214,11 +224,17 @@ __all__ = [
     "KiteInstrument",
     "KiteMarketDataAdapter",
     "PINNED_KITE_SDK_VERSION",
+    "KiteCachedCredentialValidator",
     "KiteInteractiveAuthenticator",
     "KiteLoginCallbackReceiver",
     "KiteLoginError",
     "KiteLoginSessionClient",
     "LoopbackKiteCallbackReceiver",
+    "KITE_SESSION_CACHE_SCHEMA_VERSION",
+    "KiteDailySessionCache",
+    "KiteSessionCacheError",
+    "WindowsDPAPISecretProtector",
+    "default_kite_session_cache_path",
     "KITE_INSTRUMENT_RESOLVER_POLICY_VERSION",
     "KITE_INSTRUMENTS_DATASET",
     "KITE_INSTRUMENTS_SELECTION_KEY",

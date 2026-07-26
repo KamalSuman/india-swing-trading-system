@@ -25,6 +25,7 @@ from india_swing.market_data.backfill import (
     HistoricalBackfillError,
     HistoricalBackfillIntegrityError,
     HistoricalBackfillIssueCode,
+    HistoricalBackfillPlan,
     HistoricalBackfillRunner,
     HistoricalBackfillStateError,
     LocalHistoricalBackfillProgressStore,
@@ -32,6 +33,7 @@ from india_swing.market_data.backfill import (
     build_historical_backfill_plan,
 )
 from india_swing.market_data.backfill_gaps import (
+    HistoricalBackfillGapClassification,
     HistoricalBackfillSessionGapEvidence,
     LocalHistoricalBackfillSessionGapStore,
 )
@@ -39,9 +41,14 @@ from india_swing.market_data.collection import HistoricalMarketDataCollector
 from india_swing.market_data.models import (
     HistoricalDailyCandle,
     HistoricalDailyCandleBatch,
+    HistoricalDailyRequest,
+    HistoricalInstrumentBinding,
     HistoricalResponsePage,
 )
-from india_swing.market_data.provider import HistoricalEmptyProviderResponseError
+from india_swing.market_data.provider import (
+    HistoricalEmptyProviderResponseError,
+    HistoricalProviderRequestRejectedError,
+)
 from india_swing.market_data.snapshot_store import LocalMarketSnapshotStore
 from india_swing.reference.calendar import (
     CalendarDay,
@@ -781,6 +788,16 @@ class FakeGapConnector:
                 observed_at=request.requested_at,
                 normalized_response_sha256="c" * 64,
             )
+        if outcome == "reject":
+            raise HistoricalProviderRequestRejectedError(
+                provider=self.provider,
+                provider_version=self.provider_version,
+                provider_instrument_id=request.binding.provider_instrument_id,
+                session=request.sessions[-1],
+                observed_at=request.requested_at,
+                upstream_error_type="InputException",
+                normalized_response_sha256="d" * 64,
+            )
         candles = tuple(
             HistoricalDailyCandle(
                 session=session,
@@ -1082,6 +1099,111 @@ class HistoricalBackfillRunnerQuarantineTests(unittest.TestCase):
             runner.run(self.plan, quarantine_empty_responses=True)
 
         self.assertEqual(gap_store.load_unresolved(self.plan.plan_id), ())
+
+    def test_request_rejection_requires_its_explicit_option(self) -> None:
+        connector = FakeGapConnector({self.gapped_request.request_id: "reject"})
+        gap_store = LocalHistoricalBackfillSessionGapStore(
+            self.root / "request-rejection-default"
+        )
+        runner = HistoricalBackfillRunner(
+            connector,
+            self.snapshot_store,
+            self.progress_store,
+            gap_store=gap_store,
+            clock=lambda: RUN_CLOCK,
+        )
+
+        with self.assertRaises(HistoricalProviderRequestRejectedError):
+            runner.run(self.plan, quarantine_empty_responses=True)
+
+        self.assertEqual(gap_store.load_unresolved(self.plan.plan_id), ())
+
+    def test_request_rejection_is_durable_and_unrelated_work_continues(self) -> None:
+        connector = FakeGapConnector({self.gapped_request.request_id: "reject"})
+        gap_store = LocalHistoricalBackfillSessionGapStore(
+            self.root / "request-rejection-enabled"
+        )
+        runner = HistoricalBackfillRunner(
+            connector,
+            self.snapshot_store,
+            self.progress_store,
+            gap_store=gap_store,
+            clock=lambda: RUN_CLOCK,
+        )
+
+        progress = runner.run(
+            self.plan,
+            quarantine_request_rejections=True,
+        )
+
+        self.assertEqual(
+            {value.request_id for value in progress.completions},
+            {self.safe_request.request_id},
+        )
+        gaps = gap_store.load_unresolved(self.plan.plan_id)
+        self.assertEqual(len(gaps), 1)
+        self.assertIs(
+            gaps[0].classification,
+            HistoricalBackfillGapClassification.UNRESOLVED_PROVIDER_REQUEST_REJECTION,
+        )
+        self.assertFalse(HistoricalBackfillRunner.is_complete(self.plan, progress))
+
+    def test_three_consecutive_request_rejections_trip_the_safety_ceiling(self) -> None:
+        source_binding = self.safe_request.binding
+        third_binding = HistoricalInstrumentBinding(
+            exchange=source_binding.exchange,
+            listing_key="NSE:ZZZTEST",
+            security_series=source_binding.security_series,
+            isin="INE123A01016",
+            provider=source_binding.provider,
+            provider_instrument_id="NSE_EQ|INE123A01016",
+            valid_from=source_binding.valid_from,
+            valid_through=source_binding.valid_through,
+            source_snapshot_ids=source_binding.source_snapshot_ids,
+        )
+        third_request = HistoricalDailyRequest(
+            binding=third_binding,
+            sessions=self.safe_request.sessions,
+            requested_at=self.safe_request.requested_at,
+        )
+        three_request_plan = HistoricalBackfillPlan(
+            provider=self.plan.provider,
+            resolver_version=self.plan.resolver_version,
+            identity_registry_id=self.plan.identity_registry_id,
+            calendar_snapshot_id=self.plan.calendar_snapshot_id,
+            coverage_start=self.plan.coverage_start,
+            coverage_end=self.plan.coverage_end,
+            requested_at=self.plan.requested_at,
+            requests=self.plan.requests + (third_request,),
+            issues=self.plan.issues,
+            identity_snapshot_id=self.plan.identity_snapshot_id,
+        )
+        connector = FakeGapConnector(
+            {request.request_id: "reject" for request in three_request_plan.requests}
+        )
+        gap_store = LocalHistoricalBackfillSessionGapStore(
+            self.root / "three-request-rejections"
+        )
+        runner = HistoricalBackfillRunner(
+            connector,
+            LocalMarketSnapshotStore(self.root / "three-request-snapshots"),
+            LocalHistoricalBackfillProgressStore(
+                self.root / "three-request-progress"
+            ),
+            gap_store=gap_store,
+            clock=lambda: RUN_CLOCK,
+        )
+
+        with self.assertRaises(HistoricalBackfillIntegrityError):
+            runner.run(
+                three_request_plan,
+                quarantine_request_rejections=True,
+            )
+
+        self.assertEqual(len(connector.calls), 3)
+        self.assertEqual(
+            len(gap_store.load_unresolved(three_request_plan.plan_id)), 3
+        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from india_swing.market_data.cli import main as market_data_main
 from india_swing.market_data.config import KiteCredentials, MissingMarketDataConfiguration
 from india_swing.market_data.kite import (
     EMPTY_HISTORICAL_RESPONSE_SCHEMA_VERSION,
+    REJECTED_HISTORICAL_REQUEST_SCHEMA_VERSION,
     KiteAuthenticationError,
     KiteAvailabilityError,
     KiteDataIntegrityError,
@@ -27,7 +28,10 @@ from india_swing.market_data.models import (
     NseSessionFinality,
     require_canonical_listing_keys,
 )
-from india_swing.market_data.provider import HistoricalEmptyProviderResponseError
+from india_swing.market_data.provider import (
+    HistoricalEmptyProviderResponseError,
+    HistoricalProviderRequestRejectedError,
+)
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -535,6 +539,37 @@ class KiteDailyCandleAdapterTests(unittest.TestCase):
                 date(2026, 7, 15),
                 session_finality=FINALITY,
             )
+
+    def test_request_rejection_is_sanitized_and_binds_exact_lineage(self) -> None:
+        upstream = type("InputException", (Exception,), {})("injected secret")
+
+        with self.assertRaises(HistoricalProviderRequestRejectedError) as raised:
+            adapter(FakeKiteClient(candles=upstream)).fetch_daily_candle(
+                408065,
+                date(2026, 7, 15),
+                session_finality=FINALITY,
+            )
+
+        error = raised.exception
+        self.assertEqual(error.provider, "ZERODHA_KITE")
+        self.assertEqual(error.provider_version, "kiteconnect/5.2.0")
+        self.assertEqual(error.provider_instrument_id, "408065")
+        self.assertEqual(error.session, date(2026, 7, 15))
+        self.assertEqual(error.upstream_error_type, "InputException")
+        self.assertEqual(
+            error.normalized_response_sha256,
+            content_id(
+                {
+                    "schema": REJECTED_HISTORICAL_REQUEST_SCHEMA_VERSION,
+                    "instrument_token": 408065,
+                    "session": date(2026, 7, 15),
+                    "upstream_error_type": "InputException",
+                },
+                length=64,
+            ),
+        )
+        self.assertEqual(str(error), "historical provider rejected one request")
+        self.assertNotIn("secret", str(error))
 
 
 class KiteHistoricalDailyMultiSessionTests(unittest.TestCase):

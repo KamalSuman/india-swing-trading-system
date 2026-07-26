@@ -11,6 +11,7 @@ from india_swing.market_data.config import (
 )
 from india_swing.market_data.kite_auth import (
     LOOPBACK_CALLBACK_PATH,
+    KiteCachedCredentialValidator,
     KiteInteractiveAuthenticator,
     KiteLoginError,
     LoopbackKiteCallbackReceiver,
@@ -18,6 +19,27 @@ from india_swing.market_data.kite_auth import (
     _SUCCESS_RESPONSE_BODY,
     _parse_kite_callback,
 )
+
+
+_DEFAULT_PROFILE_RESULT = object()
+
+
+class FakeProfileClient:
+    def __init__(
+        self,
+        result: object = _DEFAULT_PROFILE_RESULT,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.result = {} if result is _DEFAULT_PROFILE_RESULT else result
+        self.error = error
+        self.calls = 0
+
+    def profile(self) -> object:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.result
 
 
 class FakeSessionClient:
@@ -355,6 +377,65 @@ class KiteInteractiveAuthenticatorTests(unittest.TestCase):
             authenticator.login()
 
         self.assertNotIn("distinct-request-token", str(raised.exception))
+
+
+class KiteCachedCredentialValidatorTests(unittest.TestCase):
+    def test_mapping_profile_marks_cached_session_valid_without_retention(
+        self,
+    ) -> None:
+        client = FakeProfileClient({"user_id": "sensitive-user-id"})
+        validator = KiteCachedCredentialValidator(client)
+
+        self.assertTrue(validator.is_valid())
+        self.assertEqual(client.calls, 1)
+        self.assertFalse(hasattr(validator, "profile"))
+
+    def test_exact_token_exception_marks_cached_session_invalid(self) -> None:
+        class TokenException(Exception):
+            pass
+
+        client = FakeProfileClient(
+            error=TokenException("distinct-access-token"),
+        )
+
+        self.assertFalse(KiteCachedCredentialValidator(client).is_valid())
+
+    def test_other_validation_failure_is_sanitized_and_fails_closed(self) -> None:
+        client = FakeProfileClient(
+            error=RuntimeError("distinct-network-or-profile-detail"),
+        )
+
+        with self.assertRaises(KiteLoginError) as raised:
+            KiteCachedCredentialValidator(client).is_valid()
+
+        self.assertNotIn(
+            "distinct-network-or-profile-detail",
+            str(raised.exception),
+        )
+
+    def test_non_mapping_profile_response_fails_closed(self) -> None:
+        for result in (None, "profile", [], 123):
+            with self.subTest(result=result):
+                with self.assertRaises(KiteLoginError):
+                    KiteCachedCredentialValidator(
+                        FakeProfileClient(result)
+                    ).is_valid()
+
+    def test_official_factory_rejects_wrong_credentials_before_import(
+        self,
+    ) -> None:
+        with self.assertRaises(TypeError):
+            KiteCachedCredentialValidator.from_official_sdk("credentials")
+
+    def test_official_factory_rejects_sdk_version_mismatch(self) -> None:
+        with patch(
+            "india_swing.market_data.kite_auth.metadata.version",
+            return_value="9.9.9",
+        ):
+            with self.assertRaises(KiteLoginError):
+                KiteCachedCredentialValidator.from_official_sdk(
+                    KiteCredentials("key", "token")
+                )
 
 
 class KiteInteractiveAuthenticatorFromOfficialSdkTests(unittest.TestCase):

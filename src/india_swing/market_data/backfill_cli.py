@@ -66,11 +66,19 @@ from .config import (
     UpstoxCredentials,
 )
 from .kite import KiteMarketDataAdapter
-from .kite_auth import KiteInteractiveAuthenticator, LoopbackKiteCallbackReceiver
+from .kite_auth import (
+    KiteCachedCredentialValidator,
+    KiteInteractiveAuthenticator,
+    LoopbackKiteCallbackReceiver,
+)
 from .kite_instruments import (
     KITE_INSTRUMENTS_DATASET,
     KITE_PROVIDER,
     KiteInstrumentSnapshotResolver,
+)
+from .kite_session_cache import (
+    KiteDailySessionCache,
+    default_kite_session_cache_path,
 )
 from .models import HistoricalDailyCandleBatch
 from .reconciliation import reconcile_historical_batch
@@ -134,8 +142,17 @@ def _add_kite_interactive_login_argument(command: argparse.ArgumentParser) -> No
         "--kite-interactive-login",
         action="store_true",
         help=(
-            "obtain Kite credentials through one local interactive SDK "
-            "login instead of the environment; rejected for provider UPSTOX"
+            "reuse the current user's encrypted daily Kite session, opening "
+            "one local interactive SDK login only when no usable session is "
+            "cached; rejected for provider UPSTOX"
+        ),
+    )
+    command.add_argument(
+        "--kite-refresh-login",
+        action="store_true",
+        help=(
+            "discard the encrypted daily Kite session and open a fresh login; "
+            "requires --kite-interactive-login"
         ),
     )
 
@@ -170,6 +187,15 @@ def parser() -> argparse.ArgumentParser:
             "durably record and skip a request when the provider returns a "
             "structurally valid empty response for one session, instead of "
             "aborting the whole run"
+        ),
+    )
+    run.add_argument(
+        "--quarantine-request-rejections",
+        action="store_true",
+        help=(
+            "durably quarantine one exact non-empty historical request "
+            "rejection and continue unrelated requests; three consecutive "
+            "rejections stop the run fail-closed"
         ),
     )
     _add_kite_interactive_login_argument(run)
@@ -374,23 +400,51 @@ def _plan_value(plan: HistoricalBackfillPlan) -> dict[str, object]:
 
 
 def _kite_credentials(args: argparse.Namespace) -> KiteCredentials:
+    refresh_login = getattr(args, "kite_refresh_login", False)
+    if refresh_login and not getattr(args, "kite_interactive_login", False):
+        raise ValueError(
+            "--kite-refresh-login requires --kite-interactive-login"
+        )
     if getattr(args, "kite_interactive_login", False):
         login_credentials = KiteLoginCredentials.from_env()
+        cache = KiteDailySessionCache(default_kite_session_cache_path())
+        now = datetime.now(timezone.utc)
+        if refresh_login:
+            cache.clear()
+        else:
+            cached = cache.load(
+                login_credentials.api_key(),
+                now=now,
+            )
+            if cached is not None:
+                validator = KiteCachedCredentialValidator.from_official_sdk(
+                    cached
+                )
+                if validator.is_valid():
+                    return cached
+                cache.clear()
         receiver = LoopbackKiteCallbackReceiver()
         authenticator = KiteInteractiveAuthenticator.from_official_sdk(
             login_credentials,
             receiver,
         )
-        return authenticator.login()
+        credentials = authenticator.login()
+        cache.save(
+            credentials,
+            authenticated_at=datetime.now(timezone.utc),
+        )
+        return credentials
     return KiteCredentials.from_env()
 
 
 def _connector_for_plan(plan: HistoricalBackfillPlan, args: argparse.Namespace):
     if plan.provider == UPSTOX_PROVIDER:
-        if getattr(args, "kite_interactive_login", False):
+        if (
+            getattr(args, "kite_interactive_login", False)
+            or getattr(args, "kite_refresh_login", False)
+        ):
             raise ValueError(
-                "--kite-interactive-login is only valid for the ZERODHA_KITE "
-                "provider"
+                "Kite login flags are only valid for the ZERODHA_KITE provider"
             )
         return UpstoxHistoricalDataAdapter(UpstoxCredentials.from_env())
     if plan.provider == KITE_PROVIDER:
@@ -417,7 +471,10 @@ def _run_plan(
     connector = _connector_for_plan(plan, args)
     gap_store = (
         LocalHistoricalBackfillSessionGapStore(config.data_root)
-        if args.quarantine_empty_responses
+        if (
+            args.quarantine_empty_responses
+            or args.quarantine_request_rejections
+        )
         else None
     )
     runner = HistoricalBackfillRunner(
@@ -430,11 +487,15 @@ def _run_plan(
         plan,
         maximum_requests=args.maximum_requests,
         quarantine_empty_responses=args.quarantine_empty_responses,
+        quarantine_request_rejections=args.quarantine_request_rejections,
     )
     unresolved_gaps = (
         gap_store.load_unresolved(plan.plan_id) if gap_store is not None else ()
     )
     safe_complete = runner.is_complete(plan, progress) and not unresolved_gaps
+    unresolved_gaps_by_classification = Counter(
+        value.classification.value for value in unresolved_gaps
+    )
     return 0, {
         "status": (
             "SAFE_REQUESTS_COMPLETE"
@@ -454,6 +515,9 @@ def _run_plan(
         "unresolved_gap_evidence_ids": [
             value.evidence_id for value in unresolved_gaps
         ],
+        "unresolved_gaps_by_classification": dict(
+            sorted(unresolved_gaps_by_classification.items())
+        ),
     }
 
 

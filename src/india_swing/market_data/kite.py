@@ -32,6 +32,7 @@ from .models import (
 )
 from .provider import (
     HistoricalEmptyProviderResponseError,
+    HistoricalProviderRequestRejectedError,
     RequestRateLimiter,
     RetryPolicy,
 )
@@ -39,6 +40,7 @@ from .provider import (
 
 PINNED_KITE_SDK_VERSION = "5.2.0"
 EMPTY_HISTORICAL_RESPONSE_SCHEMA_VERSION = "kite-empty-historical-response/v1"
+REJECTED_HISTORICAL_REQUEST_SCHEMA_VERSION = "kite-rejected-historical-request/v1"
 
 
 class KiteReadClient(Protocol):
@@ -382,17 +384,41 @@ class KiteMarketDataAdapter:
         to_value = datetime.combine(session, time.max.replace(microsecond=0)).isoformat(
             sep=" "
         )
-        raw_rows = self._call(
-            "historical_data",
-            lambda: self._client.historical_data(
-                instrument_token,
-                from_value,
-                to_value,
-                "day",
-                continuous=False,
-                oi=False,
-            ),
-        )
+        try:
+            raw_rows = self._call(
+                "historical_data",
+                lambda: self._client.historical_data(
+                    instrument_token,
+                    from_value,
+                    to_value,
+                    "day",
+                    continuous=False,
+                    oi=False,
+                ),
+            )
+        except KiteRequestError as exc:
+            observed_at = self._observed_at()
+            if observed_at < request_started_at:
+                raise KiteDataIntegrityError(
+                    "historical_data", "NonMonotonicAcquisitionClock"
+                )
+            raise HistoricalProviderRequestRejectedError(
+                provider=self.provider,
+                provider_version=self.model_version,
+                provider_instrument_id=str(instrument_token),
+                session=session,
+                observed_at=observed_at,
+                upstream_error_type=exc.upstream_type,
+                normalized_response_sha256=content_id(
+                    {
+                        "schema": REJECTED_HISTORICAL_REQUEST_SCHEMA_VERSION,
+                        "instrument_token": instrument_token,
+                        "session": session,
+                        "upstream_error_type": exc.upstream_type,
+                    },
+                    length=64,
+                ),
+            ) from None
         if not isinstance(raw_rows, Sequence) or isinstance(raw_rows, (str, bytes)):
             raise KiteDataIntegrityError("historical_data", "InvalidResponseType")
         if len(raw_rows) == 0:

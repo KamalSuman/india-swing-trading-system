@@ -66,6 +66,20 @@ class HistoricalBackfillSessionGapEvidenceTests(unittest.TestCase):
             HistoricalBackfillGapClassification.UNRESOLVED_EMPTY_PROVIDER_RESPONSE,
         )
 
+    def test_request_rejection_classification_is_collection_only(self) -> None:
+        value = gap_evidence(
+            classification=(
+                HistoricalBackfillGapClassification.UNRESOLVED_PROVIDER_REQUEST_REJECTION
+            )
+        )
+
+        self.assertIs(value.collection_only, True)
+        self.assertIs(value.actionable, False)
+        self.assertIs(
+            value.classification,
+            HistoricalBackfillGapClassification.UNRESOLVED_PROVIDER_REQUEST_REJECTION,
+        )
+
     def test_malformed_fields_are_rejected(self) -> None:
         cases = dict(
             plan_id="not-a-hash",

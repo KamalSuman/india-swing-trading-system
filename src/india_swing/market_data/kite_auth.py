@@ -32,8 +32,59 @@ class KiteLoginSessionClient(Protocol):
     ) -> Mapping[str, object]: ...
 
 
+class KiteProfileClient(Protocol):
+    def profile(self) -> Mapping[str, object]: ...
+
+
 class KiteLoginCallbackReceiver(Protocol):
     def receive_request_token(self) -> str: ...
+
+
+class KiteCachedCredentialValidator:
+    """Checks a cached access token without retaining profile data."""
+
+    def __init__(self, client: KiteProfileClient) -> None:
+        self._client = client
+
+    @classmethod
+    def from_official_sdk(
+        cls,
+        credentials: KiteCredentials,
+        *,
+        required_version: str = PINNED_KITE_SDK_VERSION,
+    ) -> "KiteCachedCredentialValidator":
+        if type(credentials) is not KiteCredentials:
+            raise TypeError("credentials must be exact KiteCredentials")
+        try:
+            installed_version = metadata.version("kiteconnect")
+        except metadata.PackageNotFoundError:
+            raise KiteLoginError(
+                "the pinned Kite SDK dependency is unavailable"
+            ) from None
+        if installed_version != required_version:
+            raise KiteLoginError(
+                "installed Kite SDK version does not match the pinned version"
+            )
+        try:
+            from kiteconnect import KiteConnect
+        except ImportError:
+            raise KiteLoginError(
+                "the pinned Kite SDK dependency is unavailable"
+            ) from None
+        client = KiteConnect(api_key=credentials.api_key())
+        client.set_access_token(credentials.access_token())
+        return cls(client)
+
+    def is_valid(self) -> bool:
+        try:
+            profile = self._client.profile()
+        except Exception as exc:
+            if type(exc).__name__ == "TokenException":
+                return False
+            raise KiteLoginError("Kite cached session validation failed") from None
+        if not isinstance(profile, Mapping):
+            raise KiteLoginError("Kite cached session validation response is invalid")
+        return True
 
 
 class KiteInteractiveAuthenticator:

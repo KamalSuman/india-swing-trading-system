@@ -115,6 +115,26 @@ It can be invalidated earlier by logout or other session changes. This project
 does not automate passwords or TOTP. Do not paste credentials into source files,
 command history, logs, issues, or chat.
 
+The historical-backfill CLI also supports a cache-first interactive flow. Set
+`INDIA_SWING_KITE_API_KEY` and `INDIA_SWING_KITE_API_SECRET`, then retain
+`--kite-interactive-login` on every `run`, `pilot`, or
+`kite-instruments-fetch` command. The first command opens Kite in the browser.
+The resulting access token is encrypted for the current Windows user with
+DPAPI and stored outside the repository at:
+
+```text
+%LOCALAPPDATA%\IndiaSwingTradingSystem\credentials\kite-session-v1.json
+```
+
+Subsequent commands validate and reuse that encrypted token without opening a
+browser. The cache expires five minutes before the next 06:00 IST cutoff. An
+exact expired-token response clears it and initiates a fresh browser login;
+network or malformed validation responses fail closed. If the session was
+manually revoked but validation cannot classify the response, add
+`--kite-refresh-login` together with `--kite-interactive-login` once. The cache
+contains no plaintext API key, API secret, request token, or access token and
+must never be copied to another user or machine.
+
 Install the optional pinned dependency using the verified Python 3.12 runtime:
 
 ```powershell

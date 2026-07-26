@@ -22,7 +22,10 @@ from india_swing.market_data.backfill_cli import (
     _require_provider_evidence,
     _resolver_for_provider,
 )
-from india_swing.market_data.backfill_gaps import LocalHistoricalBackfillSessionGapStore
+from india_swing.market_data.backfill_gaps import (
+    HistoricalBackfillGapClassification,
+    LocalHistoricalBackfillSessionGapStore,
+)
 from india_swing.market_data.backfill_pilot import MAXIMUM_PILOT_TOTAL_REQUESTS
 from india_swing.market_data.collection import historical_dataset_name
 from india_swing.market_data.config import KiteCredentials, KiteLoginCredentials
@@ -37,7 +40,10 @@ from india_swing.market_data.models import (
     HistoricalDailyCandleBatch,
     HistoricalResponsePage,
 )
-from india_swing.market_data.provider import HistoricalEmptyProviderResponseError
+from india_swing.market_data.provider import (
+    HistoricalEmptyProviderResponseError,
+    HistoricalProviderRequestRejectedError,
+)
 from india_swing.market_data.snapshot_store import LocalMarketSnapshotStore
 from india_swing.market_data.upstox import UPSTOX_PROVIDER, UpstoxHistoricalDataAdapter
 from tests.test_historical_backfill import (
@@ -71,6 +77,31 @@ from tests.test_upstox_instruments import (
     equity_row,
     raw_catalog,
 )
+
+
+class FakeDailySessionCache:
+    def __init__(self, cached: KiteCredentials | None = None) -> None:
+        self.cached = cached
+        self.load_calls: list[tuple[str, datetime]] = []
+        self.save_calls: list[tuple[KiteCredentials, datetime]] = []
+        self.clear_calls = 0
+
+    def load(self, api_key: str, *, now: datetime) -> KiteCredentials | None:
+        self.load_calls.append((api_key, now))
+        return self.cached
+
+    def save(
+        self,
+        credentials: KiteCredentials,
+        *,
+        authenticated_at: datetime,
+    ) -> datetime:
+        self.save_calls.append((credentials, authenticated_at))
+        return authenticated_at
+
+    def clear(self) -> None:
+        self.clear_calls += 1
+        self.cached = None
 
 
 def plan_arguments(command: str) -> list[str]:
@@ -610,9 +641,11 @@ class ProviderParserTests(unittest.TestCase):
         self,
     ) -> None:
         run_args = parser().parse_args(
-            plan_arguments("run") + ["--kite-interactive-login"]
+            plan_arguments("run")
+            + ["--kite-interactive-login", "--kite-refresh-login"]
         )
         self.assertTrue(run_args.kite_interactive_login)
+        self.assertTrue(run_args.kite_refresh_login)
 
         pilot_args = parser().parse_args(
             plan_arguments("pilot")
@@ -624,34 +657,50 @@ class ProviderParserTests(unittest.TestCase):
                 "--reconciled-at",
                 PILOT_RECONCILED_AT.isoformat(),
                 "--kite-interactive-login",
+                "--kite-refresh-login",
             ]
         )
         self.assertTrue(pilot_args.kite_interactive_login)
+        self.assertTrue(pilot_args.kite_refresh_login)
 
         fetch_args = parser().parse_args(
-            ["kite-instruments-fetch", "--kite-interactive-login"]
+            [
+                "kite-instruments-fetch",
+                "--kite-interactive-login",
+                "--kite-refresh-login",
+            ]
         )
         self.assertTrue(fetch_args.kite_interactive_login)
+        self.assertTrue(fetch_args.kite_refresh_login)
 
     def test_quarantine_empty_responses_flag_exists_only_on_run_and_defaults_false(
         self,
     ) -> None:
         run_args = parser().parse_args(plan_arguments("run"))
         self.assertFalse(run_args.quarantine_empty_responses)
+        self.assertFalse(run_args.quarantine_request_rejections)
 
         explicit_args = parser().parse_args(
             plan_arguments("run") + ["--quarantine-empty-responses"]
         )
         self.assertTrue(explicit_args.quarantine_empty_responses)
 
+        rejection_args = parser().parse_args(
+            plan_arguments("run") + ["--quarantine-request-rejections"]
+        )
+        self.assertTrue(rejection_args.quarantine_request_rejections)
+
         plan_only_args = parser().parse_args(plan_arguments("plan"))
         self.assertFalse(hasattr(plan_only_args, "quarantine_empty_responses"))
+        self.assertFalse(hasattr(plan_only_args, "quarantine_request_rejections"))
 
         pilot_args = parser().parse_args(pilot_arguments())
         self.assertFalse(hasattr(pilot_args, "quarantine_empty_responses"))
+        self.assertFalse(hasattr(pilot_args, "quarantine_request_rejections"))
 
         fetch_args = parser().parse_args(["kite-instruments-fetch"])
         self.assertFalse(hasattr(fetch_args, "quarantine_empty_responses"))
+        self.assertFalse(hasattr(fetch_args, "quarantine_request_rejections"))
 
 
 class ResolverForProviderTests(unittest.TestCase):
@@ -680,7 +729,10 @@ class ConnectorFactoryTests(unittest.TestCase):
     def test_upstox_plan_uses_upstox_credentials_and_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             value = plan(Path(temp_dir))
-            args = argparse.Namespace(kite_interactive_login=False)
+            args = argparse.Namespace(
+                kite_interactive_login=False,
+                kite_refresh_login=False,
+            )
             fake_connector = object()
             with (
                 patch(
@@ -704,10 +756,23 @@ class ConnectorFactoryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _connector_for_plan(value, args)
 
+    def test_kite_refresh_login_is_rejected_for_upstox_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            value = plan(Path(temp_dir))
+            args = argparse.Namespace(
+                kite_interactive_login=False,
+                kite_refresh_login=True,
+            )
+            with self.assertRaises(ValueError):
+                _connector_for_plan(value, args)
+
     def test_kite_plan_uses_environment_credentials_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             value, _ = kite_plan(Path(temp_dir))
-            args = argparse.Namespace(kite_interactive_login=False)
+            args = argparse.Namespace(
+                kite_interactive_login=False,
+                kite_refresh_login=False,
+            )
             fake_connector = object()
             with (
                 patch(
@@ -735,17 +800,34 @@ class ConnectorFactoryTests(unittest.TestCase):
     def test_kite_plan_uses_interactive_login_only_when_flag_is_set(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             value, _ = kite_plan(Path(temp_dir))
-            args = argparse.Namespace(kite_interactive_login=True)
+            args = argparse.Namespace(
+                kite_interactive_login=True,
+                kite_refresh_login=False,
+            )
+            login_credentials = KiteLoginCredentials("app-key", "app-secret")
+            interactive_credentials = KiteCredentials(
+                "app-key",
+                "interactive-token",
+            )
             fake_authenticator = type(
                 "FakeAuthenticator",
                 (),
-                {"login": lambda self: "interactive-credentials"},
+                {"login": lambda self: interactive_credentials},
             )()
+            cache = FakeDailySessionCache()
             fake_connector = object()
             with (
                 patch(
                     "india_swing.market_data.backfill_cli.KiteLoginCredentials.from_env",
-                    return_value="fake-login-credentials",
+                    return_value=login_credentials,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.default_kite_session_cache_path",
+                    return_value=Path("cache.json"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteDailySessionCache",
+                    return_value=cache,
                 ),
                 patch(
                     "india_swing.market_data.backfill_cli.LoopbackKiteCallbackReceiver",
@@ -772,9 +854,170 @@ class ConnectorFactoryTests(unittest.TestCase):
 
         self.assertIs(connector, fake_connector)
         authenticator_factory.assert_called_once_with(
-            "fake-login-credentials", "fake-receiver"
+            login_credentials, "fake-receiver"
         )
-        adapter_cls.assert_called_once_with("interactive-credentials")
+        adapter_cls.assert_called_once_with(interactive_credentials)
+        self.assertEqual(cache.load_calls[0][0], "app-key")
+        self.assertEqual(len(cache.save_calls), 1)
+        self.assertIs(cache.save_calls[0][0], interactive_credentials)
+
+    def test_kite_cached_session_skips_receiver_browser_and_login(self) -> None:
+        args = argparse.Namespace(
+            kite_interactive_login=True,
+            kite_refresh_login=False,
+        )
+        login_credentials = KiteLoginCredentials("app-key", "app-secret")
+        cached = KiteCredentials("app-key", "cached-access-token")
+        cache = FakeDailySessionCache(cached)
+        with (
+            patch(
+                "india_swing.market_data.backfill_cli.KiteLoginCredentials.from_env",
+                return_value=login_credentials,
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.default_kite_session_cache_path",
+                return_value=Path("cache.json"),
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.KiteDailySessionCache",
+                return_value=cache,
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.KiteCachedCredentialValidator"
+                ".from_official_sdk",
+                return_value=type(
+                    "ValidCachedSession",
+                    (),
+                    {"is_valid": lambda self: True},
+                )(),
+            ) as validator_factory,
+            patch(
+                "india_swing.market_data.backfill_cli.LoopbackKiteCallbackReceiver",
+                side_effect=AssertionError("receiver must not be constructed"),
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.KiteInteractiveAuthenticator"
+                ".from_official_sdk",
+                side_effect=AssertionError("browser login must not be used"),
+            ),
+        ):
+            result = _kite_credentials(args)
+
+        self.assertIs(result, cached)
+        self.assertEqual(cache.load_calls[0][0], "app-key")
+        self.assertEqual(cache.save_calls, [])
+        self.assertEqual(cache.clear_calls, 0)
+        validator_factory.assert_called_once_with(cached)
+
+    def test_invalid_cached_session_is_cleared_and_fresh_login_is_used(
+        self,
+    ) -> None:
+        args = argparse.Namespace(
+            kite_interactive_login=True,
+            kite_refresh_login=False,
+        )
+        login_credentials = KiteLoginCredentials("app-key", "app-secret")
+        cached = KiteCredentials("app-key", "invalid-cached-access-token")
+        fresh = KiteCredentials("app-key", "fresh-access-token")
+        cache = FakeDailySessionCache(cached)
+        authenticator = type(
+            "FakeAuthenticator",
+            (),
+            {"login": lambda self: fresh},
+        )()
+        validator = type(
+            "InvalidCachedSession",
+            (),
+            {"is_valid": lambda self: False},
+        )()
+        with (
+            patch(
+                "india_swing.market_data.backfill_cli.KiteLoginCredentials.from_env",
+                return_value=login_credentials,
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.default_kite_session_cache_path",
+                return_value=Path("cache.json"),
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.KiteDailySessionCache",
+                return_value=cache,
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.KiteCachedCredentialValidator"
+                ".from_official_sdk",
+                return_value=validator,
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.LoopbackKiteCallbackReceiver",
+                return_value="receiver",
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.KiteInteractiveAuthenticator"
+                ".from_official_sdk",
+                return_value=authenticator,
+            ),
+        ):
+            result = _kite_credentials(args)
+
+        self.assertIs(result, fresh)
+        self.assertEqual(cache.clear_calls, 1)
+        self.assertEqual(len(cache.save_calls), 1)
+        self.assertIs(cache.save_calls[0][0], fresh)
+
+    def test_refresh_clears_cache_and_performs_fresh_login(self) -> None:
+        args = argparse.Namespace(
+            kite_interactive_login=True,
+            kite_refresh_login=True,
+        )
+        login_credentials = KiteLoginCredentials("app-key", "app-secret")
+        cached = KiteCredentials("app-key", "cached-access-token")
+        fresh = KiteCredentials("app-key", "fresh-access-token")
+        cache = FakeDailySessionCache(cached)
+        authenticator = type(
+            "FakeAuthenticator",
+            (),
+            {"login": lambda self: fresh},
+        )()
+        with (
+            patch(
+                "india_swing.market_data.backfill_cli.KiteLoginCredentials.from_env",
+                return_value=login_credentials,
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.default_kite_session_cache_path",
+                return_value=Path("cache.json"),
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.KiteDailySessionCache",
+                return_value=cache,
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.LoopbackKiteCallbackReceiver",
+                return_value="receiver",
+            ),
+            patch(
+                "india_swing.market_data.backfill_cli.KiteInteractiveAuthenticator"
+                ".from_official_sdk",
+                return_value=authenticator,
+            ),
+        ):
+            result = _kite_credentials(args)
+
+        self.assertIs(result, fresh)
+        self.assertEqual(cache.clear_calls, 1)
+        self.assertEqual(cache.load_calls, [])
+        self.assertEqual(len(cache.save_calls), 1)
+        self.assertIs(cache.save_calls[0][0], fresh)
+
+    def test_refresh_requires_interactive_login(self) -> None:
+        args = argparse.Namespace(
+            kite_interactive_login=False,
+            kite_refresh_login=True,
+        )
+
+        with self.assertRaises(ValueError):
+            _kite_credentials(args)
 
 
 class KiteInstrumentsFetchCliTests(unittest.TestCase):
@@ -823,12 +1066,21 @@ class KiteInstrumentsFetchCliTests(unittest.TestCase):
                     return KiteCredentials("interactive-key", "interactive-token")
 
             environment = {"INDIA_SWING_MARKET_DATA_ROOT": str(root)}
+            cache = FakeDailySessionCache()
             output = io.StringIO()
             with (
                 patch.dict("os.environ", environment, clear=False),
                 patch(
                     "india_swing.market_data.backfill_cli.KiteLoginCredentials.from_env",
                     return_value=KiteLoginCredentials("app-key", "app-secret"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.default_kite_session_cache_path",
+                    return_value=Path("cache.json"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteDailySessionCache",
+                    return_value=cache,
                 ),
                 patch(
                     "india_swing.market_data.backfill_cli.LoopbackKiteCallbackReceiver",
@@ -922,6 +1174,26 @@ class FakeKiteQuarantineConnector:
             session=request.sessions[-1],
             observed_at=request.requested_at,
             normalized_response_sha256="c" * 64,
+        )
+
+
+class FakeKiteRequestRejectionConnector:
+    provider = KITE_PROVIDER
+    provider_version = "fake-kite-request-rejection-connector/v1"
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def fetch_historical_daily(self, request) -> HistoricalDailyCandleBatch:
+        self.calls.append(request)
+        raise HistoricalProviderRequestRejectedError(
+            provider=self.provider,
+            provider_version=self.provider_version,
+            provider_instrument_id=request.binding.provider_instrument_id,
+            session=request.sessions[-1],
+            observed_at=request.requested_at,
+            upstream_error_type="InputException",
+            normalized_response_sha256="d" * 64,
         )
 
 
@@ -1020,6 +1292,53 @@ class RunQuarantineCliTests(unittest.TestCase):
         self.assertEqual(payload["error_type"], "HistoricalEmptyProviderResponseError")
         self.assertNotIn("runtime-only-secret", stderr.getvalue())
         self.assertFalse(gaps_exist)
+
+    def test_request_rejection_flag_persists_non_actionable_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            value, _ = kite_plan(root / "inputs")
+            connector = FakeKiteRequestRejectionConnector()
+            environment = {"INDIA_SWING_MARKET_DATA_ROOT": str(root / "market")}
+            args = _kite_run_args(
+                root, extra=["--quarantine-request-rejections"]
+            )
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=value,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteMarketDataAdapter"
+                    ".from_official_sdk",
+                    return_value=connector,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteCredentials.from_env",
+                    return_value=KiteCredentials("k", "runtime-only-secret"),
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(args)
+
+            payload = json.loads(output.getvalue())
+            gaps = LocalHistoricalBackfillSessionGapStore(
+                root / "market"
+            ).load_unresolved(value.plan_id)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "SAFE_REQUESTS_PARTIAL")
+        self.assertEqual(payload["unresolved_gap_count"], 1)
+        self.assertEqual(
+            payload["unresolved_gaps_by_classification"],
+            {"UNRESOLVED_PROVIDER_REQUEST_REJECTION": 1},
+        )
+        self.assertEqual(len(gaps), 1)
+        self.assertIs(
+            gaps[0].classification,
+            HistoricalBackfillGapClassification.UNRESOLVED_PROVIDER_REQUEST_REJECTION,
+        )
 
     def test_pilot_has_no_quarantine_flag_or_gap_store_wiring(self) -> None:
         args = parser().parse_args(pilot_arguments())

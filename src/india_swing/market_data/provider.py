@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+import re
 from typing import Protocol
 
 from .models import (
@@ -72,6 +73,76 @@ class HistoricalEmptyProviderResponseError(ValueError):
         self.observed_at = observed_at.astimezone(timezone.utc)
         self.normalized_response_sha256 = normalized_response_sha256
         super().__init__("historical provider returned a valid empty response")
+
+
+_UPSTREAM_ERROR_TYPE_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}")
+
+
+class HistoricalProviderRequestRejectedError(ValueError):
+    """One exact historical request was rejected before a response existed.
+
+    This is unresolved provider evidence. It never proves that the instrument
+    was invalid, delisted, suspended, or untraded, and it cannot authorize a
+    synthetic candle or completion.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        provider_version: str,
+        provider_instrument_id: str,
+        session: date,
+        observed_at: datetime,
+        upstream_error_type: str,
+        normalized_response_sha256: str,
+    ) -> None:
+        if (
+            type(provider) is not str
+            or MARKET_DATA_PROVIDER_PATTERN.fullmatch(provider) is None
+        ):
+            raise ValueError("provider must be canonical uppercase provider text")
+        if (
+            type(provider_version) is not str
+            or not provider_version.strip()
+            or len(provider_version) > 128
+        ):
+            raise ValueError("provider_version must be bounded non-empty text")
+        if (
+            type(provider_instrument_id) is not str
+            or not provider_instrument_id
+            or provider_instrument_id != provider_instrument_id.strip()
+            or len(provider_instrument_id) > 128
+        ):
+            raise ValueError(
+                "provider_instrument_id must be non-empty canonical text"
+            )
+        if type(session) is not date:
+            raise TypeError("session must be an exact date")
+        if type(observed_at) is not datetime:
+            raise TypeError("observed_at must be an exact datetime")
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("observed_at must be timezone-aware")
+        if (
+            type(upstream_error_type) is not str
+            or _UPSTREAM_ERROR_TYPE_PATTERN.fullmatch(upstream_error_type) is None
+        ):
+            raise ValueError("upstream_error_type must be bounded canonical text")
+        if (
+            type(normalized_response_sha256) is not str
+            or SHA256_IDENTIFIER.fullmatch(normalized_response_sha256) is None
+        ):
+            raise ValueError(
+                "normalized_response_sha256 must be a lowercase SHA-256"
+            )
+        self.provider = provider
+        self.provider_version = provider_version
+        self.provider_instrument_id = provider_instrument_id
+        self.session = session
+        self.observed_at = observed_at.astimezone(timezone.utc)
+        self.upstream_error_type = upstream_error_type
+        self.normalized_response_sha256 = normalized_response_sha256
+        super().__init__("historical provider rejected one request")
 
 
 class RequestRateLimiter(Protocol):
