@@ -1,4 +1,8 @@
-from .adapters import promotion_evidence_from_daily_run
+from .adapters import (
+    HistoricalCorpusPromotionError,
+    promotion_evidence_from_daily_run,
+    promotion_evidence_from_historical_corpus,
+)
 from .codec import (
     PROMOTION_CODEC_SCHEMA_VERSION,
     PromotionCodecError,
@@ -37,6 +41,7 @@ __all__ = (
     "PROMOTION_POLICY_VERSION",
     "PROMOTION_ROOT_ENV",
     "RESEARCH_REQUIREMENTS",
+    "HistoricalCorpusPromotionError",
     "LocalPromotionDecisionStore",
     "PromotionCapability",
     "PromotionCodecError",
@@ -51,4 +56,5 @@ __all__ = (
     "encode_promotion_decision",
     "evaluate_promotion",
     "promotion_evidence_from_daily_run",
+    "promotion_evidence_from_historical_corpus",
 )

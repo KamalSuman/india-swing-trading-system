@@ -8,14 +8,16 @@ import unittest
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from india_swing.daily_pipeline import DailyPipelineRun, LocalDailyPipelineRunStore
 from india_swing.daily_pipeline.config import DAILY_PIPELINE_ROOT_ENV
+from india_swing.market_data.config import MARKET_DATA_ROOT_ENV
 from india_swing.promotion import (
     ALERT_REQUIREMENTS,
     BACKTEST_REQUIREMENTS,
     PROMOTION_ROOT_ENV,
+    HistoricalCorpusPromotionError,
     LocalPromotionDecisionStore,
     PromotionCapability,
     PromotionEvidence,
@@ -26,9 +28,22 @@ from india_swing.promotion import (
     encode_promotion_decision,
     evaluate_promotion,
     promotion_evidence_from_daily_run,
+    promotion_evidence_from_historical_corpus,
 )
+from india_swing.promotion.cli import PromotionArgumentError
 from india_swing.promotion.cli import main as promotion_main
+from india_swing.promotion.cli import parser as promotion_parser
 from india_swing.reference import ReferenceReadiness
+from tests.test_historical_evaluation_corpus import (
+    BUILT_AT as CORPUS_BUILT_AT,
+    SESSION_ONE as CORPUS_SESSION_ONE,
+    SESSION_TWO as CORPUS_SESSION_TWO,
+    _fabricated_bar as corpus_bar,
+    _fabricated_index as corpus_index,
+    _fabricated_partition as corpus_partition,
+    build_service as build_corpus_service,
+    build_two_symbol_fixture,
+)
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -340,6 +355,393 @@ class PromotionPersistenceTests(unittest.TestCase):
                 )
             self.assertEqual(bad_code, 2)
             self.assertNotIn("distinct-secret", stderr.getvalue())
+
+
+# --- historical-corpus-to-promotion bridge -----------------------------------
+
+
+def _historical_corpus_fixture(root: Path):
+    """A real, fully admitted, two-symbol/two-session, complete corpus."""
+
+    fixture = build_two_symbol_fixture(root)
+    service = build_corpus_service(fixture)
+    index = service.build(
+        admission_report_id=fixture["admission_report"].report_id,
+        reconciliation_index_id=fixture["reconciliation_index"].index_id,
+        built_at=CORPUS_BUILT_AT,
+    )
+    _stored_index, partitions = fixture["corpus_store"].get(index.corpus_id)
+    return fixture, index, partitions
+
+
+class HistoricalCorpusPromotionAdapterHappyPathTests(unittest.TestCase):
+    def test_complete_corpus_yields_exactly_raw_prices_and_reconciliation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _fixture, index, partitions = _historical_corpus_fixture(Path(temp_dir))
+        evidence = promotion_evidence_from_historical_corpus(index, partitions)
+
+        self.assertEqual(len(evidence), 2)
+        self.assertEqual(
+            tuple(value.capability for value in evidence),
+            (PromotionCapability.RAW_PRICES, PromotionCapability.RECONCILIATION),
+        )
+        self.assertTrue(index.safe_requests_complete)
+        self.assertTrue(index.coverage_complete)
+        self.assertEqual(index.blocked_entry_ids, ())
+        for value in evidence:
+            value.verify_content_identity()
+            self.assertIs(value.readiness, ReferenceReadiness.COLLECTION_ONLY)
+            self.assertFalse(value.actionable)
+            self.assertTrue(value.complete)
+            self.assertEqual(value.coverage_start, index.partition_sessions[0])
+            self.assertEqual(value.coverage_end, index.partition_sessions[-1])
+            self.assertEqual(value.cutoff, index.built_at)
+            self.assertIn(index.corpus_id, value.source_snapshot_ids)
+            self.assertIn(
+                "PROVENANCE_NOT_POINT_IN_TIME_VERIFIED", value.reason_codes
+            )
+        raw_prices, reconciliation = evidence
+        self.assertIn(index.admission_report_id, raw_prices.source_snapshot_ids)
+        self.assertIn(
+            index.reconciliation_index_id, reconciliation.source_snapshot_ids
+        )
+
+
+class HistoricalCorpusPromotionAdapterPartialStateTests(unittest.TestCase):
+    def test_coverage_incomplete_alone_sets_complete_false_and_its_reason(
+        self,
+    ) -> None:
+        partition = corpus_partition((corpus_bar(),))
+        index = corpus_index(
+            (partition,),
+            safe_requests_complete=True,
+            coverage_complete=False,
+            blocked_entry_ids=(),
+        )
+        raw_prices, reconciliation = promotion_evidence_from_historical_corpus(
+            index, (partition,)
+        )
+        for value in (raw_prices, reconciliation):
+            self.assertFalse(value.complete)
+            self.assertEqual(
+                set(value.reason_codes),
+                {"PROVENANCE_NOT_POINT_IN_TIME_VERIFIED", "COVERAGE_INCOMPLETE"},
+            )
+
+    def test_blocked_entries_alone_sets_complete_false_and_its_reason(self) -> None:
+        partition = corpus_partition((corpus_bar(),))
+        index = corpus_index(
+            (partition,),
+            all_entry_ids=("b" * 64, "c" * 64),
+            admitted_entry_ids=("b" * 64,),
+            blocked_entry_ids=("c" * 64,),
+            disposition_counts=(("ADMITTED", 1), ("MISSING_COMPLETION", 1)),
+            safe_requests_complete=True,
+            coverage_complete=True,
+        )
+        raw_prices, reconciliation = promotion_evidence_from_historical_corpus(
+            index, (partition,)
+        )
+        for value in (raw_prices, reconciliation):
+            self.assertFalse(value.complete)
+            self.assertEqual(
+                set(value.reason_codes),
+                {
+                    "PROVENANCE_NOT_POINT_IN_TIME_VERIFIED",
+                    "BLOCKED_ENTRIES_PRESENT",
+                },
+            )
+
+    def test_no_reason_is_suppressed_when_every_blocker_applies_at_once(
+        self,
+    ) -> None:
+        partition = corpus_partition((corpus_bar(),))
+        index = corpus_index(
+            (partition,),
+            all_entry_ids=("b" * 64, "c" * 64),
+            admitted_entry_ids=("b" * 64,),
+            blocked_entry_ids=("c" * 64,),
+            disposition_counts=(("ADMITTED", 1), ("MISSING_COMPLETION", 1)),
+            safe_requests_complete=False,
+            coverage_complete=False,
+        )
+        raw_prices, reconciliation = promotion_evidence_from_historical_corpus(
+            index, (partition,)
+        )
+        expected = {
+            "PROVENANCE_NOT_POINT_IN_TIME_VERIFIED",
+            "SAFE_REQUESTS_INCOMPLETE",
+            "COVERAGE_INCOMPLETE",
+            "BLOCKED_ENTRIES_PRESENT",
+        }
+        for value in (raw_prices, reconciliation):
+            self.assertFalse(value.complete)
+            self.assertEqual(set(value.reason_codes), expected)
+
+
+class HistoricalCorpusPromotionAdapterIntegrityTests(unittest.TestCase):
+    def test_wrong_type_index_is_rejected(self) -> None:
+        partition = corpus_partition((corpus_bar(),))
+        with self.assertRaises(HistoricalCorpusPromotionError):
+            promotion_evidence_from_historical_corpus(object(), (partition,))  # type: ignore[arg-type]
+
+    def test_wrong_type_partitions_is_rejected(self) -> None:
+        partition = corpus_partition((corpus_bar(),))
+        index = corpus_index((partition,))
+        with self.assertRaises(HistoricalCorpusPromotionError):
+            promotion_evidence_from_historical_corpus(index, [partition])  # type: ignore[arg-type]
+
+    def test_empty_partition_set_is_rejected(self) -> None:
+        partition = corpus_partition((corpus_bar(),))
+        index = corpus_index((partition,))
+        with self.assertRaises(HistoricalCorpusPromotionError):
+            promotion_evidence_from_historical_corpus(index, ())
+
+    def test_misaligned_partitions_are_rejected(self) -> None:
+        first = corpus_bar()
+        second = corpus_bar(
+            session=CORPUS_SESSION_TWO,
+            request_id="c" * 64,
+            binding_id="d" * 64,
+            provider_snapshot_id="e" * 64,
+            reconciliation_snapshot_id="f" * 64,
+        )
+        partition_one = corpus_partition((first,), session=CORPUS_SESSION_ONE)
+        partition_two = corpus_partition((second,), session=CORPUS_SESSION_TWO)
+        index = corpus_index(
+            (partition_one, partition_two),
+            all_entry_ids=("b" * 64, "c" * 64),
+            admitted_entry_ids=("b" * 64, "c" * 64),
+            disposition_counts=(("ADMITTED", 2),),
+        )
+        # Reordered relative to index.partition_ids.
+        with self.assertRaises(HistoricalCorpusPromotionError):
+            promotion_evidence_from_historical_corpus(
+                index, (partition_two, partition_one)
+            )
+
+    def test_duplicate_partitions_are_rejected(self) -> None:
+        partition = corpus_partition((corpus_bar(),))
+        index = corpus_index((partition,))
+        with self.assertRaises(HistoricalCorpusPromotionError):
+            promotion_evidence_from_historical_corpus(index, (partition, partition))
+
+    def test_tampered_partition_content_is_rejected(self) -> None:
+        partition = corpus_partition((corpus_bar(),))
+        index = corpus_index((partition,))
+        object.__setattr__(partition, "market_session", partition.market_session)
+        object.__setattr__(partition, "collection_only", False)
+        with self.assertRaises(HistoricalCorpusPromotionError):
+            promotion_evidence_from_historical_corpus(index, (partition,))
+
+    def test_tampered_index_identity_is_rejected(self) -> None:
+        partition = corpus_partition((corpus_bar(),))
+        index = corpus_index((partition,))
+        object.__setattr__(index, "coverage_complete", not index.coverage_complete)
+        with self.assertRaises(HistoricalCorpusPromotionError):
+            promotion_evidence_from_historical_corpus(index, (partition,))
+
+    def test_empty_admitted_set_returns_no_evidence(self) -> None:
+        partition = corpus_partition((corpus_bar(),))
+        index = corpus_index(
+            (partition,),
+            all_entry_ids=("b" * 64,),
+            admitted_entry_ids=(),
+            blocked_entry_ids=("b" * 64,),
+            disposition_counts=(("MISSING_COMPLETION", 1),),
+            safe_requests_complete=False,
+            coverage_complete=False,
+        )
+        with self.assertRaises(HistoricalCorpusPromotionError):
+            promotion_evidence_from_historical_corpus(index, (partition,))
+
+
+class HistoricalCorpusPromotionDecisionIntegrationTests(unittest.TestCase):
+    def test_achieved_stage_remains_collection_only_with_exact_blockers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            _fixture, index, partitions = _historical_corpus_fixture(Path(temp_dir))
+        evidence = promotion_evidence_from_historical_corpus(index, partitions)
+        decision = evaluate_promotion(
+            market_session=index.partition_sessions[-1],
+            history_start=index.partition_sessions[0],
+            decision_cutoff=index.built_at,
+            evidence=evidence,
+        )
+
+        self.assertEqual(decision.achieved_stage, PromotionStage.COLLECTION_ONLY)
+        self.assertIn("RAW_PRICES_COLLECTION_ONLY", decision.research_blockers)
+        self.assertIn("RAW_PRICES_NOT_ACTIONABLE", decision.research_blockers)
+        self.assertIn("RECONCILIATION_COLLECTION_ONLY", decision.backtest_blockers)
+        self.assertIn("RECONCILIATION_NOT_ACTIONABLE", decision.backtest_blockers)
+        self.assertIn("MISSING_CALENDAR", decision.research_blockers)
+        self.assertIn("MISSING_STABLE_IDENTITY", decision.research_blockers)
+        self.assertIn("MISSING_UNIVERSE", decision.research_blockers)
+        self.assertIn("MISSING_CORPORATE_ACTIONS", decision.backtest_blockers)
+        self.assertIn("MISSING_LIQUIDITY", decision.backtest_blockers)
+        self.assertIn("MISSING_SURVEILLANCE", decision.backtest_blockers)
+        self.assertIn("MISSING_TICK_SIZES", decision.backtest_blockers)
+        self.assertIn("MISSING_EXPLICIT_NONTRADING", decision.backtest_blockers)
+        self.assertIn("MISSING_MODEL_VALIDATION", decision.alert_blockers)
+        self.assertIn("MISSING_RISK_POLICY", decision.alert_blockers)
+        self.assertIn("MISSING_SHADOW_OPERATIONS", decision.alert_blockers)
+        decision.verify_content_identity()
+
+
+class HistoricalCorpusPromotionCliTests(unittest.TestCase):
+    def test_no_listing_or_latest_flag_exists(self) -> None:
+        store = LocalPromotionDecisionStore(Path("unused"))
+        for banned in ("latest", "list_corpora", "find", "select"):
+            self.assertFalse(hasattr(store, banned))
+        # This CLI's SanitizedArgumentParser converts an unrecognized flag
+        # (such as a would-be --latest) into the same sanitized argument
+        # error as any other bad input, rather than argparse's SystemExit.
+        with self.assertRaises(PromotionArgumentError):
+            promotion_parser().parse_args(
+                [
+                    "evaluate-historical-corpus",
+                    "--corpus-id",
+                    "a" * 64,
+                    "--history-start",
+                    "2020-01-01",
+                    "--latest",
+                ]
+            )
+
+    def test_round_trip_builds_evaluates_and_shows_the_same_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _fixture, index, _partitions = _historical_corpus_fixture(root)
+            environment = {
+                MARKET_DATA_ROOT_ENV: str(root / "market"),
+                PROMOTION_ROOT_ENV: str(root / "promotion"),
+            }
+            stdout = io.StringIO()
+            with patch.dict(os.environ, environment, clear=True), patch(
+                "sys.stdout", stdout
+            ):
+                exit_code = promotion_main(
+                    [
+                        "evaluate-historical-corpus",
+                        "--corpus-id",
+                        index.corpus_id,
+                        "--history-start",
+                        index.partition_sessions[0].isoformat(),
+                    ]
+                )
+                response = json.loads(stdout.getvalue())
+                stdout.seek(0)
+                stdout.truncate(0)
+                show_code = promotion_main(
+                    ["show", "--decision-id", response["decision_id"]]
+                )
+                shown = json.loads(stdout.getvalue())
+
+            self.assertEqual((exit_code, show_code), (0, 0))
+            self.assertEqual(response["achieved_stage"], "COLLECTION_ONLY")
+            self.assertFalse(response["research_eligible"])
+            self.assertIn("RAW_PRICES", response["evidence_capabilities"])
+            self.assertIn("RECONCILIATION", response["evidence_capabilities"])
+            self.assertEqual(shown["decision_id"], response["decision_id"])
+            self.assertEqual(
+                shown["research_blockers"], response["research_blockers"]
+            )
+            self.assertEqual(
+                shown["backtest_blockers"], response["backtest_blockers"]
+            )
+            self.assertEqual(shown["alert_blockers"], response["alert_blockers"])
+
+    def test_history_start_after_first_corpus_session_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _fixture, index, _partitions = _historical_corpus_fixture(root)
+            environment = {
+                MARKET_DATA_ROOT_ENV: str(root / "market"),
+                PROMOTION_ROOT_ENV: str(root / "promotion"),
+            }
+            after_first_session = (
+                index.partition_sessions[0] + timedelta(days=1)
+            ).isoformat()
+            with patch.dict(os.environ, environment, clear=True):
+                exit_code = promotion_main(
+                    [
+                        "evaluate-historical-corpus",
+                        "--corpus-id",
+                        index.corpus_id,
+                        "--history-start",
+                        after_first_session,
+                    ]
+                )
+            self.assertEqual(exit_code, 2)
+
+    def test_invalid_and_missing_corpus_ids_fail_closed_with_exit_code_two(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            environment = {
+                MARKET_DATA_ROOT_ENV: str(root / "market"),
+                PROMOTION_ROOT_ENV: str(root / "promotion"),
+            }
+            with patch.dict(os.environ, environment, clear=True):
+                missing_code = promotion_main(
+                    [
+                        "evaluate-historical-corpus",
+                        "--corpus-id",
+                        "f" * 64,
+                        "--history-start",
+                        "2020-01-01",
+                    ]
+                )
+                stderr = io.StringIO()
+                with patch("sys.stderr", stderr):
+                    invalid_code = promotion_main(
+                        [
+                            "evaluate-historical-corpus",
+                            "--corpus-id",
+                            "access_token=distinct-secret",
+                            "--history-start",
+                            "2020-01-01",
+                        ]
+                    )
+            self.assertEqual(missing_code, 2)
+            self.assertEqual(invalid_code, 2)
+            self.assertNotIn("distinct-secret", stderr.getvalue())
+
+    def test_hostile_corpus_store_exception_text_does_not_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            environment = {
+                MARKET_DATA_ROOT_ENV: str(root / "market"),
+                PROMOTION_ROOT_ENV: str(root / "promotion"),
+            }
+            secret = "leaked-secret-token-9f8e7d /var/secret/corpus.json"
+            hostile_store = MagicMock()
+            hostile_store.get.side_effect = RuntimeError(secret)
+            stderr = io.StringIO()
+            with patch.dict(os.environ, environment, clear=True), patch(
+                "india_swing.promotion.cli.LocalHistoricalEvaluationCorpusStore",
+                return_value=hostile_store,
+            ), patch("sys.stderr", stderr):
+                exit_code = promotion_main(
+                    [
+                        "evaluate-historical-corpus",
+                        "--corpus-id",
+                        "a" * 64,
+                        "--history-start",
+                        "2020-01-01",
+                    ]
+                )
+            self.assertEqual(exit_code, 2)
+            payload = json.loads(stderr.getvalue())
+            self.assertEqual(set(payload), {"status", "error_type"})
+            self.assertEqual(payload["error_type"], "HistoricalCorpusPromotionError")
+            self.assertNotIn("leaked-secret-token-9f8e7d", stderr.getvalue())
+            self.assertNotIn("/var/secret", stderr.getvalue())
+            self.assertNotIn("RuntimeError", stderr.getvalue())
 
 
 if __name__ == "__main__":

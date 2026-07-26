@@ -20,6 +20,10 @@ from india_swing.liquidity import (
     LocalLiquiditySnapshotStore,
     liquidity_promotion_evidence,
 )
+from india_swing.market_data.config import MarketDataConfig
+from india_swing.market_data.historical_corpus import (
+    LocalHistoricalEvaluationCorpusStore,
+)
 from india_swing.reference_data.config import ReferenceDataConfig
 from india_swing.tick_sizes import (
     LocalTickSizeSnapshotStore,
@@ -32,7 +36,11 @@ from india_swing.universe import (
     universe_promotion_evidence,
 )
 
-from .adapters import promotion_evidence_from_daily_run
+from .adapters import (
+    HistoricalCorpusPromotionError,
+    promotion_evidence_from_daily_run,
+    promotion_evidence_from_historical_corpus,
+)
 from .config import PromotionConfig
 from .gate import evaluate_promotion
 from .models import PromotionDecision
@@ -71,6 +79,15 @@ def parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--liquidity-snapshot-id")
     evaluate.add_argument("--universe-snapshot-id")
     evaluate.add_argument("--derived-evidence-id")
+    corpus = commands.add_parser(
+        "evaluate-historical-corpus",
+        help=(
+            "bridge one exact sealed historical evaluation corpus into the "
+            "existing fail-closed promotion gate"
+        ),
+    )
+    corpus.add_argument("--corpus-id", required=True)
+    corpus.add_argument("--history-start", type=_date, required=True)
     show = commands.add_parser("show", help="show one promotion decision")
     show.add_argument("--decision-id", required=True)
     commands.add_parser("list", help="list promotion decisions")
@@ -192,6 +209,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 history_start=args.history_start,
                 decision_cutoff=run.cutoff,
                 evidence=tuple(evidence),
+            )
+            response = {
+                "status": "COMPLETE",
+                "kind": "PROMOTION_DECISION",
+                **_summary(store.put(decision)),
+            }
+        elif args.command == "evaluate-historical-corpus":
+            market_config = MarketDataConfig.from_env()
+            try:
+                index, partitions = LocalHistoricalEvaluationCorpusStore(
+                    market_config.data_root
+                ).get(args.corpus_id)
+            except Exception:
+                raise HistoricalCorpusPromotionError(
+                    "historical corpus evidence is unavailable"
+                ) from None
+            if args.history_start > index.partition_sessions[0]:
+                raise PromotionArgumentError("invalid promotion arguments")
+            evidence = promotion_evidence_from_historical_corpus(index, partitions)
+            decision = evaluate_promotion(
+                market_session=index.partition_sessions[-1],
+                history_start=args.history_start,
+                decision_cutoff=index.built_at,
+                evidence=evidence,
             )
             response = {
                 "status": "COMPLETE",
