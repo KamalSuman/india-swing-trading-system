@@ -30,10 +30,15 @@ from .models import (
     MAXIMUM_QUOTE_KEYS,
     require_canonical_listing_keys,
 )
-from .provider import RequestRateLimiter, RetryPolicy
+from .provider import (
+    HistoricalEmptyProviderResponseError,
+    RequestRateLimiter,
+    RetryPolicy,
+)
 
 
 PINNED_KITE_SDK_VERSION = "5.2.0"
+EMPTY_HISTORICAL_RESPONSE_SCHEMA_VERSION = "kite-empty-historical-response/v1"
 
 
 class KiteReadClient(Protocol):
@@ -390,6 +395,27 @@ class KiteMarketDataAdapter:
         )
         if not isinstance(raw_rows, Sequence) or isinstance(raw_rows, (str, bytes)):
             raise KiteDataIntegrityError("historical_data", "InvalidResponseType")
+        if len(raw_rows) == 0:
+            observed_at = self._observed_at()
+            if observed_at < request_started_at:
+                raise KiteDataIntegrityError(
+                    "historical_data", "NonMonotonicAcquisitionClock"
+                )
+            raise HistoricalEmptyProviderResponseError(
+                provider=self.provider,
+                provider_version=self.model_version,
+                provider_instrument_id=str(instrument_token),
+                session=session,
+                observed_at=observed_at,
+                normalized_response_sha256=content_id(
+                    {
+                        "schema": EMPTY_HISTORICAL_RESPONSE_SCHEMA_VERSION,
+                        "instrument_token": instrument_token,
+                        "session": session,
+                    },
+                    length=64,
+                ),
+            )
 
         candles: list[DailyCandle] = []
         for index, row in enumerate(raw_rows):

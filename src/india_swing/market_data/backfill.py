@@ -33,6 +33,10 @@ from india_swing.reference_data.artifact_store import (
 )
 from india_swing.reference_data.models import StoredReferenceArtifact
 
+from .backfill_gaps import (
+    HistoricalBackfillSessionGapEvidence,
+    LocalHistoricalBackfillSessionGapStore,
+)
 from .collection import (
     HistoricalMarketDataCollector,
     historical_dataset_name,
@@ -46,7 +50,7 @@ from .models import (
     NSE_SECURITY_SERIES_PATTERN,
     SHA256_IDENTIFIER,
 )
-from .provider import HistoricalDailyDataConnector
+from .provider import HistoricalDailyDataConnector, HistoricalEmptyProviderResponseError
 from .snapshot_store import (
     LocalMarketSnapshotStore,
     StoredMarketSnapshot,
@@ -1390,11 +1394,13 @@ class HistoricalBackfillRunner:
         snapshot_store: LocalMarketSnapshotStore,
         progress_store: LocalHistoricalBackfillProgressStore,
         *,
+        gap_store: LocalHistoricalBackfillSessionGapStore | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.connector = connector
         self.snapshot_store = snapshot_store
         self.progress_store = progress_store
+        self.gap_store = gap_store
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.collector = HistoricalMarketDataCollector(connector, snapshot_store)
 
@@ -1403,6 +1409,7 @@ class HistoricalBackfillRunner:
         plan: HistoricalBackfillPlan,
         *,
         maximum_requests: int | None = None,
+        quarantine_empty_responses: bool = False,
     ) -> HistoricalBackfillProgress:
         if type(plan) is not HistoricalBackfillPlan:
             raise TypeError("plan must be an exact HistoricalBackfillPlan")
@@ -1411,6 +1418,12 @@ class HistoricalBackfillRunner:
             type(maximum_requests) is not int or maximum_requests <= 0
         ):
             raise ValueError("maximum_requests must be a positive exact integer")
+        if type(quarantine_empty_responses) is not bool:
+            raise TypeError("quarantine_empty_responses must be bool")
+        if quarantine_empty_responses and self.gap_store is None:
+            raise ValueError(
+                "quarantine_empty_responses requires an injected gap store"
+            )
         if (
             self.connector.provider != plan.provider
             or type(self.connector.provider_version) is not str
@@ -1419,6 +1432,24 @@ class HistoricalBackfillRunner:
             raise HistoricalBackfillError(
                 "historical connector does not match the backfill plan"
             )
+
+        requests_by_id = {value.request_id: value for value in plan.requests}
+        gapped_request_ids: set[str] = set()
+        if quarantine_empty_responses:
+            gap_validation_time = self._now(plan.requested_at)
+            for evidence in self.gap_store.load_unresolved(plan.plan_id):
+                self._verify_gap_lineage(
+                    plan,
+                    requests_by_id,
+                    evidence,
+                    connector_version=self.connector.provider_version,
+                    validated_at=gap_validation_time,
+                )
+                if evidence.request_id in gapped_request_ids:
+                    raise HistoricalBackfillStateError(
+                        "historical backfill request has multiple unresolved gaps"
+                    )
+                gapped_request_ids.add(evidence.request_id)
 
         progress = self.progress_store.load(plan.plan_id)
         if progress is None:
@@ -1433,8 +1464,11 @@ class HistoricalBackfillRunner:
         self._verify_progress(plan, progress)
 
         completions = {value.request_id: value for value in progress.completions}
+        if gapped_request_ids.intersection(completions):
+            raise HistoricalBackfillStateError(
+                "historical backfill request cannot be complete and unresolved"
+            )
         processed = 0
-        requests_by_id = {value.request_id: value for value in plan.requests}
         for request_id, completion in completions.items():
             self._verify_stored_completion(
                 requests_by_id[request_id],
@@ -1445,12 +1479,22 @@ class HistoricalBackfillRunner:
         for request in plan.requests:
             if request.request_id in completions:
                 continue
+            if request.request_id in gapped_request_ids:
+                continue
             if maximum_requests is not None and processed >= maximum_requests:
                 break
             stored = self._recover_existing(request)
             recovered = stored is not None
             if stored is None:
-                stored = self.collector.collect(request)
+                if quarantine_empty_responses:
+                    try:
+                        stored = self.collector.collect(request)
+                    except HistoricalEmptyProviderResponseError as exc:
+                        self._quarantine(plan, request, exc)
+                        processed += 1
+                        continue
+                else:
+                    stored = self.collector.collect(request)
             completed_at = self._now(stored.manifest.observed_at)
             completion = HistoricalBackfillCompletion(
                 request_id=request.request_id,
@@ -1469,6 +1513,71 @@ class HistoricalBackfillRunner:
             progress = self.progress_store.save(progress)
             processed += 1
         return progress
+
+    def _quarantine(
+        self,
+        plan: HistoricalBackfillPlan,
+        request: HistoricalDailyRequest,
+        error: HistoricalEmptyProviderResponseError,
+    ) -> None:
+        if type(error) is not HistoricalEmptyProviderResponseError:
+            raise HistoricalBackfillIntegrityError(
+                "empty provider response error type is not exact"
+            )
+        evidence = HistoricalBackfillSessionGapEvidence(
+            plan_id=plan.plan_id,
+            request_id=request.request_id,
+            provider=error.provider,
+            provider_version=error.provider_version,
+            provider_instrument_id=error.provider_instrument_id,
+            listing_key=request.binding.listing_key,
+            security_series=request.binding.security_series,
+            isin=request.binding.isin,
+            session=error.session,
+            response_observed_at=error.observed_at,
+            normalized_response_sha256=error.normalized_response_sha256,
+        )
+        if (
+            evidence.provider != request.binding.provider
+            or evidence.provider_version != self.connector.provider_version
+            or evidence.provider_instrument_id
+            != request.binding.provider_instrument_id
+            or evidence.session not in request.sessions
+            or evidence.response_observed_at < request.requested_at
+        ):
+            raise HistoricalBackfillIntegrityError(
+                "empty provider response lineage disagrees with the request"
+            )
+        self._now(evidence.response_observed_at)
+        self.gap_store.put(evidence)
+
+    @staticmethod
+    def _verify_gap_lineage(
+        plan: HistoricalBackfillPlan,
+        requests_by_id: dict[str, HistoricalDailyRequest],
+        evidence: HistoricalBackfillSessionGapEvidence,
+        *,
+        connector_version: str,
+        validated_at: datetime,
+    ) -> None:
+        evidence.verify_content_identity()
+        request = requests_by_id.get(evidence.request_id)
+        if (
+            evidence.plan_id != plan.plan_id
+            or evidence.provider != plan.provider
+            or evidence.provider_version != connector_version
+            or request is None
+            or evidence.provider_instrument_id != request.binding.provider_instrument_id
+            or evidence.listing_key != request.binding.listing_key
+            or evidence.security_series != request.binding.security_series
+            or evidence.isin != request.binding.isin
+            or evidence.session not in request.sessions
+            or evidence.response_observed_at < request.requested_at
+            or evidence.response_observed_at > validated_at
+        ):
+            raise HistoricalBackfillStateError(
+                "historical backfill session gap disagrees with the plan"
+            )
 
     @staticmethod
     def is_complete(

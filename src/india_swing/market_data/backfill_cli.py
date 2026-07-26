@@ -39,6 +39,7 @@ from .backfill import (
     UpstoxCatalogInstrumentResolver,
     build_historical_backfill_plan,
 )
+from .backfill_gaps import LocalHistoricalBackfillSessionGapStore
 from .backfill_blockers import (
     HISTORICAL_BACKFILL_BLOCKER_POLICY_VERSION,
     LocalHistoricalBackfillBlockerReportStore,
@@ -161,6 +162,15 @@ def parser() -> argparse.ArgumentParser:
         "--allow-collection-with-issues",
         action="store_true",
         help="collect safe requests despite explicitly reported coverage issues",
+    )
+    run.add_argument(
+        "--quarantine-empty-responses",
+        action="store_true",
+        help=(
+            "durably record and skip a request when the provider returns a "
+            "structurally valid empty response for one session, instead of "
+            "aborting the whole run"
+        ),
     )
     _add_kite_interactive_login_argument(run)
 
@@ -405,16 +415,26 @@ def _run_plan(
 
     config = MarketDataConfig.from_env()
     connector = _connector_for_plan(plan, args)
+    gap_store = (
+        LocalHistoricalBackfillSessionGapStore(config.data_root)
+        if args.quarantine_empty_responses
+        else None
+    )
     runner = HistoricalBackfillRunner(
         connector,
         LocalMarketSnapshotStore(config.data_root),
         LocalHistoricalBackfillProgressStore(config.data_root),
+        gap_store=gap_store,
     )
     progress = runner.run(
         plan,
         maximum_requests=args.maximum_requests,
+        quarantine_empty_responses=args.quarantine_empty_responses,
     )
-    safe_complete = runner.is_complete(plan, progress)
+    unresolved_gaps = (
+        gap_store.load_unresolved(plan.plan_id) if gap_store is not None else ()
+    )
+    safe_complete = runner.is_complete(plan, progress) and not unresolved_gaps
     return 0, {
         "status": (
             "SAFE_REQUESTS_COMPLETE"
@@ -430,6 +450,10 @@ def _run_plan(
         "safe_requests_complete": safe_complete,
         "progress_id": progress.progress_id,
         "updated_at": progress.updated_at.isoformat(),
+        "unresolved_gap_count": len(unresolved_gaps),
+        "unresolved_gap_evidence_ids": [
+            value.evidence_id for value in unresolved_gaps
+        ],
     }
 
 

@@ -6,10 +6,11 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import patch
 
-from india_swing.identity import canonical_identity_json
+from india_swing.identity import canonical_identity_json, content_id
 from india_swing.market_data.cli import main as market_data_main
 from india_swing.market_data.config import KiteCredentials, MissingMarketDataConfiguration
 from india_swing.market_data.kite import (
+    EMPTY_HISTORICAL_RESPONSE_SCHEMA_VERSION,
     KiteAuthenticationError,
     KiteAvailabilityError,
     KiteDataIntegrityError,
@@ -21,9 +22,12 @@ from india_swing.market_data.kite import (
 )
 from india_swing.market_data.models import (
     NSE_REGULAR_FINALITY_POLICY_VERSION,
+    HistoricalDailyRequest,
+    HistoricalInstrumentBinding,
     NseSessionFinality,
     require_canonical_listing_keys,
 )
+from india_swing.market_data.provider import HistoricalEmptyProviderResponseError
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -469,6 +473,123 @@ class KiteDailyCandleAdapterTests(unittest.TestCase):
                 date(2026, 7, 15),
                 session_finality=FINALITY,
             )
+
+    def test_exact_empty_response_is_a_distinct_sanitized_gap_error(self) -> None:
+        client = FakeKiteClient(candles=[])
+
+        with self.assertRaises(HistoricalEmptyProviderResponseError) as raised:
+            adapter(client).fetch_daily_candle(
+                408065,
+                date(2026, 7, 15),
+                session_finality=FINALITY,
+            )
+
+        error = raised.exception
+        self.assertEqual(error.provider, "ZERODHA_KITE")
+        self.assertEqual(error.provider_version, "kiteconnect/5.2.0")
+        self.assertEqual(error.provider_instrument_id, "408065")
+        self.assertEqual(error.session, date(2026, 7, 15))
+        self.assertEqual(error.observed_at, OBSERVED_AT)
+        self.assertEqual(
+            error.normalized_response_sha256,
+            content_id(
+                {
+                    "schema": EMPTY_HISTORICAL_RESPONSE_SCHEMA_VERSION,
+                    "instrument_token": 408065,
+                    "session": date(2026, 7, 15),
+                },
+                length=64,
+            ),
+        )
+
+    def test_empty_response_error_message_is_static_and_contains_no_lineage(self) -> None:
+        secret_version = "secret-version-value"
+        secret_instrument = "secret-instrument-value"
+        error = HistoricalEmptyProviderResponseError(
+            provider="ZERODHA_KITE",
+            provider_version=secret_version,
+            provider_instrument_id=secret_instrument,
+            session=date(2026, 7, 15),
+            observed_at=OBSERVED_AT,
+            normalized_response_sha256="a" * 64,
+        )
+
+        self.assertEqual(
+            str(error), "historical provider returned a valid empty response"
+        )
+        self.assertNotIn(secret_version, str(error))
+        self.assertNotIn(secret_instrument, str(error))
+        self.assertNotIn("2026-07-15", str(error))
+
+    def test_empty_response_clock_still_cannot_move_backwards(self) -> None:
+        started = datetime(2026, 7, 15, 16, 32, tzinfo=IST)
+        completed = datetime(2026, 7, 15, 16, 31, tzinfo=IST)
+        times = iter((started, completed))
+
+        with self.assertRaisesRegex(KiteDataIntegrityError, "NonMonotonic"):
+            adapter(
+                FakeKiteClient(candles=[]),
+                clock=lambda: next(times),
+            ).fetch_daily_candle(
+                408065,
+                date(2026, 7, 15),
+                session_finality=FINALITY,
+            )
+
+
+class KiteHistoricalDailyMultiSessionTests(unittest.TestCase):
+    def test_a_later_empty_session_aborts_without_a_batch_despite_an_earlier_success(
+        self,
+    ) -> None:
+        class TwoCallCandleClient:
+            def __init__(self, first_rows, second_rows) -> None:
+                self.calls = 0
+                self.first_rows = first_rows
+                self.second_rows = second_rows
+
+            def historical_data(
+                self,
+                instrument_token,
+                from_date,
+                to_date,
+                interval,
+                continuous=False,
+                oi=False,
+            ):
+                self.calls += 1
+                return self.first_rows if self.calls == 1 else self.second_rows
+
+        binding = HistoricalInstrumentBinding(
+            provider="ZERODHA_KITE",
+            provider_instrument_id="408065",
+            exchange="NSE",
+            listing_key="NSE:INFY",
+            security_series="EQ",
+            isin="INE009A01021",
+            valid_from=date(2026, 7, 14),
+            valid_through=date(2026, 7, 15),
+            source_snapshot_ids=("a" * 64,),
+        )
+        request = HistoricalDailyRequest(
+            binding=binding,
+            sessions=(date(2026, 7, 14), date(2026, 7, 15)),
+            requested_at=datetime(2026, 7, 15, 20, 0, tzinfo=UTC),
+        )
+        client = TwoCallCandleClient(
+            first_rows=[candle_row(date(2026, 7, 14))],
+            second_rows=[],
+        )
+        connector = adapter(
+            client,
+            clock=lambda: datetime(2026, 7, 16, 17, 0, tzinfo=IST),
+        )
+
+        with self.assertRaises(HistoricalEmptyProviderResponseError) as raised:
+            connector.fetch_historical_daily(request)
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(raised.exception.session, date(2026, 7, 15))
+        self.assertEqual(raised.exception.provider_instrument_id, "408065")
 
 
 class EndpointRateLimiterTests(unittest.TestCase):

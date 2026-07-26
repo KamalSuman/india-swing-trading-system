@@ -22,6 +22,7 @@ from india_swing.market_data.backfill_cli import (
     _require_provider_evidence,
     _resolver_for_provider,
 )
+from india_swing.market_data.backfill_gaps import LocalHistoricalBackfillSessionGapStore
 from india_swing.market_data.backfill_pilot import MAXIMUM_PILOT_TOTAL_REQUESTS
 from india_swing.market_data.collection import historical_dataset_name
 from india_swing.market_data.config import KiteCredentials, KiteLoginCredentials
@@ -36,6 +37,7 @@ from india_swing.market_data.models import (
     HistoricalDailyCandleBatch,
     HistoricalResponsePage,
 )
+from india_swing.market_data.provider import HistoricalEmptyProviderResponseError
 from india_swing.market_data.snapshot_store import LocalMarketSnapshotStore
 from india_swing.market_data.upstox import UPSTOX_PROVIDER, UpstoxHistoricalDataAdapter
 from tests.test_historical_backfill import (
@@ -631,6 +633,26 @@ class ProviderParserTests(unittest.TestCase):
         )
         self.assertTrue(fetch_args.kite_interactive_login)
 
+    def test_quarantine_empty_responses_flag_exists_only_on_run_and_defaults_false(
+        self,
+    ) -> None:
+        run_args = parser().parse_args(plan_arguments("run"))
+        self.assertFalse(run_args.quarantine_empty_responses)
+
+        explicit_args = parser().parse_args(
+            plan_arguments("run") + ["--quarantine-empty-responses"]
+        )
+        self.assertTrue(explicit_args.quarantine_empty_responses)
+
+        plan_only_args = parser().parse_args(plan_arguments("plan"))
+        self.assertFalse(hasattr(plan_only_args, "quarantine_empty_responses"))
+
+        pilot_args = parser().parse_args(pilot_arguments())
+        self.assertFalse(hasattr(pilot_args, "quarantine_empty_responses"))
+
+        fetch_args = parser().parse_args(["kite-instruments-fetch"])
+        self.assertFalse(hasattr(fetch_args, "quarantine_empty_responses"))
+
 
 class ResolverForProviderTests(unittest.TestCase):
     def test_kite_resolver_wiring_is_credential_free(self) -> None:
@@ -882,6 +904,126 @@ class KitePlanRunPilotCliTests(unittest.TestCase):
         self.assertEqual(payload["provider"], KITE_PROVIDER)
         self.assertGreater(len(connector.calls), 0)
         self.assertNotIn("runtime-only-secret", output.getvalue())
+
+
+class FakeKiteQuarantineConnector:
+    provider = KITE_PROVIDER
+    provider_version = "fake-kite-quarantine-connector/v1"
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def fetch_historical_daily(self, request) -> HistoricalDailyCandleBatch:
+        self.calls.append(request)
+        raise HistoricalEmptyProviderResponseError(
+            provider=self.provider,
+            provider_version=self.provider_version,
+            provider_instrument_id=request.binding.provider_instrument_id,
+            session=request.sessions[-1],
+            observed_at=request.requested_at,
+            normalized_response_sha256="c" * 64,
+        )
+
+
+def _kite_run_args(root: Path, *, extra: list[str] | None = None) -> list[str]:
+    args = plan_arguments("run") + [
+        "--provider",
+        KITE_PROVIDER,
+        "--kite-instrument-snapshot-id",
+        "d" * 64,
+    ]
+    args.remove("--upstox-catalog-id")
+    args.remove("c" * 64)
+    return args + (extra or [])
+
+
+class RunQuarantineCliTests(unittest.TestCase):
+    def test_flag_persists_a_gap_and_reports_only_sanitized_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            value, _ = kite_plan(root / "inputs")
+            connector = FakeKiteQuarantineConnector()
+            environment = {"INDIA_SWING_MARKET_DATA_ROOT": str(root / "market")}
+            args = _kite_run_args(root, extra=["--quarantine-empty-responses"])
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=value,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteMarketDataAdapter"
+                    ".from_official_sdk",
+                    return_value=connector,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteCredentials.from_env",
+                    return_value=KiteCredentials("k", "runtime-only-secret"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.HistoricalBackfillRunner.is_complete",
+                    return_value=True,
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(args)
+
+            payload = json.loads(output.getvalue())
+            gap_store = LocalHistoricalBackfillSessionGapStore(root / "market")
+            gaps = gap_store.load_unresolved(value.plan_id)
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotEqual(payload["status"], "SAFE_REQUESTS_COMPLETE")
+        self.assertEqual(payload["status"], "SAFE_REQUESTS_PARTIAL")
+        self.assertFalse(payload["safe_requests_complete"])
+        self.assertEqual(payload["unresolved_gap_count"], 1)
+        self.assertEqual(len(payload["unresolved_gap_evidence_ids"]), 1)
+        self.assertNotIn("runtime-only-secret", output.getvalue())
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual(gaps[0].evidence_id, payload["unresolved_gap_evidence_ids"][0])
+
+    def test_without_the_flag_an_empty_response_aborts_and_writes_no_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            value, _ = kite_plan(root / "inputs")
+            connector = FakeKiteQuarantineConnector()
+            environment = {"INDIA_SWING_MARKET_DATA_ROOT": str(root / "market")}
+            args = _kite_run_args(root)
+            output = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=value,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteMarketDataAdapter"
+                    ".from_official_sdk",
+                    return_value=connector,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteCredentials.from_env",
+                    return_value=KiteCredentials("k", "runtime-only-secret"),
+                ),
+                redirect_stdout(output),
+                redirect_stderr(stderr),
+            ):
+                exit_code = main(args)
+
+            gaps_exist = (root / "market" / "historical-backfill-session-gaps").exists()
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(output.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["error_type"], "HistoricalEmptyProviderResponseError")
+        self.assertNotIn("runtime-only-secret", stderr.getvalue())
+        self.assertFalse(gaps_exist)
+
+    def test_pilot_has_no_quarantine_flag_or_gap_store_wiring(self) -> None:
+        args = parser().parse_args(pilot_arguments())
+        self.assertFalse(hasattr(args, "quarantine_empty_responses"))
 
 
 if __name__ == "__main__":
