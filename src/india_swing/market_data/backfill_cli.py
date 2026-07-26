@@ -40,6 +40,10 @@ from .backfill import (
     build_historical_backfill_plan,
 )
 from .backfill_gaps import LocalHistoricalBackfillSessionGapStore
+from .gap_adjudication import (
+    LocalHistoricalGapAdjudicationReportStore,
+    build_historical_gap_adjudication_report,
+)
 from .backfill_blockers import (
     HISTORICAL_BACKFILL_BLOCKER_POLICY_VERSION,
     LocalHistoricalBackfillBlockerReportStore,
@@ -282,6 +286,26 @@ def parser() -> argparse.ArgumentParser:
         help="collect and seal one exact Kite NSE instrument snapshot",
     )
     _add_kite_interactive_login_argument(kite_instruments_fetch)
+
+    gap_adjudicate = commands.add_parser(
+        "gap-adjudicate",
+        help=(
+            "assess every unresolved session gap in one exact plan against "
+            "pinned NSE EOD evidence (credential-free; never resolves a gap)"
+        ),
+    )
+    gap_adjudicate.add_argument("--plan-id", required=True)
+    gap_adjudicate.add_argument(
+        "--nse-artifact-id",
+        action="append",
+        required=True,
+        dest="nse_artifact_ids",
+    )
+    gap_adjudicate.add_argument(
+        "--adjudicated-at",
+        type=_aware_datetime,
+        required=True,
+    )
     return root
 
 
@@ -796,6 +820,52 @@ def _evidence_worklist(
     }
 
 
+def _gap_adjudicate(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
+    market_config = MarketDataConfig.from_env()
+    historical_config = HistoricalPricesConfig.from_env()
+    gap_store = LocalHistoricalBackfillSessionGapStore(market_config.data_root)
+    gaps = gap_store.load_unresolved(args.plan_id)
+    if not gaps:
+        raise ValueError("no unresolved gaps exist for the exact plan")
+    historical_store = LocalHistoricalPriceArtifactStore(
+        historical_config.data_root,
+        historical_config.daily_reports_root,
+    )
+    nse_artifacts = tuple(
+        historical_store.get(value).artifact
+        for value in args.nse_artifact_ids
+    )
+    report = build_historical_gap_adjudication_report(
+        gaps=gaps,
+        nse_artifacts=nse_artifacts,
+        adjudicated_at=args.adjudicated_at,
+    )
+    stored = LocalHistoricalGapAdjudicationReportStore(
+        market_config.data_root
+    ).put(report)
+    classification_counts = Counter(
+        value.original_classification.value for value in report.entries
+    )
+    status_counts = Counter(value.status.value for value in report.entries)
+    action_counts = Counter(value.action.value for value in report.entries)
+    return 0, {
+        "status": "GAP_ADJUDICATION_REPORTED",
+        "report_id": stored.report_id,
+        "plan_id": report.plan_id,
+        "gap_count": report.gap_count,
+        "counts_by_original_classification": dict(
+            sorted(classification_counts.items())
+        ),
+        "counts_by_nse_status": dict(sorted(status_counts.items())),
+        "counts_by_action": dict(sorted(action_counts.items())),
+        "nse_artifact_ids": list(report.nse_artifact_ids),
+        "collection_only": report.collection_only,
+        "actionable": report.actionable,
+        "gaps_resolved": report.gaps_resolved,
+        "training_eligible": report.training_eligible,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
@@ -824,6 +894,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             exit_code, value = _catalog_fetch()
         elif args.command == "catalog-import":
             exit_code, value = _catalog_import(args)
+        elif args.command == "gap-adjudicate":
+            exit_code, value = _gap_adjudicate(args)
         else:
             exit_code, value = _kite_instruments_fetch(args)
     except Exception as exc:

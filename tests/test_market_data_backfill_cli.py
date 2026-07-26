@@ -9,7 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from india_swing.historical_prices import LocalHistoricalPriceArtifactStore
@@ -56,6 +56,7 @@ from tests.test_historical_backfill import (
     security_master_sources,
     two_session_body,
 )
+from tests.test_historical_backfill_gaps import gap_evidence
 from tests.test_historical_backfill_pilot import (
     RECONCILED_AT as PILOT_RECONCILED_AT,
     FakePilotConnector,
@@ -1343,6 +1344,195 @@ class RunQuarantineCliTests(unittest.TestCase):
     def test_pilot_has_no_quarantine_flag_or_gap_store_wiring(self) -> None:
         args = parser().parse_args(pilot_arguments())
         self.assertFalse(hasattr(args, "quarantine_empty_responses"))
+
+
+class GapAdjudicateCliTests(unittest.TestCase):
+    def test_parser_accepts_only_its_exact_required_arguments(self) -> None:
+        args = parser().parse_args(
+            [
+                "gap-adjudicate",
+                "--plan-id",
+                "a" * 64,
+                "--nse-artifact-id",
+                "b" * 64,
+                "--adjudicated-at",
+                "2026-07-17T10:00:00+00:00",
+            ]
+        )
+
+        self.assertEqual(args.command, "gap-adjudicate")
+        self.assertEqual(args.plan_id, "a" * 64)
+        self.assertEqual(args.nse_artifact_ids, ["b" * 64])
+        self.assertFalse(hasattr(args, "kite_interactive_login"))
+        self.assertFalse(hasattr(args, "provider"))
+        self.assertFalse(hasattr(args, "quarantine_empty_responses"))
+
+        for missing in (
+            ["gap-adjudicate", "--nse-artifact-id", "b" * 64, "--adjudicated-at", "2026-07-17T10:00:00+00:00"],
+            ["gap-adjudicate", "--plan-id", "a" * 64, "--adjudicated-at", "2026-07-17T10:00:00+00:00"],
+            ["gap-adjudicate", "--plan-id", "a" * 64, "--nse-artifact-id", "b" * 64],
+        ):
+            with self.subTest(missing=missing):
+                with self.assertRaises(SystemExit):
+                    parser().parse_args(missing)
+
+    def test_end_to_end_persists_one_report_and_leaves_gap_files_byte_identical(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            market_root = root / "market"
+            historical_root = root / "historical"
+            daily_root = root / "nse-source" / "daily"
+
+            artifact = nse_artifact(root / "nse-source")
+            LocalHistoricalPriceArtifactStore(historical_root, daily_root).put(
+                artifact
+            )
+
+            gap = gap_evidence()
+            LocalHistoricalBackfillSessionGapStore(market_root).put(gap)
+            gap_path = (
+                market_root
+                / "historical-backfill-session-gaps"
+                / gap.plan_id
+                / gap.request_id
+                / f"{gap.session.isoformat()}.json"
+            )
+            before_bytes = gap_path.read_bytes()
+
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(market_root),
+                "INDIA_SWING_HISTORICAL_PRICES_ROOT": str(historical_root),
+                "INDIA_SWING_DAILY_REPORTS_ROOT": str(daily_root),
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteCredentials.from_env",
+                    side_effect=AssertionError("credentials must not be read"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.UpstoxCredentials.from_env",
+                    side_effect=AssertionError("credentials must not be read"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteMarketDataAdapter"
+                    ".from_official_sdk",
+                    side_effect=AssertionError(
+                        "provider adapter must not be constructed"
+                    ),
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(
+                    [
+                        "gap-adjudicate",
+                        "--plan-id",
+                        gap.plan_id,
+                        "--nse-artifact-id",
+                        artifact.artifact_id,
+                        "--adjudicated-at",
+                        "2026-07-17T10:00:00+00:00",
+                    ]
+                )
+
+            after_bytes = gap_path.read_bytes()
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "GAP_ADJUDICATION_REPORTED")
+        self.assertEqual(payload["plan_id"], gap.plan_id)
+        self.assertEqual(payload["gap_count"], 1)
+        self.assertEqual(
+            payload["counts_by_original_classification"],
+            {"UNRESOLVED_EMPTY_PROVIDER_RESPONSE": 1},
+        )
+        self.assertEqual(
+            payload["counts_by_nse_status"], {"EXACT_TRADED_BAR_PRESENT": 1}
+        )
+        self.assertEqual(
+            payload["counts_by_action"],
+            {"REVIEW_PINNED_NSE_BAR_FOR_DATASET_USE": 1},
+        )
+        self.assertEqual(payload["nse_artifact_ids"], [artifact.artifact_id])
+        self.assertTrue(payload["collection_only"])
+        self.assertFalse(payload["actionable"])
+        self.assertFalse(payload["gaps_resolved"])
+        self.assertFalse(payload["training_eligible"])
+        self.assertEqual(after_bytes, before_bytes)
+        self.assertNotIn("candle", json.dumps(payload).lower())
+
+    def test_no_unresolved_gaps_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            environment = {"INDIA_SWING_MARKET_DATA_ROOT": str(root / "market")}
+            output = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                redirect_stdout(output),
+                redirect_stderr(stderr),
+            ):
+                exit_code = main(
+                    [
+                        "gap-adjudicate",
+                        "--plan-id",
+                        "a" * 64,
+                        "--nse-artifact-id",
+                        "b" * 64,
+                        "--adjudicated-at",
+                        "2026-07-17T10:00:00+00:00",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(output.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["error_type"], "ValueError")
+
+    def test_session_coverage_disagreement_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            market_root = root / "market"
+            historical_root = root / "historical"
+            daily_root = root / "nse-source" / "daily"
+            artifact = nse_artifact(root / "nse-source")
+            LocalHistoricalPriceArtifactStore(historical_root, daily_root).put(
+                artifact
+            )
+            gap = gap_evidence(session=date(2026, 7, 20))
+            LocalHistoricalBackfillSessionGapStore(market_root).put(gap)
+
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(market_root),
+                "INDIA_SWING_HISTORICAL_PRICES_ROOT": str(historical_root),
+                "INDIA_SWING_DAILY_REPORTS_ROOT": str(daily_root),
+            }
+            output = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                redirect_stdout(output),
+                redirect_stderr(stderr),
+            ):
+                exit_code = main(
+                    [
+                        "gap-adjudicate",
+                        "--plan-id",
+                        gap.plan_id,
+                        "--nse-artifact-id",
+                        artifact.artifact_id,
+                        "--adjudicated-at",
+                        "2026-07-21T10:00:00+00:00",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(output.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(payload["error_type"], "HistoricalGapAdjudicationError")
 
 
 if __name__ == "__main__":
