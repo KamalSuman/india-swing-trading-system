@@ -67,6 +67,10 @@ from tests.test_historical_backfill import (
     security_master_sources,
     two_session_body,
 )
+from tests.test_historical_evaluation_corpus import (
+    BUILT_AT as CORPUS_BUILT_AT,
+    build_two_symbol_fixture,
+)
 from tests.test_historical_backfill_gaps import gap_evidence
 from tests.test_historical_backfill_pilot import (
     RECONCILED_AT as PILOT_RECONCILED_AT,
@@ -2483,6 +2487,357 @@ class DatasetAdmitReconciliationIndexCliTests(unittest.TestCase):
                     ],
                     expected,
                 )
+
+
+def _stub_corpus_index(**overrides) -> SimpleNamespace:
+    values = dict(
+        corpus_id="a" * 64,
+        admission_report_id="b" * 64,
+        reconciliation_index_id="c" * 64,
+        plan_id="d" * 64,
+        progress_id="e" * 64,
+        provider="UPSTOX",
+        connector_version="upstox-test-connector/v1",
+        assessed_at=datetime(2026, 7, 23, 10, 0, tzinfo=timezone.utc),
+        built_at=datetime(2026, 7, 24, 9, 0, tzinfo=timezone.utc),
+        partition_ids=("f" * 64,),
+        partition_sessions=(date(2026, 7, 14),),
+        all_entry_ids=("g" * 64,),
+        admitted_entry_ids=("g" * 64,),
+        blocked_entry_ids=(),
+        disposition_counts=(("ADMITTED", 1),),
+        safe_requests_complete=True,
+        coverage_complete=True,
+        collection_only=True,
+        actionable=False,
+        training_eligible=False,
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _corpus_build_arguments(*extra: str) -> list[str]:
+    return [
+        "corpus-build",
+        "--admission-report-id",
+        "b" * 64,
+        "--reconciliation-index-id",
+        "c" * 64,
+        "--built-at",
+        "2026-07-24T09:00:00+00:00",
+        *extra,
+    ]
+
+
+class CorpusBuildCliTests(unittest.TestCase):
+    def test_parser_requires_exact_arguments(self) -> None:
+        args = parser().parse_args(_corpus_build_arguments())
+        self.assertEqual(args.command, "corpus-build")
+        self.assertEqual(args.admission_report_id, "b" * 64)
+        self.assertEqual(args.reconciliation_index_id, "c" * 64)
+        self.assertEqual(
+            args.built_at, datetime(2026, 7, 24, 9, 0, tzinfo=timezone.utc)
+        )
+        self.assertFalse(hasattr(args, "identity_registry_id"))
+        self.assertFalse(hasattr(args, "kite_interactive_login"))
+
+        required = _corpus_build_arguments()
+        for flag in (
+            "--admission-report-id",
+            "--reconciliation-index-id",
+            "--built-at",
+        ):
+            index = required.index(flag)
+            with self.subTest(missing=flag):
+                with self.assertRaises(SystemExit):
+                    parser().parse_args(required[:index] + required[index + 2 :])
+
+    def test_coverage_complete_success_threads_arguments_and_exits_zero(self) -> None:
+        stub_index = _stub_corpus_index()
+        mock_service_instance = MagicMock()
+        mock_service_instance.build.return_value = stub_index
+        mock_service_class = MagicMock(return_value=mock_service_instance)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market")
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".HistoricalEvaluationCorpusService",
+                    mock_service_class,
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(_corpus_build_arguments())
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(
+            payload["status"], "HISTORICAL_EVALUATION_CORPUS_COVERAGE_COMPLETE"
+        )
+        self.assertEqual(payload["corpus_id"], stub_index.corpus_id)
+        self.assertEqual(payload["admission_report_id"], stub_index.admission_report_id)
+        self.assertEqual(
+            payload["reconciliation_index_id"], stub_index.reconciliation_index_id
+        )
+        self.assertEqual(payload["plan_id"], stub_index.plan_id)
+        self.assertEqual(payload["progress_id"], stub_index.progress_id)
+        self.assertEqual(payload["provider"], stub_index.provider)
+        self.assertEqual(payload["session_count"], 1)
+        self.assertEqual(payload["first_session"], "2026-07-14")
+        self.assertEqual(payload["last_session"], "2026-07-14")
+        self.assertEqual(payload["total_entry_count"], 1)
+        self.assertEqual(payload["admitted_entry_count"], 1)
+        self.assertEqual(payload["blocked_entry_count"], 0)
+        self.assertEqual(payload["disposition_counts"], {"ADMITTED": 1})
+        self.assertTrue(payload["safe_requests_complete"])
+        self.assertTrue(payload["coverage_complete"])
+        self.assertTrue(payload["collection_only"])
+        self.assertFalse(payload["actionable"])
+        self.assertFalse(payload["training_eligible"])
+        self.assertNotIn("bars", payload)
+        self.assertNotIn("partitions", payload)
+        self.assertNotIn("partition_ids", payload)
+
+        mock_service_instance.build.assert_called_once_with(
+            admission_report_id="b" * 64,
+            reconciliation_index_id="c" * 64,
+            built_at=datetime(2026, 7, 24, 9, 0, tzinfo=timezone.utc),
+        )
+
+    def test_incomplete_coverage_exits_four(self) -> None:
+        stub_index = _stub_corpus_index(
+            coverage_complete=False,
+            safe_requests_complete=False,
+            admitted_entry_ids=(),
+            blocked_entry_ids=("g" * 64,),
+            disposition_counts=(("MISSING_COMPLETION", 1),),
+        )
+        mock_service_instance = MagicMock()
+        mock_service_instance.build.return_value = stub_index
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market")
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".HistoricalEvaluationCorpusService",
+                    MagicMock(return_value=mock_service_instance),
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(_corpus_build_arguments())
+
+        self.assertEqual(exit_code, 4)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(
+            payload["status"], "HISTORICAL_EVALUATION_CORPUS_COVERAGE_INCOMPLETE"
+        )
+        self.assertFalse(payload["coverage_complete"])
+        self.assertFalse(payload["safe_requests_complete"])
+        self.assertEqual(payload["blocked_entry_count"], 1)
+
+    def test_service_failure_produces_sanitized_stderr_json(self) -> None:
+        mock_service_class = MagicMock(
+            side_effect=ValueError("secret internal lineage detail")
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market")
+            }
+            output = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".HistoricalEvaluationCorpusService",
+                    mock_service_class,
+                ),
+                redirect_stdout(output),
+                redirect_stderr(stderr),
+            ):
+                exit_code = main(_corpus_build_arguments())
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(output.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(set(payload), {"status", "error_type"})
+        self.assertEqual(payload["status"], "FAILED")
+        self.assertEqual(payload["error_type"], "ValueError")
+        self.assertNotIn("secret internal lineage detail", stderr.getvalue())
+
+    def test_malformed_id_and_datetime_arguments_are_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            parser().parse_args(
+                _corpus_build_arguments()[:5] + ["--built-at", "not-a-datetime"]
+            )
+
+    def test_no_login_provider_or_network_route_is_reachable(self) -> None:
+        stub_index = _stub_corpus_index()
+        mock_service_instance = MagicMock()
+        mock_service_instance.build.return_value = stub_index
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market")
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".HistoricalEvaluationCorpusService",
+                    MagicMock(return_value=mock_service_instance),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.UpstoxCredentials.from_env",
+                    side_effect=AssertionError("credentials must not be read"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteCredentials.from_env",
+                    side_effect=AssertionError("credentials must not be read"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".UpstoxHistoricalDataAdapter",
+                    side_effect=AssertionError("provider must not be constructed"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteMarketDataAdapter"
+                    ".from_official_sdk",
+                    side_effect=AssertionError("provider must not be constructed"),
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(_corpus_build_arguments())
+
+        self.assertEqual(exit_code, 0)
+
+
+class CorpusShowCliTests(unittest.TestCase):
+    def test_parser_requires_corpus_id(self) -> None:
+        args = parser().parse_args(["corpus-show", "--corpus-id", "a" * 64])
+        self.assertEqual(args.command, "corpus-show")
+        self.assertEqual(args.corpus_id, "a" * 64)
+        with self.assertRaises(SystemExit):
+            parser().parse_args(["corpus-show"])
+
+    def test_shows_sanitized_summary(self) -> None:
+        stub_index = _stub_corpus_index()
+        mock_store = MagicMock()
+        mock_store.return_value.get.return_value = (stub_index, ("unused-partitions",))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market")
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".LocalHistoricalEvaluationCorpusStore",
+                    mock_store,
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(["corpus-show", "--corpus-id", stub_index.corpus_id])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["corpus_id"], stub_index.corpus_id)
+        self.assertEqual(payload["session_count"], 1)
+        self.assertNotIn("bars", payload)
+        self.assertNotIn("partitions", payload)
+        mock_store.return_value.get.assert_called_once_with(stub_index.corpus_id)
+
+    def test_not_found_produces_sanitized_stderr_json(self) -> None:
+        mock_store = MagicMock()
+        mock_store.return_value.get.side_effect = ValueError(
+            "no such corpus in var/historical-evaluation-corpora"
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market")
+            }
+            output = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".LocalHistoricalEvaluationCorpusStore",
+                    mock_store,
+                ),
+                redirect_stdout(output),
+                redirect_stderr(stderr),
+            ):
+                exit_code = main(["corpus-show", "--corpus-id", "a" * 64])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(output.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(set(payload), {"status", "error_type"})
+        self.assertEqual(payload["status"], "FAILED")
+        self.assertNotIn("var/", stderr.getvalue())
+
+
+class CorpusBuildAndShowEndToEndCliTests(unittest.TestCase):
+    def test_real_fixture_builds_and_shows_through_the_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fixture = build_two_symbol_fixture(root)
+            environment = {"INDIA_SWING_MARKET_DATA_ROOT": str(root / "market")}
+
+            build_output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                redirect_stdout(build_output),
+            ):
+                build_exit = main(
+                    [
+                        "corpus-build",
+                        "--admission-report-id",
+                        fixture["admission_report"].report_id,
+                        "--reconciliation-index-id",
+                        fixture["reconciliation_index"].index_id,
+                        "--built-at",
+                        CORPUS_BUILT_AT.isoformat(),
+                    ]
+                )
+            build_payload = json.loads(build_output.getvalue())
+
+            show_output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                redirect_stdout(show_output),
+            ):
+                show_exit = main(
+                    ["corpus-show", "--corpus-id", build_payload["corpus_id"]]
+                )
+            show_payload = json.loads(show_output.getvalue())
+
+        self.assertEqual(build_exit, 0)
+        self.assertEqual(show_exit, 0)
+        self.assertEqual(
+            build_payload["status"], "HISTORICAL_EVALUATION_CORPUS_COVERAGE_COMPLETE"
+        )
+        self.assertEqual(build_payload, show_payload)
+        self.assertEqual(build_payload["session_count"], 2)
+        self.assertEqual(build_payload["admitted_entry_count"], 2)
+        self.assertEqual(build_payload["blocked_entry_count"], 0)
+        self.assertEqual(build_payload["disposition_counts"], {"ADMITTED": 2})
 
 
 if __name__ == "__main__":

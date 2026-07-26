@@ -46,6 +46,10 @@ from .gap_adjudication import (
     LocalHistoricalGapAdjudicationReportStore,
     build_historical_gap_adjudication_report,
 )
+from .historical_corpus import (
+    HistoricalEvaluationCorpusService,
+    LocalHistoricalEvaluationCorpusStore,
+)
 from .backfill_blockers import (
     HISTORICAL_BACKFILL_BLOCKER_POLICY_VERSION,
     LocalHistoricalBackfillBlockerReportStore,
@@ -387,6 +391,25 @@ def parser() -> argparse.ArgumentParser:
         type=_aware_datetime,
         required=True,
     )
+
+    corpus_build = commands.add_parser(
+        "corpus-build",
+        help=(
+            "build a session-partitioned, fully lineage-bound historical "
+            "evaluation corpus from an exact admission report and "
+            "reconciliation index (offline; creates no evaluation-eligible "
+            "or actionable data)"
+        ),
+    )
+    corpus_build.add_argument("--admission-report-id", required=True)
+    corpus_build.add_argument("--reconciliation-index-id", required=True)
+    corpus_build.add_argument("--built-at", type=_aware_datetime, required=True)
+
+    corpus_show = commands.add_parser(
+        "corpus-show",
+        help="show a sanitized summary of one exact sealed evaluation corpus",
+    )
+    corpus_show.add_argument("--corpus-id", required=True)
     return root
 
 
@@ -1071,6 +1094,71 @@ def _dataset_admit(
     }
 
 
+def _corpus_value(index) -> dict[str, object]:
+    return {
+        "status": (
+            "HISTORICAL_EVALUATION_CORPUS_COVERAGE_COMPLETE"
+            if index.coverage_complete
+            else "HISTORICAL_EVALUATION_CORPUS_COVERAGE_INCOMPLETE"
+        ),
+        "corpus_id": index.corpus_id,
+        "admission_report_id": index.admission_report_id,
+        "reconciliation_index_id": index.reconciliation_index_id,
+        "plan_id": index.plan_id,
+        "progress_id": index.progress_id,
+        "provider": index.provider,
+        "connector_version": index.connector_version,
+        "assessed_at": index.assessed_at.isoformat(),
+        "built_at": index.built_at.isoformat(),
+        "session_count": len(index.partition_ids),
+        "first_session": (
+            index.partition_sessions[0].isoformat()
+            if index.partition_sessions
+            else None
+        ),
+        "last_session": (
+            index.partition_sessions[-1].isoformat()
+            if index.partition_sessions
+            else None
+        ),
+        "total_entry_count": len(index.all_entry_ids),
+        "admitted_entry_count": len(index.admitted_entry_ids),
+        "blocked_entry_count": len(index.blocked_entry_ids),
+        "disposition_counts": dict(index.disposition_counts),
+        "safe_requests_complete": index.safe_requests_complete,
+        "coverage_complete": index.coverage_complete,
+        "collection_only": index.collection_only,
+        "actionable": index.actionable,
+        "training_eligible": index.training_eligible,
+    }
+
+
+def _corpus_build(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
+    config = MarketDataConfig.from_env()
+    service = HistoricalEvaluationCorpusService(
+        admission_store=LocalHistoricalDatasetAdmissionReportStore(config.data_root),
+        reconciliation_index_store=LocalHistoricalReconciliationIndexStore(
+            config.data_root
+        ),
+        snapshot_store=LocalMarketSnapshotStore(config.data_root),
+        corpus_store=LocalHistoricalEvaluationCorpusStore(config.data_root),
+    )
+    index = service.build(
+        admission_report_id=args.admission_report_id,
+        reconciliation_index_id=args.reconciliation_index_id,
+        built_at=args.built_at,
+    )
+    return (0 if index.coverage_complete else 4), _corpus_value(index)
+
+
+def _corpus_show(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
+    config = MarketDataConfig.from_env()
+    index, _partitions = LocalHistoricalEvaluationCorpusStore(config.data_root).get(
+        args.corpus_id
+    )
+    return 0, _corpus_value(index)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
@@ -1105,6 +1193,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             exit_code, value = _gap_adjudicate(args)
         elif args.command == "dataset-admit":
             exit_code, value = _dataset_admit(_configured_plan(args), args)
+        elif args.command == "corpus-build":
+            exit_code, value = _corpus_build(args)
+        elif args.command == "corpus-show":
+            exit_code, value = _corpus_show(args)
         else:
             exit_code, value = _kite_instruments_fetch(args)
     except Exception as exc:

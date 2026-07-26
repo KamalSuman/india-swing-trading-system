@@ -71,6 +71,10 @@ from .dataset_assembly_store import (
     decode_evaluation_dataset,
     encode_evaluation_dataset,
 )
+from .historical_corpus_adapter import (
+    HistoricalCorpusAdapterError,
+    point_in_time_price_sessions_from_historical_corpus,
+)
 from .lifecycle import (
     HOLDOUT_ACCESS_EVENT_TYPES,
     HOLDOUT_EVENT_TYPES,
@@ -213,6 +217,8 @@ __all__ = [
     "GeneratedSignalDecision",
     "HOLDOUT_ACCESS_EVENT_TYPES",
     "HOLDOUT_EVENT_TYPES",
+    "HistoricalCorpusAdapterError",
+    "point_in_time_price_sessions_from_historical_corpus",
     "PROMOTION_EVENT_TYPES",
     "LocalTrialLifecycleStore",
     "LocalEvaluationDatasetStore",
