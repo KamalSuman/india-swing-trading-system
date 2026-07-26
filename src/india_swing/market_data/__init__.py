@@ -110,6 +110,12 @@ from .dataset_admission import (
     decode_historical_dataset_admission_report,
     encode_historical_dataset_admission_report,
 )
+from .dataset_admission_service import (
+    HistoricalDatasetAdmissionService,
+    HistoricalDatasetAdmissionServiceError,
+    HistoricalDatasetAdmissionServiceIntegrityError,
+    HistoricalDatasetAdmissionServiceResult,
+)
 from .gap_adjudication import (
     HISTORICAL_GAP_ADJUDICATION_CODEC_VERSION,
     HISTORICAL_GAP_ADJUDICATION_DATASET,
@@ -231,6 +237,10 @@ __all__ = [
     "build_historical_dataset_admission_report",
     "decode_historical_dataset_admission_report",
     "encode_historical_dataset_admission_report",
+    "HistoricalDatasetAdmissionService",
+    "HistoricalDatasetAdmissionServiceError",
+    "HistoricalDatasetAdmissionServiceIntegrityError",
+    "HistoricalDatasetAdmissionServiceResult",
     "HISTORICAL_GAP_ADJUDICATION_CODEC_VERSION",
     "HISTORICAL_GAP_ADJUDICATION_DATASET",
     "HISTORICAL_GAP_ADJUDICATION_POLICY_VERSION",

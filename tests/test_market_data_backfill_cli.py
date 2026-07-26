@@ -7,10 +7,11 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from india_swing.historical_prices import LocalHistoricalPriceArtifactStore
 from india_swing.market_data.backfill import build_historical_backfill_plan
@@ -1533,6 +1534,332 @@ class GapAdjudicateCliTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         payload = json.loads(stderr.getvalue())
         self.assertEqual(payload["error_type"], "HistoricalGapAdjudicationError")
+
+
+def _stub_admission_report(**overrides) -> SimpleNamespace:
+    values = dict(
+        report_id="a" * 64,
+        plan_id="b" * 64,
+        progress_id="c" * 64,
+        provider="UPSTOX",
+        assessed_at=datetime(2026, 7, 23, 10, 0, tzinfo=timezone.utc),
+        coverage_complete=True,
+        safe_requests_complete=True,
+        admitted_request_count=1,
+        total_request_count=1,
+        gap_adjudication_report_id=None,
+        collection_only=True,
+        actionable=False,
+        training_eligible=False,
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class DatasetAdmitCliTests(unittest.TestCase):
+    def test_parser_requires_exact_arguments_and_rejects_login_flags(self) -> None:
+        args = parser().parse_args(
+            [
+                "dataset-admit",
+                "--identity-registry-id",
+                "a" * 64,
+                "--calendar-materialization-id",
+                "b" * 64,
+                "--upstox-catalog-id",
+                "c" * 64,
+                "--coverage-start",
+                "2026-07-01",
+                "--coverage-end",
+                "2026-07-01",
+                "--requested-at",
+                "2026-07-01T09:00:00+00:00",
+                "--expected-plan-id",
+                "d" * 64,
+                "--expected-progress-id",
+                "e" * 64,
+                "--reconciliation-snapshot-id",
+                "f" * 64,
+                "--expected-gap-evidence-id",
+                "0" * 64,
+                "--gap-adjudication-report-id",
+                "1" * 64,
+                "--assessed-at",
+                "2026-07-23T10:00:00+00:00",
+            ]
+        )
+
+        self.assertEqual(args.command, "dataset-admit")
+        self.assertEqual(args.expected_plan_id, "d" * 64)
+        self.assertEqual(args.expected_progress_id, "e" * 64)
+        self.assertEqual(args.reconciliation_snapshot_ids, ["f" * 64])
+        self.assertEqual(args.expected_gap_evidence_ids, ["0" * 64])
+        self.assertEqual(args.gap_adjudication_report_id, "1" * 64)
+        self.assertFalse(hasattr(args, "kite_interactive_login"))
+        self.assertFalse(hasattr(args, "kite_refresh_login"))
+        self.assertFalse(hasattr(args, "maximum_requests"))
+
+        required = [
+            "dataset-admit",
+            "--identity-registry-id",
+            "a" * 64,
+            "--calendar-materialization-id",
+            "b" * 64,
+            "--upstox-catalog-id",
+            "c" * 64,
+            "--coverage-start",
+            "2026-07-01",
+            "--coverage-end",
+            "2026-07-01",
+            "--requested-at",
+            "2026-07-01T09:00:00+00:00",
+            "--expected-plan-id",
+            "d" * 64,
+            "--expected-progress-id",
+            "e" * 64,
+            "--assessed-at",
+            "2026-07-23T10:00:00+00:00",
+        ]
+        parser().parse_args(required)
+        for drop_index in (
+            required.index("--expected-plan-id"),
+            required.index("--expected-progress-id"),
+            required.index("--assessed-at"),
+        ):
+            with self.subTest(missing=required[drop_index]):
+                with self.assertRaises(SystemExit):
+                    parser().parse_args(required[:drop_index] + required[drop_index + 2 :])
+
+    def test_parser_allows_omitting_repeated_and_optional_arguments(self) -> None:
+        args = parser().parse_args(
+            [
+                "dataset-admit",
+                "--identity-registry-id",
+                "a" * 64,
+                "--calendar-materialization-id",
+                "b" * 64,
+                "--upstox-catalog-id",
+                "c" * 64,
+                "--coverage-start",
+                "2026-07-01",
+                "--coverage-end",
+                "2026-07-01",
+                "--requested-at",
+                "2026-07-01T09:00:00+00:00",
+                "--expected-plan-id",
+                "d" * 64,
+                "--expected-progress-id",
+                "e" * 64,
+                "--assessed-at",
+                "2026-07-23T10:00:00+00:00",
+            ]
+        )
+        self.assertIsNone(args.reconciliation_snapshot_ids)
+        self.assertIsNone(args.expected_gap_evidence_ids)
+        self.assertIsNone(args.gap_adjudication_report_id)
+
+    def test_coverage_complete_success_threads_arguments_and_exits_zero(self) -> None:
+        stub_plan = object()
+        stub_result = SimpleNamespace(
+            report=_stub_admission_report(),
+            disposition_counts=(("ADMITTED", 1),),
+        )
+        mock_service_instance = MagicMock()
+        mock_service_instance.run.return_value = stub_result
+        mock_service_class = MagicMock(return_value=mock_service_instance)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market")
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=stub_plan,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".HistoricalDatasetAdmissionService",
+                    mock_service_class,
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(
+                    [
+                        "dataset-admit",
+                        "--identity-registry-id",
+                        "a" * 64,
+                        "--calendar-materialization-id",
+                        "b" * 64,
+                        "--upstox-catalog-id",
+                        "c" * 64,
+                        "--coverage-start",
+                        "2026-07-01",
+                        "--coverage-end",
+                        "2026-07-01",
+                        "--requested-at",
+                        "2026-07-01T09:00:00+00:00",
+                        "--expected-plan-id",
+                        "b" * 64,
+                        "--expected-progress-id",
+                        "c" * 64,
+                        "--reconciliation-snapshot-id",
+                        "d" * 64,
+                        "--reconciliation-snapshot-id",
+                        "e" * 64,
+                        "--expected-gap-evidence-id",
+                        "f" * 64,
+                        "--gap-adjudication-report-id",
+                        "1" * 64,
+                        "--assessed-at",
+                        "2026-07-23T10:00:00+00:00",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "DATASET_ADMISSION_COVERAGE_COMPLETE")
+        self.assertEqual(payload["report_id"], "a" * 64)
+        self.assertEqual(payload["plan_id"], "b" * 64)
+        self.assertEqual(payload["progress_id"], "c" * 64)
+        self.assertEqual(payload["provider"], "UPSTOX")
+        self.assertEqual(payload["assessed_at"], "2026-07-23T10:00:00+00:00")
+        self.assertTrue(payload["coverage_complete"])
+        self.assertTrue(payload["safe_requests_complete"])
+        self.assertEqual(payload["admitted_request_count"], 1)
+        self.assertEqual(payload["total_request_count"], 1)
+        self.assertEqual(payload["disposition_counts"], {"ADMITTED": 1})
+        self.assertIsNone(payload["gap_adjudication_report_id"])
+        self.assertTrue(payload["collection_only"])
+        self.assertFalse(payload["actionable"])
+        self.assertFalse(payload["training_eligible"])
+
+        mock_service_instance.run.assert_called_once_with(
+            plan=stub_plan,
+            expected_plan_id="b" * 64,
+            expected_progress_id="c" * 64,
+            reconciliation_snapshot_ids=("d" * 64, "e" * 64),
+            expected_gap_evidence_ids=("f" * 64,),
+            gap_adjudication_report_id="1" * 64,
+            assessed_at=datetime(2026, 7, 23, 10, 0, tzinfo=timezone.utc),
+        )
+
+    def test_incomplete_coverage_exits_four(self) -> None:
+        stub_result = SimpleNamespace(
+            report=_stub_admission_report(
+                coverage_complete=False, safe_requests_complete=False
+            ),
+            disposition_counts=(("RECONCILIATION_MISSING_OR_FAILED", 1),),
+        )
+        mock_service_instance = MagicMock()
+        mock_service_instance.run.return_value = stub_result
+        mock_service_class = MagicMock(return_value=mock_service_instance)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market")
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=object(),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".HistoricalDatasetAdmissionService",
+                    mock_service_class,
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(
+                    [
+                        "dataset-admit",
+                        "--identity-registry-id",
+                        "a" * 64,
+                        "--calendar-materialization-id",
+                        "b" * 64,
+                        "--upstox-catalog-id",
+                        "c" * 64,
+                        "--coverage-start",
+                        "2026-07-01",
+                        "--coverage-end",
+                        "2026-07-01",
+                        "--requested-at",
+                        "2026-07-01T09:00:00+00:00",
+                        "--expected-plan-id",
+                        "b" * 64,
+                        "--expected-progress-id",
+                        "c" * 64,
+                        "--assessed-at",
+                        "2026-07-23T10:00:00+00:00",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 4)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "DATASET_ADMISSION_COVERAGE_INCOMPLETE")
+        self.assertFalse(payload["coverage_complete"])
+        self.assertFalse(payload["safe_requests_complete"])
+
+    def test_service_failure_produces_sanitized_stderr_json(self) -> None:
+        mock_service_class = MagicMock(
+            side_effect=ValueError("secret internal lineage detail")
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market")
+            }
+            output = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=object(),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".HistoricalDatasetAdmissionService",
+                    mock_service_class,
+                ),
+                redirect_stdout(output),
+                redirect_stderr(stderr),
+            ):
+                exit_code = main(
+                    [
+                        "dataset-admit",
+                        "--identity-registry-id",
+                        "a" * 64,
+                        "--calendar-materialization-id",
+                        "b" * 64,
+                        "--upstox-catalog-id",
+                        "c" * 64,
+                        "--coverage-start",
+                        "2026-07-01",
+                        "--coverage-end",
+                        "2026-07-01",
+                        "--requested-at",
+                        "2026-07-01T09:00:00+00:00",
+                        "--expected-plan-id",
+                        "b" * 64,
+                        "--expected-progress-id",
+                        "c" * 64,
+                        "--assessed-at",
+                        "2026-07-23T10:00:00+00:00",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(output.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(set(payload), {"status", "error_type"})
+        self.assertEqual(payload["status"], "FAILED")
+        self.assertEqual(payload["error_type"], "ValueError")
+        self.assertNotIn("secret internal lineage detail", stderr.getvalue())
 
 
 if __name__ == "__main__":

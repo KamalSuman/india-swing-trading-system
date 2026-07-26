@@ -40,6 +40,8 @@ from .backfill import (
     build_historical_backfill_plan,
 )
 from .backfill_gaps import LocalHistoricalBackfillSessionGapStore
+from .dataset_admission import LocalHistoricalDatasetAdmissionReportStore
+from .dataset_admission_service import HistoricalDatasetAdmissionService
 from .gap_adjudication import (
     LocalHistoricalGapAdjudicationReportStore,
     build_historical_gap_adjudication_report,
@@ -303,6 +305,34 @@ def parser() -> argparse.ArgumentParser:
     )
     gap_adjudicate.add_argument(
         "--adjudicated-at",
+        type=_aware_datetime,
+        required=True,
+    )
+
+    dataset_admit = commands.add_parser(
+        "dataset-admit",
+        help=(
+            "seal an exact-evidence historical dataset admission report from "
+            "a reconstructed plan plus pinned progress/reconciliation/gap "
+            "IDs (credential-free; creates no evaluation dataset)"
+        ),
+    )
+    _add_plan_arguments(dataset_admit)
+    dataset_admit.add_argument("--expected-plan-id", required=True)
+    dataset_admit.add_argument("--expected-progress-id", required=True)
+    dataset_admit.add_argument(
+        "--reconciliation-snapshot-id",
+        action="append",
+        dest="reconciliation_snapshot_ids",
+    )
+    dataset_admit.add_argument(
+        "--expected-gap-evidence-id",
+        action="append",
+        dest="expected_gap_evidence_ids",
+    )
+    dataset_admit.add_argument("--gap-adjudication-report-id")
+    dataset_admit.add_argument(
+        "--assessed-at",
         type=_aware_datetime,
         required=True,
     )
@@ -866,6 +896,55 @@ def _gap_adjudicate(args: argparse.Namespace) -> tuple[int, dict[str, object]]:
     }
 
 
+def _dataset_admit(
+    plan: HistoricalBackfillPlan,
+    args: argparse.Namespace,
+) -> tuple[int, dict[str, object]]:
+    config = MarketDataConfig.from_env()
+    service = HistoricalDatasetAdmissionService(
+        progress_store=LocalHistoricalBackfillProgressStore(config.data_root),
+        snapshot_store=LocalMarketSnapshotStore(config.data_root),
+        gap_store=LocalHistoricalBackfillSessionGapStore(config.data_root),
+        gap_adjudication_store=LocalHistoricalGapAdjudicationReportStore(
+            config.data_root
+        ),
+        admission_store=LocalHistoricalDatasetAdmissionReportStore(
+            config.data_root
+        ),
+    )
+    result = service.run(
+        plan=plan,
+        expected_plan_id=args.expected_plan_id,
+        expected_progress_id=args.expected_progress_id,
+        reconciliation_snapshot_ids=tuple(args.reconciliation_snapshot_ids or ()),
+        expected_gap_evidence_ids=tuple(args.expected_gap_evidence_ids or ()),
+        gap_adjudication_report_id=args.gap_adjudication_report_id,
+        assessed_at=args.assessed_at,
+    )
+    report = result.report
+    return (0 if report.coverage_complete else 4), {
+        "status": (
+            "DATASET_ADMISSION_COVERAGE_COMPLETE"
+            if report.coverage_complete
+            else "DATASET_ADMISSION_COVERAGE_INCOMPLETE"
+        ),
+        "report_id": report.report_id,
+        "plan_id": report.plan_id,
+        "progress_id": report.progress_id,
+        "provider": report.provider,
+        "assessed_at": report.assessed_at.isoformat(),
+        "coverage_complete": report.coverage_complete,
+        "safe_requests_complete": report.safe_requests_complete,
+        "admitted_request_count": report.admitted_request_count,
+        "total_request_count": report.total_request_count,
+        "disposition_counts": dict(result.disposition_counts),
+        "gap_adjudication_report_id": report.gap_adjudication_report_id,
+        "collection_only": report.collection_only,
+        "actionable": report.actionable,
+        "training_eligible": report.training_eligible,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
@@ -896,6 +975,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             exit_code, value = _catalog_import(args)
         elif args.command == "gap-adjudicate":
             exit_code, value = _gap_adjudicate(args)
+        elif args.command == "dataset-admit":
+            exit_code, value = _dataset_admit(_configured_plan(args), args)
         else:
             exit_code, value = _kite_instruments_fetch(args)
     except Exception as exc:
