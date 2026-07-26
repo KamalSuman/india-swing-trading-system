@@ -14,7 +14,11 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 from india_swing.historical_prices import LocalHistoricalPriceArtifactStore
-from india_swing.market_data.backfill import build_historical_backfill_plan
+from india_swing.market_data.backfill import (
+    HistoricalBackfillRunner,
+    LocalHistoricalBackfillProgressStore,
+    build_historical_backfill_plan,
+)
 from india_swing.market_data.backfill_cli import (
     main,
     parser,
@@ -45,12 +49,18 @@ from india_swing.market_data.provider import (
     HistoricalEmptyProviderResponseError,
     HistoricalProviderRequestRejectedError,
 )
+from india_swing.market_data.reconciliation_run import (
+    MAXIMUM_RECONCILIATIONS_PER_RUN,
+    HistoricalReconciliationIndex,
+    HistoricalReconciliationIndexEntry,
+)
 from india_swing.market_data.snapshot_store import LocalMarketSnapshotStore
 from india_swing.market_data.upstox import UPSTOX_PROVIDER, UpstoxHistoricalDataAdapter
 from tests.test_historical_backfill import (
     DAY_ONE,
     DAY_TWO,
     REQUESTED_AT,
+    RUN_CLOCK,
     calendar,
     plan,
     registry,
@@ -1536,6 +1546,384 @@ class GapAdjudicateCliTests(unittest.TestCase):
         self.assertEqual(payload["error_type"], "HistoricalGapAdjudicationError")
 
 
+def reconcile_plan_arguments(**overrides) -> list[str]:
+    values = {
+        "--expected-plan-id": "d" * 64,
+        "--expected-progress-id": "e" * 64,
+        "--nse-artifact-id": "f" * 64,
+        "--maximum-requests": "2",
+        "--reconciled-at": PILOT_RECONCILED_AT.isoformat(),
+    }
+    values.update(overrides)
+    arguments = plan_arguments("reconcile-plan")
+    for name, value in values.items():
+        arguments += [name, value]
+    return arguments
+
+
+def _stub_reconciliation_index(**overrides) -> SimpleNamespace:
+    values = dict(
+        index_id="1" * 64,
+        prior_index_id=None,
+        plan_id="d" * 64,
+        progress_id="e" * 64,
+        provider=UPSTOX_PROVIDER,
+        updated_at=PILOT_RECONCILED_AT,
+        total_completion_count=4,
+        indexed_count=4,
+        remaining_count=0,
+        passed_count=3,
+        failed_count=1,
+        complete=True,
+        collection_only=True,
+        actionable=False,
+        training_eligible=False,
+    )
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class ReconcilePlanCliTests(unittest.TestCase):
+    def test_parser_requires_exact_arguments_and_rejects_provider_flags(
+        self,
+    ) -> None:
+        args = parser().parse_args(
+            reconcile_plan_arguments() + ["--prior-index-id", "2" * 64]
+        )
+
+        self.assertEqual(args.command, "reconcile-plan")
+        self.assertEqual(args.expected_plan_id, "d" * 64)
+        self.assertEqual(args.expected_progress_id, "e" * 64)
+        self.assertEqual(args.nse_artifact_ids, ["f" * 64])
+        self.assertEqual(args.maximum_requests, 2)
+        self.assertEqual(args.reconciled_at, PILOT_RECONCILED_AT)
+        self.assertEqual(args.prior_index_id, "2" * 64)
+
+        self.assertFalse(hasattr(args, "kite_interactive_login"))
+        self.assertFalse(hasattr(args, "kite_refresh_login"))
+        self.assertFalse(hasattr(args, "quarantine_empty_responses"))
+        self.assertFalse(hasattr(args, "quarantine_request_rejections"))
+        self.assertFalse(hasattr(args, "allow_collection_with_issues"))
+
+        self.assertIsNone(parser().parse_args(reconcile_plan_arguments()).prior_index_id)
+
+        for flag in (
+            "--kite-interactive-login",
+            "--kite-refresh-login",
+            "--access-token",
+            "--api-key",
+        ):
+            with self.subTest(flag=flag):
+                with self.assertRaises(SystemExit):
+                    parser().parse_args(reconcile_plan_arguments() + [flag])
+
+    def test_parser_rejects_each_missing_required_argument(self) -> None:
+        for name in (
+            "--expected-plan-id",
+            "--expected-progress-id",
+            "--nse-artifact-id",
+            "--maximum-requests",
+            "--reconciled-at",
+        ):
+            with self.subTest(missing=name):
+                arguments = reconcile_plan_arguments()
+                index = arguments.index(name)
+                with self.assertRaises(SystemExit):
+                    parser().parse_args(arguments[:index] + arguments[index + 2 :])
+
+    def test_arguments_and_stores_are_threaded_into_the_service(self) -> None:
+        stub_plan = object()
+        stub_artifact = object()
+        mock_service_instance = MagicMock()
+        mock_service_instance.run.return_value = _stub_reconciliation_index()
+        mock_service_class = MagicMock(return_value=mock_service_instance)
+        mock_artifact_store = MagicMock()
+        mock_artifact_store.return_value.get.return_value = SimpleNamespace(
+            artifact=stub_artifact
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market"),
+                "INDIA_SWING_HISTORICAL_PRICES_ROOT": str(
+                    Path(temp_dir) / "historical"
+                ),
+                "INDIA_SWING_DAILY_REPORTS_ROOT": str(Path(temp_dir) / "daily"),
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=stub_plan,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".LocalHistoricalPriceArtifactStore",
+                    mock_artifact_store,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".HistoricalBulkReconciliationService",
+                    mock_service_class,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.UpstoxCredentials.from_env",
+                    side_effect=AssertionError("credentials must not be read"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.UpstoxHistoricalDataAdapter",
+                    side_effect=AssertionError("provider must not be constructed"),
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(reconcile_plan_arguments())
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "HISTORICAL_RECONCILIATION_INDEX_COMPLETE")
+        self.assertEqual(payload["index_id"], "1" * 64)
+        self.assertIsNone(payload["prior_index_id"])
+        self.assertEqual(payload["plan_id"], "d" * 64)
+        self.assertEqual(payload["progress_id"], "e" * 64)
+        self.assertEqual(payload["provider"], UPSTOX_PROVIDER)
+        self.assertEqual(payload["updated_at"], PILOT_RECONCILED_AT.isoformat())
+        self.assertEqual(payload["total_completion_count"], 4)
+        self.assertEqual(payload["indexed_count"], 4)
+        self.assertEqual(payload["newly_indexed_count"], 4)
+        self.assertEqual(payload["remaining_count"], 0)
+        self.assertEqual(payload["passed_count"], 3)
+        self.assertEqual(payload["failed_count"], 1)
+        self.assertTrue(payload["complete"])
+        self.assertTrue(payload["collection_only"])
+        self.assertFalse(payload["actionable"])
+        self.assertFalse(payload["training_eligible"])
+
+        mock_service_instance.run.assert_called_once_with(
+            plan=stub_plan,
+            expected_plan_id="d" * 64,
+            expected_progress_id="e" * 64,
+            nse_artifacts=(stub_artifact,),
+            maximum_requests=2,
+            reconciled_at=PILOT_RECONCILED_AT,
+            prior_index_id=None,
+        )
+        mock_artifact_store.return_value.get.assert_called_once_with("f" * 64)
+
+    def test_partial_index_reports_resume_counts_and_exits_zero(self) -> None:
+        mock_service_instance = MagicMock()
+        mock_service_instance.run.return_value = _stub_reconciliation_index(
+            prior_index_id="2" * 64,
+            indexed_count=3,
+            remaining_count=1,
+            passed_count=3,
+            failed_count=0,
+            complete=False,
+        )
+        mock_service_class = MagicMock(return_value=mock_service_instance)
+        mock_index_store = MagicMock()
+        mock_index_store.return_value.get.return_value = SimpleNamespace(
+            entries=("first",)
+        )
+        mock_artifact_store = MagicMock()
+        mock_artifact_store.return_value.get.return_value = SimpleNamespace(
+            artifact=object()
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market"),
+                "INDIA_SWING_HISTORICAL_PRICES_ROOT": str(
+                    Path(temp_dir) / "historical"
+                ),
+                "INDIA_SWING_DAILY_REPORTS_ROOT": str(Path(temp_dir) / "daily"),
+            }
+            output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=object(),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".LocalHistoricalPriceArtifactStore",
+                    mock_artifact_store,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".LocalHistoricalReconciliationIndexStore",
+                    mock_index_store,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".HistoricalBulkReconciliationService",
+                    mock_service_class,
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = main(
+                    reconcile_plan_arguments() + ["--prior-index-id", "2" * 64]
+                )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "HISTORICAL_RECONCILIATION_INDEX_PARTIAL")
+        self.assertEqual(payload["prior_index_id"], "2" * 64)
+        self.assertEqual(payload["indexed_count"], 3)
+        self.assertEqual(payload["newly_indexed_count"], 2)
+        self.assertEqual(payload["remaining_count"], 1)
+        self.assertFalse(payload["complete"])
+        self.assertEqual(
+            mock_service_instance.run.call_args.kwargs["prior_index_id"],
+            "2" * 64,
+        )
+        mock_index_store.return_value.get.assert_called_once_with("2" * 64)
+
+    def test_service_failure_produces_sanitized_stderr_json(self) -> None:
+        mock_service_class = MagicMock(
+            side_effect=ValueError("secret internal lineage detail")
+        )
+        mock_artifact_store = MagicMock()
+        mock_artifact_store.return_value.get.return_value = SimpleNamespace(
+            artifact=object()
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market"),
+                "INDIA_SWING_HISTORICAL_PRICES_ROOT": str(
+                    Path(temp_dir) / "historical"
+                ),
+                "INDIA_SWING_DAILY_REPORTS_ROOT": str(Path(temp_dir) / "daily"),
+            }
+            output = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=object(),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".LocalHistoricalPriceArtifactStore",
+                    mock_artifact_store,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".HistoricalBulkReconciliationService",
+                    mock_service_class,
+                ),
+                redirect_stdout(output),
+                redirect_stderr(stderr),
+            ):
+                exit_code = main(reconcile_plan_arguments())
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(output.getvalue(), "")
+        payload = json.loads(stderr.getvalue())
+        self.assertEqual(set(payload), {"status", "error_type"})
+        self.assertEqual(payload["status"], "FAILED")
+        self.assertNotIn("secret internal lineage detail", stderr.getvalue())
+
+    def test_end_to_end_is_credential_free_and_resumes_from_an_exact_index(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            market_root = root / "market"
+            historical_root = root / "historical"
+            value = pilot_plan(root / "inputs")
+            artifact = pilot_nse_artifact(root)
+            stored_artifact = LocalHistoricalPriceArtifactStore(
+                historical_root,
+                root / "daily",
+            ).put(artifact)
+            snapshot_store = LocalMarketSnapshotStore(market_root)
+            progress = HistoricalBackfillRunner(
+                FakePilotConnector(),
+                snapshot_store,
+                LocalHistoricalBackfillProgressStore(market_root),
+                clock=lambda: RUN_CLOCK,
+            ).run(value, maximum_requests=len(value.requests))
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(market_root),
+                "INDIA_SWING_HISTORICAL_PRICES_ROOT": str(historical_root),
+                "INDIA_SWING_DAILY_REPORTS_ROOT": str(root / "daily"),
+            }
+            shared = {
+                "--expected-plan-id": value.plan_id,
+                "--expected-progress-id": progress.progress_id,
+                "--nse-artifact-id": stored_artifact.manifest.artifact_id,
+                "--reconciled-at": PILOT_RECONCILED_AT.isoformat(),
+            }
+            first_output = io.StringIO()
+            second_output = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=value,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.UpstoxCredentials.from_env",
+                    side_effect=AssertionError("credentials must not be read"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteCredentials.from_env",
+                    side_effect=AssertionError("credentials must not be read"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.UpstoxHistoricalDataAdapter",
+                    side_effect=AssertionError("provider must not be constructed"),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli.KiteMarketDataAdapter"
+                    ".from_official_sdk",
+                    side_effect=AssertionError("provider must not be constructed"),
+                ),
+            ):
+                with redirect_stdout(first_output):
+                    first_exit = main(
+                        reconcile_plan_arguments(
+                            **{**shared, "--maximum-requests": "1"}
+                        )
+                    )
+                first = json.loads(first_output.getvalue())
+                with redirect_stdout(second_output):
+                    second_exit = main(
+                        reconcile_plan_arguments(
+                            **{
+                                **shared,
+                                "--maximum-requests": str(
+                                    MAXIMUM_RECONCILIATIONS_PER_RUN
+                                ),
+                            }
+                        )
+                        + ["--prior-index-id", first["index_id"]]
+                    )
+            second = json.loads(second_output.getvalue())
+
+        self.assertEqual((first_exit, second_exit), (0, 0))
+        self.assertEqual(first["status"], "HISTORICAL_RECONCILIATION_INDEX_PARTIAL")
+        self.assertEqual(first["indexed_count"], 1)
+        self.assertEqual(first["newly_indexed_count"], 1)
+        self.assertEqual(first["remaining_count"], 1)
+        self.assertFalse(first["complete"])
+        self.assertEqual(second["status"], "HISTORICAL_RECONCILIATION_INDEX_COMPLETE")
+        self.assertEqual(second["prior_index_id"], first["index_id"])
+        self.assertEqual(second["indexed_count"], 2)
+        self.assertEqual(second["newly_indexed_count"], 1)
+        self.assertEqual(second["remaining_count"], 0)
+        self.assertEqual(second["passed_count"], 2)
+        self.assertEqual(second["failed_count"], 0)
+        self.assertTrue(second["complete"])
+        self.assertTrue(second["collection_only"])
+        self.assertFalse(second["actionable"])
+        self.assertFalse(second["training_eligible"])
+
+
 def _stub_admission_report(**overrides) -> SimpleNamespace:
     values = dict(
         report_id="a" * 64,
@@ -1860,6 +2248,241 @@ class DatasetAdmitCliTests(unittest.TestCase):
         self.assertEqual(payload["status"], "FAILED")
         self.assertEqual(payload["error_type"], "ValueError")
         self.assertNotIn("secret internal lineage detail", stderr.getvalue())
+
+
+def _reconciliation_index(
+    *,
+    plan_id: str,
+    progress_id: str,
+    entry_count: int = 2,
+    complete: bool = True,
+) -> HistoricalReconciliationIndex:
+    entries = tuple(
+        HistoricalReconciliationIndexEntry(
+            request_id=f"{index * 10 + 1:064x}",
+            provider_snapshot_id=f"{index * 10 + 2:064x}",
+            historical_batch_id=f"{index * 10 + 3:064x}",
+            reconciliation_report_id=f"{index * 10 + 4:064x}",
+            reconciliation_snapshot_id=f"{index * 10 + 5:064x}",
+            reconciled_at=PILOT_RECONCILED_AT,
+            passed=True,
+        )
+        for index in range(entry_count)
+    )
+    return HistoricalReconciliationIndex(
+        plan_id=plan_id,
+        progress_id=progress_id,
+        provider=UPSTOX_PROVIDER,
+        connector_version="fake-pilot-connector/v1",
+        nse_artifact_ids=(f"{99:064x}",),
+        prior_index_id=None,
+        entries=entries,
+        total_completion_count=entry_count if complete else entry_count + 1,
+        updated_at=PILOT_RECONCILED_AT,
+        complete=complete,
+    )
+
+
+def _dataset_admit_arguments(*extra: str) -> list[str]:
+    return [
+        "dataset-admit",
+        "--identity-registry-id",
+        "a" * 64,
+        "--calendar-materialization-id",
+        "b" * 64,
+        "--upstox-catalog-id",
+        "c" * 64,
+        "--coverage-start",
+        "2026-07-01",
+        "--coverage-end",
+        "2026-07-01",
+        "--requested-at",
+        "2026-07-01T09:00:00+00:00",
+        "--expected-plan-id",
+        "b" * 64,
+        "--expected-progress-id",
+        "c" * 64,
+        "--assessed-at",
+        "2026-07-23T10:00:00+00:00",
+        *extra,
+    ]
+
+
+class DatasetAdmitReconciliationIndexCliTests(unittest.TestCase):
+    def _run(self, index, *, coverage_complete=True):
+        stub_result = SimpleNamespace(
+            report=_stub_admission_report(
+                coverage_complete=coverage_complete,
+                safe_requests_complete=coverage_complete,
+            ),
+            disposition_counts=(("ADMITTED", 1),),
+        )
+        mock_service_instance = MagicMock()
+        mock_service_instance.run.return_value = stub_result
+        mock_service_class = MagicMock(return_value=mock_service_instance)
+        mock_index_store = MagicMock()
+        mock_index_store.return_value.get.return_value = index
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            environment = {
+                "INDIA_SWING_MARKET_DATA_ROOT": str(Path(temp_dir) / "market")
+            }
+            output = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch.dict("os.environ", environment, clear=False),
+                patch(
+                    "india_swing.market_data.backfill_cli._configured_plan",
+                    return_value=object(),
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".LocalHistoricalReconciliationIndexStore",
+                    mock_index_store,
+                ),
+                patch(
+                    "india_swing.market_data.backfill_cli"
+                    ".HistoricalDatasetAdmissionService",
+                    mock_service_class,
+                ),
+                redirect_stdout(output),
+                redirect_stderr(stderr),
+            ):
+                exit_code = main(
+                    _dataset_admit_arguments(
+                        "--reconciliation-index-id", "1" * 64
+                    )
+                )
+        return exit_code, output, stderr, mock_index_store, mock_service_instance
+
+    def test_parser_accepts_an_index_id_and_rejects_mixing_with_manual_ids(
+        self,
+    ) -> None:
+        args = parser().parse_args(
+            _dataset_admit_arguments("--reconciliation-index-id", "1" * 64)
+        )
+        self.assertEqual(args.reconciliation_index_id, "1" * 64)
+        self.assertIsNone(args.reconciliation_snapshot_ids)
+
+        manual = parser().parse_args(
+            _dataset_admit_arguments("--reconciliation-snapshot-id", "d" * 64)
+        )
+        self.assertIsNone(manual.reconciliation_index_id)
+        self.assertEqual(manual.reconciliation_snapshot_ids, ["d" * 64])
+
+        neither = parser().parse_args(_dataset_admit_arguments())
+        self.assertIsNone(neither.reconciliation_index_id)
+        self.assertIsNone(neither.reconciliation_snapshot_ids)
+
+        with self.assertRaises(SystemExit):
+            parser().parse_args(
+                _dataset_admit_arguments(
+                    "--reconciliation-snapshot-id",
+                    "d" * 64,
+                    "--reconciliation-index-id",
+                    "1" * 64,
+                )
+            )
+
+    def test_exact_index_is_loaded_and_its_ordered_ids_are_threaded(self) -> None:
+        index = _reconciliation_index(plan_id="b" * 64, progress_id="c" * 64)
+        exit_code, output, _, index_store, service = self._run(index)
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "DATASET_ADMISSION_COVERAGE_COMPLETE")
+        index_store.return_value.get.assert_called_once_with("1" * 64)
+        self.assertEqual(
+            service.run.call_args.kwargs["reconciliation_snapshot_ids"],
+            index.reconciliation_snapshot_ids,
+        )
+
+    def test_partial_index_is_accepted_only_as_blocked_admission_evidence(
+        self,
+    ) -> None:
+        index = _reconciliation_index(
+            plan_id="b" * 64, progress_id="c" * 64, complete=False
+        )
+        exit_code, output, _, _, service = self._run(
+            index, coverage_complete=False
+        )
+
+        self.assertEqual(exit_code, 4)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "DATASET_ADMISSION_COVERAGE_INCOMPLETE")
+        self.assertFalse(payload["coverage_complete"])
+        self.assertFalse(index.complete)
+        self.assertEqual(
+            service.run.call_args.kwargs["reconciliation_snapshot_ids"],
+            index.reconciliation_snapshot_ids,
+        )
+
+    def test_index_bound_to_another_plan_or_progress_is_rejected(self) -> None:
+        for override in ({"plan_id": "9" * 64}, {"progress_id": "9" * 64}):
+            with self.subTest(override=override):
+                values = {"plan_id": "b" * 64, "progress_id": "c" * 64}
+                values.update(override)
+                exit_code, output, stderr, _, service = self._run(
+                    _reconciliation_index(**values)
+                )
+
+                self.assertEqual(exit_code, 2)
+                self.assertEqual(output.getvalue(), "")
+                payload = json.loads(stderr.getvalue())
+                self.assertEqual(set(payload), {"status", "error_type"})
+                self.assertEqual(payload["status"], "FAILED")
+                service.run.assert_not_called()
+
+    def test_manual_and_empty_reconciliation_evidence_are_unchanged(self) -> None:
+        for extra, expected in (
+            (("--reconciliation-snapshot-id", "d" * 64), ("d" * 64,)),
+            ((), ()),
+        ):
+            with self.subTest(extra=extra):
+                mock_service_instance = MagicMock()
+                mock_service_instance.run.return_value = SimpleNamespace(
+                    report=_stub_admission_report(),
+                    disposition_counts=(("ADMITTED", 1),),
+                )
+                mock_index_store = MagicMock(
+                    side_effect=AssertionError(
+                        "the index store must not be constructed"
+                    )
+                )
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    environment = {
+                        "INDIA_SWING_MARKET_DATA_ROOT": str(
+                            Path(temp_dir) / "market"
+                        )
+                    }
+                    output = io.StringIO()
+                    with (
+                        patch.dict("os.environ", environment, clear=False),
+                        patch(
+                            "india_swing.market_data.backfill_cli._configured_plan",
+                            return_value=object(),
+                        ),
+                        patch(
+                            "india_swing.market_data.backfill_cli"
+                            ".LocalHistoricalReconciliationIndexStore",
+                            mock_index_store,
+                        ),
+                        patch(
+                            "india_swing.market_data.backfill_cli"
+                            ".HistoricalDatasetAdmissionService",
+                            MagicMock(return_value=mock_service_instance),
+                        ),
+                        redirect_stdout(output),
+                    ):
+                        exit_code = main(_dataset_admit_arguments(*extra))
+
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(
+                    mock_service_instance.run.call_args.kwargs[
+                        "reconciliation_snapshot_ids"
+                    ],
+                    expected,
+                )
 
 
 if __name__ == "__main__":

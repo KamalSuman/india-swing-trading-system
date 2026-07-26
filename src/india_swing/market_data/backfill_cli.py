@@ -88,6 +88,12 @@ from .kite_session_cache import (
 )
 from .models import HistoricalDailyCandleBatch
 from .reconciliation import reconcile_historical_batch
+from .reconciliation_run import (
+    MAXIMUM_RECONCILIATIONS_PER_RUN,
+    HistoricalBulkReconciliationService,
+    LocalHistoricalReconciliationIndexStore,
+    reconciliation_index_snapshot_ids,
+)
 from .snapshot_store import LocalMarketSnapshotStore
 from .upstox import UPSTOX_PROVIDER, UpstoxHistoricalDataAdapter
 from .upstox_instruments import (
@@ -266,6 +272,42 @@ def parser() -> argparse.ArgumentParser:
         required=True,
     )
 
+    reconcile_plan = commands.add_parser(
+        "reconcile-plan",
+        help=(
+            "reconcile already-collected plan completions against pinned NSE "
+            "EOD artifacts and seal a cumulative reconciliation index "
+            "(credential-free; never calls a provider)"
+        ),
+    )
+    _add_plan_arguments(reconcile_plan)
+    reconcile_plan.add_argument("--expected-plan-id", required=True)
+    reconcile_plan.add_argument("--expected-progress-id", required=True)
+    reconcile_plan.add_argument(
+        "--nse-artifact-id",
+        action="append",
+        required=True,
+        dest="nse_artifact_ids",
+    )
+    reconcile_plan.add_argument(
+        "--maximum-requests",
+        type=int,
+        required=True,
+        help=f"positive integer at or below {MAXIMUM_RECONCILIATIONS_PER_RUN}",
+    )
+    reconcile_plan.add_argument(
+        "--reconciled-at",
+        type=_aware_datetime,
+        required=True,
+    )
+    reconcile_plan.add_argument(
+        "--prior-index-id",
+        help=(
+            "exact prior reconciliation index to resume from; never inferred "
+            "as latest"
+        ),
+    )
+
     catalog_fetch = commands.add_parser(
         "catalog-fetch",
         help="download and seal the public Upstox NSE BOD instrument file",
@@ -320,10 +362,19 @@ def parser() -> argparse.ArgumentParser:
     _add_plan_arguments(dataset_admit)
     dataset_admit.add_argument("--expected-plan-id", required=True)
     dataset_admit.add_argument("--expected-progress-id", required=True)
-    dataset_admit.add_argument(
+    reconciliation_evidence = dataset_admit.add_mutually_exclusive_group()
+    reconciliation_evidence.add_argument(
         "--reconciliation-snapshot-id",
         action="append",
         dest="reconciliation_snapshot_ids",
+    )
+    reconciliation_evidence.add_argument(
+        "--reconciliation-index-id",
+        help=(
+            "exact sealed reconciliation index whose ordered snapshot IDs "
+            "replace thousands of manual --reconciliation-snapshot-id values; "
+            "a partial index remains blocked evidence, never implicit admission"
+        ),
     )
     dataset_admit.add_argument(
         "--expected-gap-evidence-id",
@@ -675,6 +726,71 @@ def _pilot(
     }
 
 
+def _reconcile_plan(
+    plan: HistoricalBackfillPlan,
+    args: argparse.Namespace,
+) -> tuple[int, dict[str, object]]:
+    market_config = MarketDataConfig.from_env()
+    historical_config = HistoricalPricesConfig.from_env()
+    snapshot_store = LocalMarketSnapshotStore(market_config.data_root)
+    index_store = LocalHistoricalReconciliationIndexStore(market_config.data_root)
+    service = HistoricalBulkReconciliationService(
+        progress_store=LocalHistoricalBackfillProgressStore(
+            market_config.data_root
+        ),
+        snapshot_store=snapshot_store,
+        reconciliation_collector=HistoricalReconciliationCollector(
+            snapshot_store
+        ),
+        index_store=index_store,
+    )
+    historical_store = LocalHistoricalPriceArtifactStore(
+        historical_config.data_root,
+        historical_config.daily_reports_root,
+    )
+    nse_artifacts = tuple(
+        historical_store.get(value).artifact
+        for value in args.nse_artifact_ids
+    )
+    index = service.run(
+        plan=plan,
+        expected_plan_id=args.expected_plan_id,
+        expected_progress_id=args.expected_progress_id,
+        nse_artifacts=nse_artifacts,
+        maximum_requests=args.maximum_requests,
+        reconciled_at=args.reconciled_at,
+        prior_index_id=args.prior_index_id,
+    )
+    prior_indexed_count = (
+        len(index_store.get(args.prior_index_id).entries)
+        if args.prior_index_id is not None
+        else 0
+    )
+    return 0, {
+        "status": (
+            "HISTORICAL_RECONCILIATION_INDEX_COMPLETE"
+            if index.complete
+            else "HISTORICAL_RECONCILIATION_INDEX_PARTIAL"
+        ),
+        "index_id": index.index_id,
+        "prior_index_id": index.prior_index_id,
+        "plan_id": index.plan_id,
+        "progress_id": index.progress_id,
+        "provider": index.provider,
+        "updated_at": index.updated_at.isoformat(),
+        "total_completion_count": index.total_completion_count,
+        "indexed_count": index.indexed_count,
+        "newly_indexed_count": index.indexed_count - prior_indexed_count,
+        "remaining_count": index.remaining_count,
+        "passed_count": index.passed_count,
+        "failed_count": index.failed_count,
+        "complete": index.complete,
+        "collection_only": index.collection_only,
+        "actionable": index.actionable,
+        "training_eligible": index.training_eligible,
+    }
+
+
 def _kite_instruments_fetch(
     args: argparse.Namespace,
 ) -> tuple[int, dict[str, object]]:
@@ -901,6 +1017,16 @@ def _dataset_admit(
     args: argparse.Namespace,
 ) -> tuple[int, dict[str, object]]:
     config = MarketDataConfig.from_env()
+    if args.reconciliation_index_id is not None:
+        reconciliation_snapshot_ids = reconciliation_index_snapshot_ids(
+            LocalHistoricalReconciliationIndexStore(config.data_root).get(
+                args.reconciliation_index_id
+            ),
+            expected_plan_id=args.expected_plan_id,
+            expected_progress_id=args.expected_progress_id,
+        )
+    else:
+        reconciliation_snapshot_ids = tuple(args.reconciliation_snapshot_ids or ())
     service = HistoricalDatasetAdmissionService(
         progress_store=LocalHistoricalBackfillProgressStore(config.data_root),
         snapshot_store=LocalMarketSnapshotStore(config.data_root),
@@ -916,7 +1042,7 @@ def _dataset_admit(
         plan=plan,
         expected_plan_id=args.expected_plan_id,
         expected_progress_id=args.expected_progress_id,
-        reconciliation_snapshot_ids=tuple(args.reconciliation_snapshot_ids or ()),
+        reconciliation_snapshot_ids=reconciliation_snapshot_ids,
         expected_gap_evidence_ids=tuple(args.expected_gap_evidence_ids or ()),
         gap_adjudication_report_id=args.gap_adjudication_report_id,
         assessed_at=args.assessed_at,
@@ -965,6 +1091,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             exit_code, value = _pilot(_configured_plan(args), args)
         elif args.command == "reconcile":
             exit_code, value = _reconcile(args)
+        elif args.command == "reconcile-plan":
+            exit_code, value = _reconcile_plan(_configured_plan(args), args)
         elif args.command == "blockers":
             exit_code, value = _blockers(args)
         elif args.command == "evidence-worklist":
