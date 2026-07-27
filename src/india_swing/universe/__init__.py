@@ -19,6 +19,13 @@ from .models import (
     CollectionUniverseSnapshot,
 )
 from .promotion import universe_promotion_evidence
+from .promoted_identity import (
+    PromotedIdentitySessionDisposition,
+    PromotedIdentitySessionEntry,
+    PromotedIdentitySessionUniverseError,
+    PromotedIdentitySessionUniverseService,
+    VerifiedPromotedIdentitySessionUniverse,
+)
 from .store import LocalCollectionUniverseSnapshotStore
 
 __all__ = [
@@ -37,6 +44,11 @@ __all__ = [
     "CollectionUniverseSnapshot",
     "EligibilityResult",
     "LocalCollectionUniverseSnapshotStore",
+    "PromotedIdentitySessionDisposition",
+    "PromotedIdentitySessionEntry",
+    "PromotedIdentitySessionUniverseError",
+    "PromotedIdentitySessionUniverseService",
+    "VerifiedPromotedIdentitySessionUniverse",
     "decode_collection_universe_snapshot",
     "encode_collection_universe_snapshot",
     "evaluate_eligibility",
