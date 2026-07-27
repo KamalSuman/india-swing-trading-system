@@ -88,6 +88,53 @@ Mutable current files such as `EQUITY_L.csv`, `SME_EQUITY_L.csv`, current
 symbol/name-change CSVs, today's Kite instruments, and current ASM/GSM pages are
 useful for validation but cannot be projected backward.
 
+## Trusted acquisition-receipt verification boundary
+
+`src/india_swing/reference_data/acquisition_receipt.py` implements a pure,
+externally pinned verifier (`ReferenceAcquisitionReceiptVerifier`) for one
+authorized NSE CM MII security-master acquisition receipt. It follows the same
+trust pattern as `LandingManifestVerifier`: a `TrustedReferenceAcquisitionBinding`
+supplies the only source of trust (expected receipt/raw SHA-256 hashes, the
+allowed GCS bucket, the exact report date, aware-UTC `not_before`/`cutoff`
+bounds, and the trusted acquirer ID), all caller-supplied and never inferred
+or recomputed from receipt content, an environment variable, a clock, GCS, a
+filename, or a network response. The verifier performs no network, GCS,
+filesystem, environment, clock, listing, or "latest" access; it accepts
+strict UTF-8 JSON receipt bytes (at most 64 KiB) and fails closed with one
+static, sanitized `ReferenceAcquisitionReceiptError` that never echoes
+receipt content, a URL, a bucket or object name, a hash, an acquirer ID,
+nested exception text, a path, or credential-like text.
+
+**A verified receipt is necessary but not sufficient.** It proves only that
+one exact claimed acquisition record — source, acquirer, acquisition time
+window, claimed download URL, HTTP status/media type, raw byte count, raw
+SHA-256, and the pinned GCS landing object (bucket/object name/generation) —
+matches an independently governed hash and bound. It does **not** download
+anything, does not read the landing object's actual bytes, does not parse the
+security master, and does not promote any artifact's readiness. Code that
+later joins a verified receipt to the acquired raw bytes and the existing
+collection artifact must still:
+
+- exact-generation-read the pinned landing object from GCS (never a listing
+  or "latest" read), independently re-verifying its generation and content
+  hash against the receipt's own `raw_sha256`, exactly as
+  `GCSLandingObjectReader.read` already does for `LandingObjectRequest`;
+- recompute the parse/normalization semantics against the actual downloaded
+  bytes (mirroring how the manual importer independently re-derives every
+  manifest field from re-parsed bytes rather than trusting a filename or
+  external claim); and
+- explicitly, separately decide to promote the resulting joined artifact's
+  `AcquisitionMode`/readiness/`verified_report_date` — a verified receipt by
+  itself changes none of those fields on any existing artifact.
+
+A receipt generated from an unauthenticated manual claim, or whose own
+internal hash was computed from the same untrusted receipt bytes it is meant
+to authenticate, is self-consistent but is **not** independent provenance —
+exactly the same failure mode `LandingManifestVerifier`'s design note already
+warns about for landing manifests. Only an externally governed
+`TrustedReferenceAcquisitionBinding`, sourced outside the receipt itself, can
+anchor verification.
+
 ## Calendar source hierarchy
 
 The human-facing source is NSE's

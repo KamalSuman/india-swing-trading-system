@@ -1,3 +1,9 @@
+from .acquisition_receipt import (
+    ReferenceAcquisitionReceiptError,
+    ReferenceAcquisitionReceiptVerifier,
+    TrustedReferenceAcquisitionBinding,
+    VerifiedReferenceAcquisitionReceipt,
+)
 from .artifact_store import LocalReferenceArtifactStore
 from .models import (
     AcquisitionMode,
@@ -28,6 +34,10 @@ __all__ = (
     "NseCmSecurityMasterParser",
     "NseCmSecurityRecord",
     "ParsedNseCmSecurityMaster",
+    "ReferenceAcquisitionReceiptError",
+    "ReferenceAcquisitionReceiptVerifier",
+    "TrustedReferenceAcquisitionBinding",
+    "VerifiedReferenceAcquisitionReceipt",
     "ReferenceArtifactConflict",
     "ReferenceArtifactError",
     "ReferenceArtifactIntegrityError",
