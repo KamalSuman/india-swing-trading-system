@@ -27,6 +27,12 @@ from .adjudication_store import (
 from .codec import encode_identity_registry
 from .config import IdentityRegistryConfig
 from .materialize import materialize_cross_vintage_identity_registry
+from .promoted_intake import (
+    PromotedIdentityIntakeError,
+    PromotedIdentityIntakeService,
+    IdentityRequirementSatisfaction,
+    VerifiedPromotedIdentityIntake,
+)
 from .models import (
     IDENTITY_REGISTRY_CODEC_VERSION,
     IDENTITY_REGISTRY_DATASET,
@@ -78,9 +84,13 @@ __all__ = [
     "IdentityRegistryIntegrityError",
     "IdentityRegistryStoreConflict",
     "IdentityRegistryStoreManifest",
+    "IdentityRequirementSatisfaction",
     "LocalIdentityRegistryStore",
     "LocalIdentityAdjudicationQueueStore",
+    "PromotedIdentityIntakeError",
+    "PromotedIdentityIntakeService",
     "StoredIdentityRegistry",
+    "VerifiedPromotedIdentityIntake",
     "encode_identity_registry",
     "decode_identity_adjudication_queue",
     "encode_identity_adjudication_queue",

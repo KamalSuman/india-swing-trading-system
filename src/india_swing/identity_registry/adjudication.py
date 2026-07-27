@@ -12,6 +12,10 @@ from .models import (
     CrossVintageIdentityRegistry,
     IdentityCandidateBasis,
     IdentityCandidateStatus,
+    IdentityCandidateTransition,
+    IdentityConflict,
+    IdentityContinuityCandidate,
+    IdentityObservation,
     IdentityRegistryIntegrityError,
 )
 
@@ -325,29 +329,36 @@ def _requirements_for(
     return tuple(sorted(values, key=lambda value: value.value))
 
 
-def build_identity_adjudication_queue(
-    registry: CrossVintageIdentityRegistry,
-) -> IdentityAdjudicationQueue:
-    """Enumerate every unresolved identity case without assigning stable IDs."""
+def _build_adjudication_cases(
+    observations: tuple[IdentityObservation, ...],
+    candidates: tuple[IdentityContinuityCandidate, ...],
+    transitions: tuple[IdentityCandidateTransition, ...],
+    conflicts: tuple[IdentityConflict, ...],
+) -> tuple[IdentityAdjudicationCase, ...]:
+    """The single shared pure case builder over one candidate/observation
+    graph.
 
-    if type(registry) is not CrossVintageIdentityRegistry:
-        raise TypeError("registry must be an exact CrossVintageIdentityRegistry")
-    registry.verify_content_identity()
-    observations = {value.observation_id: value for value in registry.observations}
+    Both ``build_identity_adjudication_queue`` (over an already-sealed
+    ``CrossVintageIdentityRegistry``) and any trusted-promotion caller (over
+    its own directly-built observation/candidate/transition/conflict tuples,
+    with no ``CrossVintageIdentityRegistry`` wrapper) must call this exact
+    function so adjudication-requirement policy never diverges between the
+    two callers.
+    """
+
+    observations_by_id = {value.observation_id: value for value in observations}
     cases: list[IdentityAdjudicationCase] = []
-    for candidate in registry.candidates:
+    for candidate in candidates:
         candidate_observations = tuple(
-            observations[value] for value in candidate.observation_ids
+            observations_by_id[value] for value in candidate.observation_ids
         )
-        transitions = tuple(
-            value
-            for value in registry.transitions
-            if value.candidate_id == candidate.candidate_id
+        candidate_transitions = tuple(
+            value for value in transitions if value.candidate_id == candidate.candidate_id
         )
         candidate_observation_ids = set(candidate.observation_ids)
-        conflicts = tuple(
+        candidate_conflicts = tuple(
             value
-            for value in registry.conflicts
+            for value in conflicts
             if candidate_observation_ids.intersection(value.observation_ids)
         )
         transition_changed = any(
@@ -355,7 +366,7 @@ def build_identity_adjudication_queue(
             or value.series_changed
             or value.financial_instrument_id_changed
             or value.instrument_name_changed
-            for value in transitions
+            for value in candidate_transitions
         )
         cases.append(
             IdentityAdjudicationCase(
@@ -372,9 +383,11 @@ def build_identity_adjudication_queue(
                     )
                 ),
                 transition_ids=tuple(
-                    sorted(value.transition_id for value in transitions)
+                    sorted(value.transition_id for value in candidate_transitions)
                 ),
-                conflict_ids=tuple(sorted(value.conflict_id for value in conflicts)),
+                conflict_ids=tuple(
+                    sorted(value.conflict_id for value in candidate_conflicts)
+                ),
                 requirements=_requirements_for(
                     candidate_status=candidate.status,
                     observed_date_count=len(
@@ -387,6 +400,23 @@ def build_identity_adjudication_queue(
                 ),
             )
         )
+    return tuple(sorted(cases, key=lambda value: value.candidate_id))
+
+
+def build_identity_adjudication_queue(
+    registry: CrossVintageIdentityRegistry,
+) -> IdentityAdjudicationQueue:
+    """Enumerate every unresolved identity case without assigning stable IDs."""
+
+    if type(registry) is not CrossVintageIdentityRegistry:
+        raise TypeError("registry must be an exact CrossVintageIdentityRegistry")
+    registry.verify_content_identity()
+    cases = _build_adjudication_cases(
+        registry.observations,
+        registry.candidates,
+        registry.transitions,
+        registry.conflicts,
+    )
     queue = IdentityAdjudicationQueue(
         source_registry_id=registry.registry_id,
         source_cutoff=registry.cutoff,
@@ -395,7 +425,7 @@ def build_identity_adjudication_queue(
         source_manifest_ids=tuple(
             value.manifest_id for value in registry.source_manifests
         ),
-        cases=tuple(sorted(cases, key=lambda value: value.candidate_id)),
+        cases=cases,
     )
     if {value.candidate_id for value in queue.cases} != {
         value.candidate_id for value in registry.candidates

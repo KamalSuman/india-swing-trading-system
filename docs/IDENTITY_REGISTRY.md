@@ -108,6 +108,54 @@ The current 21,133-observation local registry takes roughly one minute to replay
 from raw sealed masters on this machine. Publication avoids a redundant second
 replay, while every independent read still performs one full replay.
 
+## Trusted multi-vintage promotion intake
+
+`src/india_swing/identity_registry/promoted_intake.py` implements
+`PromotedIdentityIntakeService`, a separate bridge from multiple already
+independently verified `VerifiedReferenceArtifactPromotion` values into this
+same candidate/adjudication machinery, without ever constructing a
+`CrossVintageIdentityRegistry`. It reuses the exact same internal
+conflict/candidate/transition graph builder and adjudication case builder the
+legacy `materialize_cross_vintage_identity_registry`/
+`build_identity_adjudication_queue` functions call, so promoted and legacy
+inputs can never diverge in policy.
+
+`PromotedIdentityIntakeService.materialize(promotions, expected_report_dates,
+cutoff)` requires at least two distinct `expected_report_dates`, independently
+replays every promotion's own content identity, rejects duplicate promotion/
+join/source-artifact/manifest lineage and duplicate verified report dates,
+requires the exact promoted report-date set to equal `expected_report_dates`,
+and requires every promotion's `knowledge_time` to be at or before `cutoff` --
+never inferring knowledge time from a manifest's `validated_at`,
+`first_seen_at`, or any local clock. One `IdentityObservation` is built for
+every `RETAINED_UNVERIFIED_EQUITY` row in every promoted artifact, binding
+`claimed_report_date`/`knowledge_time` to the promotion's own trusted
+`verified_report_date`/`knowledge_time` -- the manifest's own
+`claimed_report_date`/`validated_at` never enter an observation this way,
+unlike the legacy collection-only path.
+
+For every resulting adjudication-queue case, exactly one
+`IdentityRequirementSatisfaction` records that trusted acquisition/promotion
+provenance already satisfies exactly `AUTHORIZED_SOURCE_PROVENANCE` and
+`REPORT_DATE_VERIFICATION`; every other policy requirement (adjacent-vintage
+observation, validated identifier, official continuity/lifecycle/
+listing-status/conflict-resolution evidence) remains explicitly unresolved.
+The resulting `VerifiedPromotedIdentityIntake` retains `source_readiness=
+POINT_IN_TIME_VERIFIED` (describing only the retained source promotions)
+while its own `readiness` stays `COLLECTION_ONLY`, `actionable` stays
+`false`, and `stable_identity_assigned` stays `false` -- satisfying two
+requirements per candidate is not stable-identity adjudication, and this type
+exposes no `StableInstrumentId`, `StableListingId`, universe, calendar,
+price, liquidity, corporate-action, model, signal, or trading-authority
+field. `__post_init__` calls `verify_content_identity()`, which requires the
+exact concrete type and independently replays the complete derivation, so
+direct construction with a mismatched value or post-construction mutation
+anywhere in the retained promotion/observation/candidate/transition/conflict/
+queue graph fails closed with one static sanitized
+`PromotedIdentityIntakeError`. It never rewrites, replaces, or otherwise
+mutates any sealed source archive, and it creates no second archive,
+persistence format, or CLI of its own in this boundary.
+
 ## What completes this boundary
 
 Recurring authorized master collection must supply multiple consecutive

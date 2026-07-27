@@ -32,15 +32,32 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _observation(source: StoredReferenceArtifact, record: object) -> IdentityObservation:
-    # Exact source-record typing is already enforced by ParsedNseCmSecurityMaster.
+def _identity_observation_from_record(
+    *,
+    source_artifact_id: str,
+    source_manifest_id: str,
+    claimed_report_date: date,
+    knowledge_time: datetime,
+    record: object,
+) -> IdentityObservation:
+    """The single shared record-to-observation builder.
+
+    Callers bind ``claimed_report_date``/``knowledge_time`` explicitly rather
+    than this function inferring them, so the legacy collection-only
+    materializer (manifest.claimed_report_date/manifest.validated_at) and any
+    trusted-promotion caller (a promotion's own verified_report_date/
+    knowledge_time) share one identical observation-construction policy
+    without diverging. Exact source-record typing is already enforced by
+    ParsedNseCmSecurityMaster.
+    """
+
     return IdentityObservation(
-        source_artifact_id=source.manifest.artifact_id,
-        source_manifest_id=source.manifest.manifest_id,
+        source_artifact_id=source_artifact_id,
+        source_manifest_id=source_manifest_id,
         source_record_id=record.source_record_id,
         normalized_row_sha256=record.normalized_row_sha256,
-        claimed_report_date=source.manifest.claimed_report_date,
-        knowledge_time=source.manifest.validated_at,
+        claimed_report_date=claimed_report_date,
+        knowledge_time=knowledge_time,
         financial_instrument_id=record.financial_instrument_id,
         ticker_symbol=record.ticker_symbol,
         security_series=record.security_series,
@@ -48,6 +65,16 @@ def _observation(source: StoredReferenceArtifact, record: object) -> IdentityObs
         raw_source_identifier=record.raw_source_identifier,
         validated_isin=record.validated_isin,
         delete_flag=record.delete_flag,
+    )
+
+
+def _observation(source: StoredReferenceArtifact, record: object) -> IdentityObservation:
+    return _identity_observation_from_record(
+        source_artifact_id=source.manifest.artifact_id,
+        source_manifest_id=source.manifest.manifest_id,
+        claimed_report_date=source.manifest.claimed_report_date,
+        knowledge_time=source.manifest.validated_at,
+        record=record,
     )
 
 
@@ -262,6 +289,26 @@ def _build_transitions(
     return tuple(sorted(transitions, key=lambda value: value.transition_id))
 
 
+def _build_identity_graph(
+    observations: tuple[IdentityObservation, ...],
+) -> tuple[
+    tuple[IdentityContinuityCandidate, ...],
+    tuple[IdentityCandidateTransition, ...],
+    tuple[IdentityConflict, ...],
+]:
+    """The single shared pure graph builder over an exact observation tuple.
+
+    Both the legacy collection-only materializer and any trusted-promotion
+    caller must call this exact function so conflict, candidate, and
+    transition policy never diverges between the two callers.
+    """
+
+    conflicts = _build_conflicts(observations)
+    candidates = _build_candidates(observations, conflicts)
+    transitions = _build_transitions(observations, candidates)
+    return candidates, transitions, conflicts
+
+
 def materialize_cross_vintage_identity_registry(
     *,
     sources: tuple[StoredReferenceArtifact, ...],
@@ -318,9 +365,7 @@ def materialize_cross_vintage_identity_registry(
         raise IdentityRegistryIntegrityError(
             "identity sources contain no retained equity observations"
         )
-    conflicts = _build_conflicts(observations)
-    candidates = _build_candidates(observations, conflicts)
-    transitions = _build_transitions(observations, candidates)
+    candidates, transitions, conflicts = _build_identity_graph(observations)
     registry = CrossVintageIdentityRegistry(
         cutoff=cutoff,
         knowledge_time=max(value.manifest.validated_at for value in ordered_sources),
