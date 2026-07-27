@@ -156,6 +156,57 @@ queue graph fails closed with one static sanitized
 mutates any sealed source archive, and it creates no second archive,
 persistence format, or CLI of its own in this boundary.
 
+## Trusted promoted-identity adjudication bridge
+
+`src/india_swing/identity_decisions/promoted_materialize.py` implements
+`PromotedIdentityAdjudicationService`, a separate bridge from one
+`VerifiedPromotedIdentityIntake` into the existing identity-evidence and
+review-decision machinery. It reuses the exact same shared core
+(`_materialize_adjudicated_identity_snapshot_core` in
+`identity_decisions/materialize.py`) the legacy
+`materialize_adjudicated_identity_snapshot` already uses, so promoted and
+legacy inputs can never diverge in evidence/review adjudication policy;
+only the two pre-satisfied requirements a promoted intake already proves
+change what that core is told to skip.
+
+`PromotedIdentityAdjudicationService.materialize(intake, evidence_artifacts,
+review_bundles, cutoff)` requires `cutoff` to be at or after
+`intake.knowledge_time`, independently replays the intake's own content
+identity, and passes each candidate's exact `IdentityRequirementSatisfaction.
+satisfied_requirements` (always `{AUTHORIZED_SOURCE_PROVENANCE,
+REPORT_DATE_VERIFICATION}`) into the shared core as pre-satisfied
+requirements for that candidate. `CandidateIdentityResolution.
+required_requirements` still always contains the complete original queue
+case requirements; only the remaining unresolved (non-pre-satisfied)
+requirements may ever appear in `missing_requirements`, `accepted_decision_
+ids`, or `rejected_decision_ids`, and a review decision that targets
+`AUTHORIZED_SOURCE_PROVENANCE` or `REPORT_DATE_VERIFICATION` is rejected
+outright rather than double-counted, overridden, or treated as stronger
+provenance. Stable instrument/listing IDs are assigned only through the
+exact same accepted, non-conflicting evidence-review chain the legacy path
+already requires -- matching an ISIN, symbol, series, or financial-
+instrument ID alone, or upstream trusted acquisition provenance alone, can
+never assign a stable identity.
+
+The resulting `VerifiedPromotedIdentityAdjudication` retains the exact
+intake, canonical evidence/review tuples, cutoff, and derived
+`AdjudicatedIdentitySnapshot` (`source_registry_id=intake.source_graph_id`,
+`source_queue_id=intake.queue.queue_id`, `knowledge_time` equal to the
+maximum of the intake's and every selected evidence/review `validated_at`).
+`readiness` is always `COLLECTION_ONLY`, `actionable` is always `false`, and
+`stable_identity_assigned` mirrors `snapshot.stable_identity_assigned`
+exactly. A structurally complete snapshot is still not point-in-time
+trading authority: official evidence acquisition/publication provenance and
+effective listing intervals require a later promotion boundary.
+`__post_init__` calls `verify_content_identity()`, which requires the exact
+concrete type and independently replays the complete derivation -- including
+one fail-closed comparison boundary around every retained-versus-recomputed
+equality check, so a malicious nested value's own `__eq__` can never leak a
+raw exception through this trust boundary -- so direct construction with a
+mismatched value or post-construction mutation anywhere in the retained
+graph fails closed with one static sanitized
+`PromotedIdentityAdjudicationError`.
+
 ## What completes this boundary
 
 Recurring authorized master collection must supply multiple consecutive

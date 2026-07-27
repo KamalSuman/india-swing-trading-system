@@ -163,25 +163,36 @@ def _accepted_effective_isin(
     return effective_isin
 
 
-def materialize_adjudicated_identity_snapshot(
+def _materialize_adjudicated_identity_snapshot_core(
     *,
-    registry: CrossVintageIdentityRegistry,
+    source_registry_id: str,
+    source_queue_id: str,
+    source_knowledge_time: datetime,
+    observations: dict[str, object],
+    candidates: dict[str, object],
     queue: IdentityAdjudicationQueue,
     evidence_artifacts: tuple[StoredIdentityEvidenceArtifact, ...],
     review_bundles: tuple[StoredIdentityReviewBundle, ...],
     cutoff: datetime,
+    pre_satisfied_requirements: dict[str, frozenset[IdentityAdjudicationRequirement]],
 ) -> AdjudicatedIdentitySnapshot:
-    """Assign partial stable IDs only from an explicit, non-conflicting review set."""
+    """The single shared pure core over one candidate/observation/queue graph.
 
-    cutoff = _utc(cutoff)
-    if type(registry) is not CrossVintageIdentityRegistry:
-        raise TypeError("identity decision registry must be exact")
-    if type(queue) is not IdentityAdjudicationQueue:
-        raise TypeError("identity decision queue must be exact")
-    registry.verify_content_identity()
-    queue.verify_content_identity()
-    if queue != build_identity_adjudication_queue(registry):
-        raise IdentityDecisionIntegrityError("identity decision queue does not replay from registry")
+    Both the legacy materialize_adjudicated_identity_snapshot (over an
+    already-sealed CrossVintageIdentityRegistry, with an empty
+    pre_satisfied_requirements set for every candidate) and a
+    trusted-promotion caller (over its own directly-built
+    observation/candidate/queue graph, with each candidate's upstream
+    pre-satisfied requirements supplied explicitly) must call this exact
+    function so evidence/review adjudication policy never diverges between
+    the two callers. required_requirements on every resulting
+    CandidateIdentityResolution always remains the complete original queue
+    case requirements; only reviewable (non-pre-satisfied) requirements may
+    ever appear in missing/accepted/rejected, and a review decision that
+    targets a pre-satisfied requirement is rejected outright rather than
+    double-counted or treated as stronger provenance.
+    """
+
     if type(evidence_artifacts) is not tuple or any(
         type(value) is not StoredIdentityEvidenceArtifact for value in evidence_artifacts
     ):
@@ -203,7 +214,7 @@ def materialize_adjudicated_identity_snapshot(
         verify_stored_identity_review_provenance(bundle)
         if bundle.manifest.validated_at > cutoff:
             raise IdentityDecisionIntegrityError("identity review is known after cutoff")
-        if bundle.parsed.queue_id != queue.queue_id or bundle.parsed.source_registry_id != registry.registry_id:
+        if bundle.parsed.queue_id != source_queue_id or bundle.parsed.source_registry_id != source_registry_id:
             raise IdentityDecisionIntegrityError("identity review targets another queue or registry")
 
     claims = {
@@ -223,6 +234,12 @@ def materialize_adjudicated_identity_snapshot(
             pair = (decision.candidate_id, decision.requirement)
             if pair not in required_pairs:
                 raise IdentityDecisionIntegrityError("review decision does not target a required queue pair")
+            if decision.requirement in pre_satisfied_requirements.get(
+                decision.candidate_id, frozenset()
+            ):
+                raise IdentityDecisionIntegrityError(
+                    "review decision targets an already-satisfied source requirement"
+                )
             if pair in decisions:
                 raise IdentityDecisionConflict("explicit review set contains duplicate decisions for one pair")
             evidence = claims.get((decision.evidence_artifact_id, decision.evidence_claim_id))
@@ -236,8 +253,6 @@ def materialize_adjudicated_identity_snapshot(
             decisions[pair] = decision
             decision_claims[pair] = claim
 
-    candidates = {value.candidate_id: value for value in registry.candidates}
-    observations = {value.observation_id: value for value in registry.observations}
     resolutions = []
     listing_observations = []
     for case in queue.cases:
@@ -245,13 +260,16 @@ def materialize_adjudicated_identity_snapshot(
         candidate_observations = tuple(
             observations[value] for value in candidate.observation_ids
         )
+        candidate_pre_satisfied = pre_satisfied_requirements.get(
+            case.candidate_id, frozenset()
+        )
         pair_decisions = {
             requirement: decisions.get((case.candidate_id, requirement))
             for requirement in case.requirements
         }
         missing = tuple(
             requirement for requirement in case.requirements
-            if pair_decisions[requirement] is None
+            if requirement not in candidate_pre_satisfied and pair_decisions[requirement] is None
         )
         accepted = tuple(sorted(
             decision.decision_id
@@ -305,12 +323,12 @@ def materialize_adjudicated_identity_snapshot(
             stable_instrument_id=stable_instrument_id,
         ))
 
-    knowledge_times = [registry.knowledge_time]
+    knowledge_times = [source_knowledge_time]
     knowledge_times.extend(value.manifest.validated_at for value in evidence_artifacts)
     knowledge_times.extend(value.manifest.validated_at for value in review_bundles)
     snapshot = AdjudicatedIdentitySnapshot(
-        source_registry_id=registry.registry_id,
-        source_queue_id=queue.queue_id,
+        source_registry_id=source_registry_id,
+        source_queue_id=source_queue_id,
         cutoff=cutoff,
         knowledge_time=max(knowledge_times),
         evidence_artifact_ids=evidence_ids,
@@ -323,3 +341,39 @@ def materialize_adjudicated_identity_snapshot(
     )
     snapshot.verify_content_identity()
     return snapshot
+
+
+def materialize_adjudicated_identity_snapshot(
+    *,
+    registry: CrossVintageIdentityRegistry,
+    queue: IdentityAdjudicationQueue,
+    evidence_artifacts: tuple[StoredIdentityEvidenceArtifact, ...],
+    review_bundles: tuple[StoredIdentityReviewBundle, ...],
+    cutoff: datetime,
+) -> AdjudicatedIdentitySnapshot:
+    """Assign partial stable IDs only from an explicit, non-conflicting review set."""
+
+    cutoff = _utc(cutoff)
+    if type(registry) is not CrossVintageIdentityRegistry:
+        raise TypeError("identity decision registry must be exact")
+    if type(queue) is not IdentityAdjudicationQueue:
+        raise TypeError("identity decision queue must be exact")
+    registry.verify_content_identity()
+    queue.verify_content_identity()
+    if queue != build_identity_adjudication_queue(registry):
+        raise IdentityDecisionIntegrityError("identity decision queue does not replay from registry")
+
+    candidates = {value.candidate_id: value for value in registry.candidates}
+    observations = {value.observation_id: value for value in registry.observations}
+    return _materialize_adjudicated_identity_snapshot_core(
+        source_registry_id=registry.registry_id,
+        source_queue_id=queue.queue_id,
+        source_knowledge_time=registry.knowledge_time,
+        observations=observations,
+        candidates=candidates,
+        queue=queue,
+        evidence_artifacts=evidence_artifacts,
+        review_bundles=review_bundles,
+        cutoff=cutoff,
+        pre_satisfied_requirements={case.candidate_id: frozenset() for case in queue.cases},
+    )

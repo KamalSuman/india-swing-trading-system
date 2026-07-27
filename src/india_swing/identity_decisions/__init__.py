@@ -4,6 +4,11 @@ from .artifact_store import (
 )
 from .codec import encode_identity_review_bundle
 from .materialize import materialize_adjudicated_identity_snapshot
+from .promoted_materialize import (
+    PromotedIdentityAdjudicationError,
+    PromotedIdentityAdjudicationService,
+    VerifiedPromotedIdentityAdjudication,
+)
 from .models import (
     ADJUDICATED_IDENTITY_POLICY_VERSION,
     ADJUDICATED_IDENTITY_SCHEMA_VERSION,
@@ -68,7 +73,10 @@ __all__ = [
     "LocalAdjudicatedIdentitySnapshotStore",
     "LocalIdentityReviewBundleStore",
     "ParsedIdentityReviewBundle",
+    "PromotedIdentityAdjudicationError",
+    "PromotedIdentityAdjudicationService",
     "StoredIdentityReviewBundle",
+    "VerifiedPromotedIdentityAdjudication",
     "decode_adjudicated_identity_snapshot",
     "encode_adjudicated_identity_snapshot",
     "encode_identity_review_bundle",
