@@ -3,6 +3,11 @@ from .acquisition_join import (
     ReferenceAcquisitionJoinService,
     VerifiedReferenceAcquisitionJoin,
 )
+from .acquisition_promotion import (
+    ReferenceArtifactPromotionError,
+    ReferenceArtifactPromotionService,
+    VerifiedReferenceArtifactPromotion,
+)
 from .acquisition_receipt import (
     ReferenceAcquisitionReceiptError,
     ReferenceAcquisitionReceiptVerifier,
@@ -42,6 +47,9 @@ __all__ = (
     "ReferenceAcquisitionJoinError",
     "ReferenceAcquisitionJoinService",
     "VerifiedReferenceAcquisitionJoin",
+    "ReferenceArtifactPromotionError",
+    "ReferenceArtifactPromotionService",
+    "VerifiedReferenceArtifactPromotion",
     "ReferenceAcquisitionReceiptError",
     "ReferenceAcquisitionReceiptVerifier",
     "TrustedReferenceAcquisitionBinding",

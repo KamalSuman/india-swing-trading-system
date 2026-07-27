@@ -46,6 +46,7 @@ class ReferenceArtifactUnverifiedReportDate(ReferenceArtifactError):
 
 class AcquisitionMode(str, Enum):
     UNVERIFIED_MANUAL_FILE = "UNVERIFIED_MANUAL_FILE"
+    TRUSTED_PINNED_GCS_RECEIPT = "TRUSTED_PINNED_GCS_RECEIPT"
 
 
 class SourceRowDisposition(str, Enum):

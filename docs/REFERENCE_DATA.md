@@ -187,6 +187,64 @@ separate, subsequent decision must still explicitly promote this joined
 evidence into any `AcquisitionMode`/readiness/`verified_report_date` change
 on a stored reference artifact.
 
+## Trusted artifact-promotion boundary
+
+`src/india_swing/reference_data/acquisition_promotion.py` implements
+`ReferenceArtifactPromotionService`, which proves that one existing sealed
+`COLLECTION_ONLY` security-master artifact -- produced by the manual
+importer and unchanged since -- is exactly the artifact represented by one
+already-verified `VerifiedReferenceAcquisitionJoin`, then emits a separate
+immutable `VerifiedReferenceArtifactPromotion` evidence record. It never
+rewrites, replaces, renames, or otherwise mutates the source archive: the
+original sealed manifest, raw bytes, and normalized bytes remain byte-for-
+byte unchanged, and no second archive or promotion store is created.
+
+`promote(join, artifact)` first requires exact
+`VerifiedReferenceAcquisitionJoin` and `StoredReferenceArtifact` types,
+verifies the join's own content identity, and calls the artifact store's
+`verify_stored_reference_provenance` before deriving any promoted fact --
+so a synthetic, shaped, or already-mutated artifact fails closed before any
+comparison runs. It then requires the source manifest to remain in exactly
+its original collection-only state (`UNVERIFIED_MANUAL_FILE`,
+`COLLECTION_ONLY`, `actionable=false`, `verified_report_date=None`,
+`publication_time_status="UNVERIFIED_MANUAL_FILE"`), independently proves
+byte-for-byte and semantic-fact-for-semantic-fact equality between the
+trusted join and the sealed artifact (raw bytes/hash/byte count, the
+complete parsed security master, report date, filename, source URL, media
+type, parser/source/scope/codec versions, every hash, and every
+row/disposition count), and recomputes `encode_security_master(join.parsed)`
+and its SHA-256 rather than trusting the retained normalized bytes or
+`manifest.normalized_sha256`.
+
+The resulting `promotion_id` is a deterministic, full lowercase SHA-256
+`content_id` over a canonical mapping of the join, receipt, source
+artifact/manifest identity, every trusted hash, the report date, the
+knowledge time, and the fixed promoted acquisition mode/readiness/
+actionable facts -- no filesystem path, mtime, repr, or runtime identity, so
+identical content stored under a different path yields the same
+`promotion_id`.
+
+`VerifiedReferenceArtifactPromotion` retains the exact join and source
+artifact plus only the derived promotion facts: `schema_version`,
+`promotion_id`, `promoted_acquisition_mode=TRUSTED_PINNED_GCS_RECEIPT`,
+`promoted_readiness=POINT_IN_TIME_VERIFIED`, `verified_report_date` (from
+the receipt), `knowledge_time` (the receipt's own `acquired_at`, never a
+wall clock, filesystem timestamp, or first-seen time), and
+`actionable=false`. `__post_init__` calls `verify_content_identity()`, which
+independently replays every one of these checks, so direct construction
+with a mismatched value or post-construction `object.__setattr__` mutation
+anywhere in the retained graph fails closed.
+
+**`POINT_IN_TIME_VERIFIED` on this record still is not promotion into any
+trading, alert, or capital capability.** It means only that this exact
+security-master artifact vintage has independently pinned acquisition
+provenance. It does not establish stable cross-vintage identity, calendar,
+universe, surveillance, liquidity, prices, corporate actions, model
+validation, alert eligibility, or profitability, is not a
+`PromotionEvidence`/`PromotionDecision` record, and does not itself change
+the stored artifact's own `AcquisitionMode`, readiness, or `actionable`
+flag on the sealed archive.
+
 ## Calendar source hierarchy
 
 The human-facing source is NSE's
