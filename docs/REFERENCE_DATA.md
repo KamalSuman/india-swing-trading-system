@@ -135,6 +135,58 @@ warns about for landing manifests. Only an externally governed
 `TrustedReferenceAcquisitionBinding`, sourced outside the receipt itself, can
 anchor verification.
 
+## Trusted acquisition-join evidence boundary
+
+`src/india_swing/reference_data/acquisition_join.py` implements
+`ReferenceAcquisitionJoinService`, which bridges one already-verified
+`VerifiedReferenceAcquisitionReceipt` to the exact GCS-pinned raw bytes it
+names and an independently reparsed security master, producing one immutable
+`VerifiedReferenceAcquisitionJoin`. It is an evidence-assembly boundary only.
+
+`join(receipt)` first independently re-verifies the receipt
+(`receipt.verify_content_identity()`) before any read; a mutated or invalid
+receipt causes zero reads. It then calls the caller-injected, exact
+`GCSLandingObjectReader` exactly once, pinned to `receipt.landing_object`
+(never a listing or "latest" read). It never trusts the returned
+`AcquiredFile` merely because the reader constructed it: it independently
+recomputes the raw SHA-256 over the acquired bytes and requires it to agree
+with both the acquired file's own claimed hash and the receipt's own
+`raw_sha256`; requires bucket/object name/generation/session/file-type to
+agree with `receipt.landing_object`; derives the parser's `original_filename`
+only from the canonical final path component of
+`receipt.landing_object.object_name` (never a separately supplied filename)
+and requires it to match the filename implied by `receipt.report_date`; and
+freshly reparses the retained bytes with a new `NseCmSecurityMasterParser`,
+rejecting any result whose `excluded_alternative_venue_count` is nonzero
+(this receipt schema authorizes only the NSE Listed securities report, never
+the NSE Listed and BSE Exclusive interoperability file). The resulting
+`join_id` is a deterministic, full lowercase SHA-256 `content_id` over a
+complete canonical mapping of every lineage component: schema, receipt hash,
+raw hash and byte count, GCS bucket/object/generation, target report date,
+parser/source/scope semantics, header/uncompressed/ordered-row hashes, and
+every row/disposition count.
+
+`VerifiedReferenceAcquisitionJoin.__post_init__` calls
+`verify_content_identity()`, which independently replays the receipt's own
+defensive check plus the same join-derivation routine `join()` uses, and
+requires exact type-and-value agreement with every retained field — so
+direct construction with a mismatched typed value, or post-construction
+`object.__setattr__` mutation of any field (including inside the nested
+receipt, its binding, its landing object, the acquired file, or a parsed
+record), fails closed with one static sanitized `ReferenceAcquisitionJoinError`.
+
+**This evidence is still not promotion, readiness, or trading authority.**
+`VerifiedReferenceAcquisitionJoin` carries no `AcquisitionMode`, readiness,
+`actionable`, `verified_report_date`, promotion, signal, recommendation,
+notification, order, broker, or capital field. `ReferenceAcquisitionJoinService`
+performs no bucket listing, "latest" selection, filesystem read/write,
+environment access, wall clock, network/GCS client construction, retry loop,
+or implicit fallback anywhere in the module; production I/O is reachable
+only through the injected, already-constructed `GCSLandingObjectReader`. A
+separate, subsequent decision must still explicitly promote this joined
+evidence into any `AcquisitionMode`/readiness/`verified_report_date` change
+on a stored reference artifact.
+
 ## Calendar source hierarchy
 
 The human-facing source is NSE's

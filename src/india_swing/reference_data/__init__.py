@@ -1,3 +1,8 @@
+from .acquisition_join import (
+    ReferenceAcquisitionJoinError,
+    ReferenceAcquisitionJoinService,
+    VerifiedReferenceAcquisitionJoin,
+)
 from .acquisition_receipt import (
     ReferenceAcquisitionReceiptError,
     ReferenceAcquisitionReceiptVerifier,
@@ -34,6 +39,9 @@ __all__ = (
     "NseCmSecurityMasterParser",
     "NseCmSecurityRecord",
     "ParsedNseCmSecurityMaster",
+    "ReferenceAcquisitionJoinError",
+    "ReferenceAcquisitionJoinService",
+    "VerifiedReferenceAcquisitionJoin",
     "ReferenceAcquisitionReceiptError",
     "ReferenceAcquisitionReceiptVerifier",
     "TrustedReferenceAcquisitionBinding",
