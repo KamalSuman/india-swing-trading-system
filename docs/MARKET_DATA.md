@@ -408,3 +408,28 @@ Historical selection requires all four inputs:
 first observed after the decision cutoff, belonging to another semantic key, or
 older than the explicit freshness bound cannot be selected. Candle consumers
 should normally retain and load the exact snapshot ID in the decision lineage.
+
+## Promoted-identity session market-data frame
+
+`PromotedSessionMarketDataFrameService` joins one exact
+`VerifiedPromotedIdentitySessionUniverse` to one exact
+`HistoricalEvaluationCorpusSessionPartition` retained by one exact corpus
+index. It never searches for a latest or nearest partition. The index must bind
+the partition ID to the universe's exact market session, all three inputs are
+independently replay-verified, and the caller cutoff must be at or after both
+the universe knowledge time and corpus build time.
+
+The frame retains exactly one entry for every universe source row. A resolved
+listing can have an exact observed bar or an explicitly missing bar. An
+unresolved identity may retain a same-lane, same-ISIN candidate observation,
+but that observation is never represented as a stable-identity binding. A
+same-lane ISIN disagreement is retained as an identity conflict. Source-excluded
+rows remain excluded even when a bar exists, and bars whose symbol/series lane
+does not occur in the selected security master are retained separately as
+orphans.
+
+Absence is diagnostic only: no missing bar implies zero volume, suspension,
+delisting, ineligibility, or a nontrading day. The complete frame remains
+`COLLECTION_ONLY`, non-actionable, non-training-eligible, non-alert-eligible,
+and non-execution-eligible. Corporate-action adjustment, effective tick-size,
+and verified liquidity evidence remain explicit downstream blockers.
