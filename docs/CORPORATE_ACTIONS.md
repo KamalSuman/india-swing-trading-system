@@ -56,6 +56,29 @@ identity, and corporate-action snapshot into the deterministic swing engine's
 evidence contract. Collection-only, future-known, mismatched-identity, or
 wrong-listing inputs are rejected.
 
+## Promoted-history bridge
+
+`corporate_actions.promoted_adjustments` connects the cross-session promoted
+stable-listing panel to the same automatic split/bonus factor policy without
+converting reconciled corpus bars into richer NSE report bars. That distinction
+is important: fields absent from the provider corpus, such as traded value, are
+never fabricated.
+
+For each resolved stable listing, the bridge:
+
+- binds every observed corpus bar to the exact session-universe content ID;
+- applies only split/bonus evidence known by the requested cutoff;
+- produces a separate adjusted OHLCV corpus view while preserving the original
+  provider, request, reconciliation, raw-bar, identity, and action lineage;
+- blocks histories containing gaps or identity conflicts;
+- blocks incomplete/non-actionable action coverage; and
+- routes dividends and other unsupported actions to explicit manual review.
+
+Blocked histories remain in the output rather than being silently excluded.
+Even a fully adjusted bridge remains `COLLECTION_ONLY` and feature-ineligible:
+the collected security-master tick value is not yet a verified effective-dated
+tick interval.
+
 ## Remaining work
 
 Once a real official NSE export is available, the next increment will add:

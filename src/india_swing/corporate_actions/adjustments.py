@@ -10,6 +10,7 @@ from india_swing.identity import content_id
 from india_swing.reference.models import ReferenceReadiness
 
 from .models import (
+    CorporateActionEvent,
     CorporateActionSnapshot,
     CorporateActionType,
 )
@@ -262,6 +263,77 @@ class CorporateActionAdjustedHistory:
             raise PriceAdjustmentError("adjusted history content identity failed")
 
 
+def select_automatic_adjustment_events(
+    *,
+    corporate_actions: CorporateActionSnapshot,
+    stable_instrument_id: str,
+    stable_listing_id: str,
+    history_start: date,
+    signal_session: date,
+) -> tuple[CorporateActionEvent, ...]:
+    """Select only events that the automatic split/bonus policy can apply.
+
+    This is the shared policy boundary for both the legacy raw NSE-report
+    adapter and the promoted reconciled-corpus adapter.  It deliberately
+    returns no prices and performs no source-bar conversion.
+    """
+
+    if type(corporate_actions) is not CorporateActionSnapshot:
+        raise PriceAdjustmentError("corporate_actions must be exact")
+    for value, name in (
+        (stable_instrument_id, "stable_instrument_id"),
+        (stable_listing_id, "stable_listing_id"),
+    ):
+        _sha(value, name)
+    if type(history_start) is not date or type(signal_session) is not date:
+        raise PriceAdjustmentError("adjustment session boundaries must be dates")
+    if signal_session < history_start:
+        raise PriceAdjustmentError("adjustment session boundaries are invalid")
+    relevant = tuple(
+        value
+        for value in corporate_actions.active_events
+        if value.stable_instrument_id == stable_instrument_id
+        and history_start < value.effective_session <= signal_session
+    )
+    for value in relevant:
+        if value.stable_listing_id not in (None, stable_listing_id):
+            raise PriceAdjustmentError("corporate action belongs to another listing")
+        if value.action_type not in {CorporateActionType.SPLIT, CorporateActionType.BONUS}:
+            raise PriceAdjustmentError("corporate action requires an unsupported adjustment")
+        if value.automatic_raw_price_factor is None:
+            raise PriceAdjustmentError("corporate action has no safe automatic factor")
+    return relevant
+
+
+def corporate_action_factors_for_session(
+    *,
+    events: tuple[CorporateActionEvent, ...],
+    market_session: date,
+) -> tuple[Decimal, Decimal, tuple[str, ...]]:
+    """Return price factor, volume factor, and applied event IDs."""
+
+    if (
+        type(events) is not tuple
+        or any(type(value) is not CorporateActionEvent for value in events)
+        or type(market_session) is not date
+    ):
+        raise PriceAdjustmentError("automatic adjustment factor input is invalid")
+    applied = tuple(
+        value for value in events if market_session < value.effective_session
+    )
+    price_factor = Decimal("1")
+    for value in applied:
+        factor = value.automatic_raw_price_factor
+        if factor is None:
+            raise PriceAdjustmentError("corporate action has no safe automatic factor")
+        price_factor *= factor
+    return (
+        price_factor,
+        Decimal("1") / price_factor,
+        tuple(sorted(value.event_id for value in applied)),
+    )
+
+
 def build_adjusted_price_history(
     *,
     raw_bars: tuple[RawNseEodBar, ...],
@@ -324,31 +396,22 @@ def build_adjusted_price_history(
         if value.knowledge_time > cutoff:
             raise PriceAdjustmentError("raw history contains future-known evidence")
 
-    relevant = tuple(
-        value
-        for value in corporate_actions.active_events
-        if value.stable_instrument_id == stable_instrument_id
-        and raw_bars[0].market_session < value.effective_session <= signal_session
+    relevant = select_automatic_adjustment_events(
+        corporate_actions=corporate_actions,
+        stable_instrument_id=stable_instrument_id,
+        stable_listing_id=stable_listing_id,
+        history_start=raw_bars[0].market_session,
+        signal_session=signal_session,
     )
-    for value in relevant:
-        if value.stable_listing_id not in (None, stable_listing_id):
-            raise PriceAdjustmentError("corporate action belongs to another listing")
-        if value.action_type not in {CorporateActionType.SPLIT, CorporateActionType.BONUS}:
-            raise PriceAdjustmentError("corporate action requires an unsupported adjustment")
-        if value.automatic_raw_price_factor is None:
-            raise PriceAdjustmentError("corporate action has no safe automatic factor")
 
     adjusted: list[AdjustedPriceBar] = []
     for raw, binding in zip(raw_bars, identity_bindings):
-        applied = tuple(
-            value for value in relevant if raw.market_session < value.effective_session
+        price_factor, volume_factor, applied_event_ids = (
+            corporate_action_factors_for_session(
+                events=relevant,
+                market_session=raw.market_session,
+            )
         )
-        price_factor = Decimal("1")
-        for value in applied:
-            factor = value.automatic_raw_price_factor
-            assert factor is not None
-            price_factor *= factor
-        volume_factor = Decimal("1") / price_factor
         adjusted.append(
             AdjustedPriceBar(
                 market_session=raw.market_session,
@@ -363,7 +426,7 @@ def build_adjusted_price_history(
                 traded_value=raw.traded_value,
                 price_factor=price_factor,
                 volume_factor=volume_factor,
-                applied_event_ids=tuple(sorted(value.event_id for value in applied)),
+                applied_event_ids=applied_event_ids,
                 raw_bar_id=raw.bar_id,
                 identity_binding_id=binding.binding_id,
                 identity_snapshot_id=binding.identity_snapshot_id,

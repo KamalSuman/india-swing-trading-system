@@ -61,6 +61,7 @@ def _two_session_fixture(
     root: Path,
     *,
     omit_reliance_bar_on: date | None = None,
+    conflict_reliance_bar_on: date | None = None,
 ):
     _, _, _, _, _, adjudication = build_intake_and_adjudication(root)
     calendar = build_calendar(root)
@@ -86,6 +87,11 @@ def _two_session_fixture(
                     by_symbol["RELIANCE"],
                     market_session=session,
                     label=f"reliance-{session}",
+                    isin=(
+                        "INE999A01019"
+                        if session == conflict_reliance_bar_on
+                        else None
+                    ),
                 )
             )
         if session == D2:

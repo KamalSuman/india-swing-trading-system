@@ -16,6 +16,8 @@ from .adjustments import (
     PriceAdjustmentError,
     StableRawBarBinding,
     build_adjusted_price_history,
+    corporate_action_factors_for_session,
+    select_automatic_adjustment_events,
 )
 from .promotion import corporate_action_promotion_evidence
 
@@ -35,5 +37,7 @@ __all__ = (
     "PriceAdjustmentError",
     "StableRawBarBinding",
     "build_adjusted_price_history",
+    "corporate_action_factors_for_session",
     "corporate_action_promotion_evidence",
+    "select_automatic_adjustment_events",
 )
