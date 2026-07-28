@@ -62,3 +62,28 @@ must come from the event-sourced calendar, and identity must come from historica
 security-master vintages. Corporate-action notices must be separately archived
 with publication knowledge time before any cutoff-specific adjusted-price view
 is created. Splits or dividends must never rewrite these stored raw bars.
+
+## Cross-session promoted history panel
+
+`india_swing.historical_prices.promoted_history` assembles multiple verified
+promoted-session tick snapshots against one exact collection calendar. It groups
+only rows carrying the same stable instrument and listing identities, and it
+creates one observation for every trading session between the first and last
+supplied snapshots.
+
+The panel is intentionally diagnostic:
+
+- a missing whole-session snapshot, absent universe row, missing price bar, or
+  identity conflict remains an explicit status rather than an inferred value;
+- unresolved identities, source-excluded rows, and orphan bars remain separate
+  retained evidence instead of disappearing from coverage;
+- raw bar and observed tick-size lineage is preserved per session;
+- prices remain `RAW_UNADJUSTED`; no interpolation, corporate-action
+  adjustment, feature calculation, signal generation, alerting, or execution
+  authority is introduced;
+- the calendar, every input snapshot, every derived history, and the complete
+  retained graph are replay-verified before the panel is accepted.
+
+This panel is therefore the survivorship-safe raw-history bridge into a future
+cutoff-aware corporate-action adjustment stage. It is not itself valid model or
+backtest input.
