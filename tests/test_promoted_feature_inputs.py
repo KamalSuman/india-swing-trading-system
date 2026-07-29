@@ -237,7 +237,7 @@ class PromotedFeatureInputSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _, _, _, panel = _panels(Path(tmp))
         reasons = panel.results[0].reason_codes
-        self.assertIn("FEATURE_CALCULATION_NOT_AUTHORIZED", reasons)
+        self.assertIn("FEATURE_DECISION_USE_NOT_AUTHORIZED", reasons)
         self.assertIn("COLLECTION_ONLY_NO_DECISION_AUTHORITY", reasons)
         self.assertIn("NO_CROSS_SESSION_TICK_INFERENCE", reasons)
 

@@ -63,6 +63,22 @@ hidden by a successful join of the resolved subset. The panel is always
 execution eligibility all remain false. It calculates no indicator, label,
 rank, score, signal, order, or portfolio decision.
 
+`PromotedTechnicalFeatureService` is the next collection-only transformation.
+Its immutable configuration defaults to 61 sessions and computes per-listing
+multi-horizon returns, moving-average distance and close-direction breadth,
+ATR and annualized realized volatility, breakout/range/drawdown/gap measures,
+volume and traded-value liquidity measures, range contraction, and
+exact-session tick-size friction. Decimal precision and rounding are fixed
+inside the calculation kernel so content identities do not depend on mutable
+process-global decimal settings.
+
+Insufficient warm-up, an upstream blocked history, or a zero denominator
+produces an explicit blocked result rather than a partial or non-finite feature
+vector. The feature panel remains `COLLECTION_ONLY` with ranking, forecasting,
+probability, alert, and execution authority disabled. Cross-sectional ranks,
+market-regime classification, labels, models, LLM reasoning, and signals are
+separate later boundaries.
+
 ## Trial preregistration
 
 `TrialRegistration` freezes the hypothesis, exploratory/confirmatory stage,
