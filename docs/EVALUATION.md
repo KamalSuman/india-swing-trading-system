@@ -105,6 +105,34 @@ the session retained feature/ranking blockers or unresolved source-universe
 evidence. It remains `COLLECTION_ONLY` and grants no training, ranking, alert,
 or execution authority.
 
+## Promoted research-intent policy
+
+`PromotedResearchIntentService` is the deterministic bridge from one exact
+promoted cross-section into the existing pessimistic daily execution
+simulator. It does not interpret the ensemble score as confidence,
+probability, or expected return. The default preregistered policy admits only
+trending and range-bound regimes and applies explicit score, traded-value,
+signal-liquidity, tick-friction, ATR-in-ticks, realized-volatility, and
+zero-volume-history gates.
+
+The source universe must be complete before any candidate can be selected.
+Position capacity is allocated only by dense score tier. If an equal-score tier
+does not fit in the remaining slots, the whole tier is rejected and no lower
+tier is promoted around it; stable IDs, ticker symbols, and ISINs never break
+the tie.
+
+Selected research candidates use the adjusted signal-session close as a
+next-explicit-session limit, an ATR-based stop, and a tick-rounded target that
+preserves at least 2.5 times cost-adjusted reward to risk. Quantity is the
+smaller of an equal-slot notional cap and a per-position share of the default
+2% portfolio risk budget. Every rejection remains an immutable decision with
+exact feature, opportunity, session, and source-panel lineage.
+
+The resulting `EvaluationTradeIntent` values are wrapped in a promoted
+research-intent batch whose actionable, alert, and execution flags are always
+false. They are inputs for offline walk-forward simulation only and are not
+broker orders or user notifications.
+
 ## Trial preregistration
 
 `TrialRegistration` freezes the hypothesis, exploratory/confirmatory stage,
