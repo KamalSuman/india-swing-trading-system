@@ -41,6 +41,28 @@ supplied:
   benchmark generators;
 - multiple-testing correction over actual trial families and repetitions.
 
+## Promoted feature-input integration
+
+`PromotedFeatureInputService` is the strict collection boundary immediately
+before feature computation. It accepts one replay-verified promoted
+corporate-action adjustment panel and one replay-verified promoted
+effective-session tick panel. Both must retain the exact same promoted
+stable-listing history `panel_id`, and the requested cutoff must not precede
+either upstream boundary.
+
+The service joins only on stable instrument ID, stable listing ID, and market
+session. Every assembled row retains the adjusted source bar, exact-session
+tick result, their content IDs, adjusted OHLCV values, tick size, and the
+maximum knowledge time. It never joins on a ticker, symbol, name, or ISIN and
+never fills a missing tick from an adjacent session.
+
+Unsafe histories remain explicit blocked results. The panel also retains the
+source panel's unassigned-entry count so unresolved identity evidence cannot be
+hidden by a successful join of the resolved subset. The panel is always
+`COLLECTION_ONLY`; feature, cross-sectional ranking, training, alert, and
+execution eligibility all remain false. It calculates no indicator, label,
+rank, score, signal, order, or portfolio decision.
+
 ## Trial preregistration
 
 `TrialRegistration` freezes the hypothesis, exploratory/confirmatory stage,
