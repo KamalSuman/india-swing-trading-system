@@ -176,6 +176,33 @@ research-only interpretation boundary. The command reads local immutable
 evidence only; it does not fetch market data, contact a broker, or select a
 latest run.
 
+## Promoted experiment readiness
+
+`PromotedExperimentReadinessService` is the fail-closed admission audit before
+a promoted historical experiment can be assembled. It consumes one exact
+split plan, one exact evaluation dataset, sorted point-in-time instruments,
+explicit replay runs, and a resolver that can retrieve only an exact
+cross-section panel ID. It never discovers a latest artifact and never starts
+the evaluation itself.
+
+The production default requires at least 756 market sessions, six
+walk-forward folds, 20 test sessions per fold, 500 instruments overall, and
+500 eligible instruments in every evaluated session. It also requires
+`POINT_IN_TIME_VERIFIED` data. Synthetic evidence is accepted only through a
+different explicitly content-addressed configuration intended for tests.
+
+For each fold, the auditor requires exactly one replay result for the first
+test session and independently resolves and verifies its exact cross-section
+panel. Missing or duplicate replay evidence, calendar or universe-binding
+disagreement, blocked feature histories, unresolved source-universe coverage,
+and insufficient breadth are retained as deterministic issue records. One
+issue suppresses every fold binding: partial experiments are never assembled.
+
+`render_promoted_experiment_readiness` turns the immutable report into a
+compact missing-data checklist. A ready report grants eligibility only for the
+offline preregistered experiment. Its actionable, alert, and execution flags
+are permanently false.
+
 ## Trial preregistration
 
 `TrialRegistration` freezes the hypothesis, exploratory/confirmatory stage,
