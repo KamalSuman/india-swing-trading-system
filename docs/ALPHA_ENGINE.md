@@ -99,3 +99,35 @@ Kronos, news models, and LLM research agents may later enter as separately
 measured challengers. They must not select the universe, overwrite market facts,
 convert scores into confidence percentages, bypass risk policy, or execute an
 order.
+
+## Promoted cross-sectional boundary
+
+`PromotedCrossSectionService` connects the newer promoted technical-feature
+panel to a collection-only regime and opportunity-scoring boundary. Only
+feature vectors that passed the exact point-in-time history, corporate-action,
+and tick-size lineage enter its resolved subset. Blocked feature results,
+unassigned universe entries, and orphan price bars remain counted in the
+output.
+
+The regime evidence uses resolved-subset breadth, median medium-horizon
+momentum, and median annualized volatility. High volatility takes precedence,
+followed by risk-off, trending, and range-bound classifications. Four
+specialists retain their machine-auditable components:
+
+- momentum/breakout;
+- pullback continuation;
+- volatility contraction; and
+- liquidity quality, including exact-session tick friction.
+
+Cross-sectional inputs use value-based percentile ranks. Equal values receive
+the same percentile, equal ensemble scores receive the same dense rank tier,
+and stable IDs are used only to serialize equal-score rows deterministically.
+Rank magnitudes are insensitive to the magnitude of an extreme outlier.
+
+The production configuration requires at least 20 computed instruments before
+it emits resolved-subset scores. Even then, the panel remains
+`COLLECTION_ONLY`: `ranking_eligible`, alert eligibility, and execution
+eligibility remain false. `source_universe_cross_section_complete` is true only
+when every resolved history was scored and there are no unassigned entries or
+orphan bars. An ensemble score is not a probability, an expected return, a
+selection, or permission to trade.
