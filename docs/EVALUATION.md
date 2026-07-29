@@ -155,6 +155,27 @@ research batches, common generated-intent batches, comparison artifact, and
 per-fold metrics. A trial registration must bind the exact strategy policy,
 benchmark, split, universe, dataset, execution policy, and cost schedule.
 
+`LocalPromotedWalkForwardRunStore` publishes one create-once promoted manifest
+per registered trial only after every research-intent batch and the complete
+deterministic comparison run have been persisted. The manifest binds every
+fold/cross-section pair, research-batch ID, strategy-batch ID, comparison ID,
+and final run ID. Full reads reconstruct the strategy run from those exact
+artifacts and reject any lineage or byte-level manifest change.
+
+An exact persisted trial can be rendered without discovery or data-provider
+access:
+
+```powershell
+india-swing-evaluation promoted-run show --trial-id <64-character-trial-id>
+```
+
+The Markdown output contains strategy/benchmark metrics under base and
+stressed slippage, delivery costs, fold-level excess performance, every
+candidate decision, entry/exit evidence, gross trade P&L, and an explicit
+research-only interpretation boundary. The command reads local immutable
+evidence only; it does not fetch market data, contact a broker, or select a
+latest run.
+
 ## Trial preregistration
 
 `TrialRegistration` freezes the hypothesis, exploratory/confirmatory stage,

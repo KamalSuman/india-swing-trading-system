@@ -14,6 +14,10 @@ from .config import EvaluationEvidenceConfig, TrialRegistryConfig
 from .family_aggregate_store import LocalTrialFamilyAggregateStore
 from .family_report import build_trial_family_evaluation_report
 from .family_report_store import LocalTrialFamilyReportStore
+from .promoted_report import build_promoted_walk_forward_report
+from .promoted_walk_forward_store import (
+    LocalPromotedWalkForwardRunStore,
+)
 from .result_store import LocalTrialEvaluationResultStore
 from .trial_store import LocalTrialRegistry
 
@@ -43,6 +47,19 @@ def parser() -> argparse.ArgumentParser:
     )
     show.add_argument("--aggregate-id", required=True)
     report_commands.add_parser("list", help="list persisted family reports")
+    promoted = commands.add_parser(
+        "promoted-run",
+        help="inspect one exact persisted promoted walk-forward run",
+    )
+    promoted_commands = promoted.add_subparsers(
+        dest="command",
+        required=True,
+    )
+    promoted_show = promoted_commands.add_parser(
+        "show",
+        help="write one promoted walk-forward report to standard output",
+    )
+    promoted_show.add_argument("--trial-id", required=True)
     return root
 
 
@@ -55,17 +72,42 @@ def _stores():
     )
     batch_store = LocalGeneratedIntentBatchStore(evidence_root, registry)
     run_store = LocalDeterministicComparisonRunStore(batch_store, comparison_store)
+    promoted_run_store = LocalPromotedWalkForwardRunStore(
+        evidence_root,
+        run_store,
+    )
     aggregate_store = LocalTrialFamilyAggregateStore(
         evidence_root, registry, run_store
     )
     report_store = LocalTrialFamilyReportStore(evidence_root, aggregate_store)
-    return registry, run_store, aggregate_store, report_store
+    return (
+        registry,
+        run_store,
+        promoted_run_store,
+        aggregate_store,
+        report_store,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
-        registry, run_store, aggregate_store, report_store = _stores()
+        (
+            registry,
+            run_store,
+            promoted_run_store,
+            aggregate_store,
+            report_store,
+        ) = _stores()
+        if args.resource == "promoted-run":
+            manifest = promoted_run_store.get_manifest(args.trial_id)
+            run = run_store.get(args.trial_id)
+            report = build_promoted_walk_forward_report(
+                manifest=manifest,
+                run=run,
+            )
+            sys.stdout.write(report.markdown)
+            return 0
         if args.command == "publish":
             registrations = registry.registrations_for_family(
                 args.strategy_family_id

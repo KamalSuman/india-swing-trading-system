@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import json
+import io
 import tempfile
 import unittest
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from india_swing.evaluation.baselines import (
     EqualWeightBenchmarkConfig,
     PointInTimeInstrument,
+)
+from india_swing.evaluation.baseline_store import (
+    LocalDeterministicComparisonRunStore,
+    LocalGeneratedIntentBatchStore,
+)
+from india_swing.evaluation.cli import main as evaluation_cli_main
+from india_swing.evaluation.comparison_store import (
+    LocalTrialEvaluationComparisonStore,
 )
 from india_swing.evaluation.engine import (
     DailyExecutionPolicy,
@@ -30,12 +40,23 @@ from india_swing.evaluation.promoted_intents import (
     PromotedIntentPolicyConfig,
     PromotedResearchIntentService,
 )
+from india_swing.evaluation.promoted_report import (
+    build_promoted_walk_forward_report,
+)
 from india_swing.evaluation.promoted_walk_forward import (
     PromotedFoldCrossSectionBinding,
     PromotedWalkForwardError,
     PromotedWalkForwardEvaluationEngine,
     PromotedWalkForwardStrategyGenerator,
 )
+from india_swing.evaluation.promoted_walk_forward_store import (
+    LocalPromotedWalkForwardRunStore,
+    PromotedWalkForwardRunConflict,
+)
+from india_swing.evaluation.result_store import (
+    LocalTrialEvaluationResultStore,
+)
+from india_swing.evaluation.trial_store import LocalTrialRegistry
 from india_swing.evaluation.trials import (
     TrialRegistration,
     TrialStage,
@@ -232,6 +253,78 @@ def _binding(panel, plan: PurgedWalkForwardPlan):
     )
 
 
+def _evaluated(root: Path):
+    panel = _panel(root / "source")
+    signal = (
+        panel.source_panel.source_panel.adjustment_panel.signal_session
+    )
+    plan = _plan(signal)
+    universe_id = _universe_id(panel)
+    dataset = _dataset(plan, universe_id)
+    strategy = _strategy_config()
+    benchmark = _benchmark_config()
+    registration = _registration(
+        plan=plan,
+        dataset=dataset,
+        strategy=strategy,
+        benchmark=benchmark,
+    )
+    resolver = _Resolver((panel,))
+    research_store = LocalPromotedResearchIntentStore(
+        root / "evidence",
+        resolver,
+    )
+    run = PromotedWalkForwardEvaluationEngine().evaluate(
+        registration=registration,
+        strategy_config=strategy,
+        benchmark_config=benchmark,
+        split_plan=plan,
+        dataset=dataset,
+        instruments=(_instrument(plan, universe_id),),
+        bindings=(_binding(panel, plan),),
+        cross_section_resolver=resolver,
+        intent_store=research_store,
+        execution_policy=_policy(),
+        cost_schedule=zerodha_nse_delivery_schedule_2026(),
+        initial_capital=Decimal("100000"),
+    )
+    return registration, research_store, run
+
+
+def _durable_run_store(
+    root: Path,
+    registration: TrialRegistration,
+    research_store: LocalPromotedResearchIntentStore,
+):
+    registry_root = root / "registry"
+    registry = LocalTrialRegistry(registry_root)
+    registry.register(registration)
+    evidence_root = research_store.root
+    result_store = LocalTrialEvaluationResultStore(
+        evidence_root,
+        registry,
+    )
+    comparison_store = LocalTrialEvaluationComparisonStore(
+        evidence_root,
+        registry,
+        result_store,
+    )
+    batch_store = LocalGeneratedIntentBatchStore(
+        evidence_root,
+        registry,
+    )
+    deterministic_store = LocalDeterministicComparisonRunStore(
+        batch_store,
+        comparison_store,
+    )
+    promoted_store = LocalPromotedWalkForwardRunStore(
+        evidence_root,
+        deterministic_store,
+        research_store,
+    )
+    return registry_root, deterministic_store, promoted_store
+
+
 class PromotedIntentStoreTests(unittest.TestCase):
     def test_create_once_store_replays_exact_source_and_policy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -312,7 +405,13 @@ class PromotedIntentStoreTests(unittest.TestCase):
         }
         self.assertEqual(
             public,
-            {"batches_root", "get", "path_for", "put"},
+            {
+                "batches_root",
+                "get",
+                "path_for",
+                "put",
+                "require_persisted",
+            },
         )
 
     def test_encoded_manifest_contains_no_nested_source_payload(self) -> None:
@@ -527,6 +626,141 @@ class PromotedWalkForwardEvaluationTests(unittest.TestCase):
                     ),
                     initial_capital=Decimal("100000"),
                 )
+
+
+class PromotedWalkForwardPersistenceAndReportTests(unittest.TestCase):
+    def test_final_store_exposes_no_list_or_latest_operation(self) -> None:
+        public = {
+            value
+            for value in dir(LocalPromotedWalkForwardRunStore)
+            if not value.startswith("_")
+        }
+        self.assertEqual(
+            public,
+            {
+                "get",
+                "get_manifest",
+                "path_for",
+                "publish",
+                "runs_root",
+            },
+        )
+
+    def test_final_run_manifest_round_trips_all_component_lineage(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registration, research_store, run = _evaluated(root)
+            _, _, store = _durable_run_store(
+                root,
+                registration,
+                research_store,
+            )
+            first = store.publish(run)
+            second = store.publish(run)
+            manifest = store.get_manifest(registration.trial_id)
+            restored = store.get(registration.trial_id)
+        self.assertEqual(first, run)
+        self.assertEqual(second, run)
+        self.assertEqual(restored, run)
+        self.assertEqual(manifest.promoted_run_id, run.run_id)
+        self.assertEqual(
+            manifest.deterministic_run_id,
+            run.deterministic_run.run_id,
+        )
+        self.assertEqual(
+            manifest.research_batch_ids,
+            tuple(
+                value.batch_id
+                for value in run.strategy_run.research_batches
+            ),
+        )
+
+    def test_manifest_tampering_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registration, research_store, run = _evaluated(root)
+            _, _, store = _durable_run_store(
+                root,
+                registration,
+                research_store,
+            )
+            store.publish(run)
+            path = store.path_for(registration.trial_id)
+            raw = json.loads(path.read_bytes())
+            raw["promoted_run_id"] = "f" * 64
+            path.write_bytes(
+                (
+                    json.dumps(
+                        raw,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode()
+            )
+            with self.assertRaises(PromotedWalkForwardRunConflict):
+                store.get_manifest(registration.trial_id)
+
+    def test_report_contains_metrics_costs_folds_and_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registration, research_store, run = _evaluated(root)
+            _, _, store = _durable_run_store(
+                root,
+                registration,
+                research_store,
+            )
+            store.publish(run)
+            report = build_promoted_walk_forward_report(
+                manifest=store.get_manifest(registration.trial_id),
+                run=run.deterministic_run,
+            )
+        report.verify_content_identity()
+        self.assertIn("## Portfolio metrics", report.markdown)
+        self.assertIn("## Cost evidence", report.markdown)
+        self.assertIn("## Fold stability", report.markdown)
+        self.assertIn(
+            "## Strategy decision and trade audit",
+            report.markdown,
+        )
+        self.assertIn("not a trade alert", report.markdown)
+
+    def test_cli_shows_only_the_exact_requested_trial(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registration, research_store, run = _evaluated(root)
+            registry_root, _, store = _durable_run_store(
+                root,
+                registration,
+                research_store,
+            )
+            store.publish(run)
+            output = io.StringIO()
+            with patch.dict(
+                "os.environ",
+                {
+                    "INDIA_SWING_TRIAL_REGISTRY_ROOT": str(
+                        registry_root
+                    ),
+                    "INDIA_SWING_EVALUATION_ROOT": str(
+                        research_store.root
+                    ),
+                },
+                clear=False,
+            ), patch("sys.stdout", output):
+                code = evaluation_cli_main(
+                    [
+                        "promoted-run",
+                        "show",
+                        "--trial-id",
+                        registration.trial_id,
+                    ]
+                )
+        self.assertEqual(code, 0)
+        self.assertIn(registration.trial_id, output.getvalue())
+        self.assertIn("## Portfolio metrics", output.getvalue())
 
 
 if __name__ == "__main__":

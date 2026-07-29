@@ -517,3 +517,17 @@ class LocalPromotedResearchIntentStore:
                 "promoted-intent manifest is noncanonical"
             )
         return batch
+
+    def require_persisted(
+        self,
+        batch: VerifiedPromotedResearchIntentBatch,
+    ) -> VerifiedPromotedResearchIntentBatch:
+        if type(batch) is not VerifiedPromotedResearchIntentBatch:
+            raise TypeError("batch must be exact")
+        batch.verify_content_identity()
+        stored = self.get(batch.batch_id)
+        if stored != batch:
+            raise PromotedIntentStoreConflict(
+                "persisted promoted-intent batch differs"
+            )
+        return stored
