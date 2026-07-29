@@ -249,6 +249,23 @@ readiness-evidence store. It performs no discovery, provider call, or broker
 operation. CLI publication remains intentionally unwired until the promoted
 adjustment and tick source resolvers are durable.
 
+`india_swing.promoted_graph_store` now supplies create-once replay manifests
+for the complete promoted source chain: identity intake, adjudication, session
+universe, session market-data frame, session tick snapshot, stable-listing
+history, corporate-action adjustment, and effective-session ticks. Each
+manifest retains only exact source IDs, cutoff, and required dates. Every read
+resolves those exact sources, reruns the owning materializer, and compares the
+content-derived output ID and canonical manifest. There is no list, latest,
+nearest, or discovery operation.
+
+The adjustment and effective-tick stores compose directly with
+`LocalPromotedFeatureInputStore`, closing the replayable middle of the graph
+through cross-sectional features. CLI publication remains withheld for one
+narrower reason: the reference-promotion root and corporate-action snapshot
+root still need sealed local stores. Until those two roots are durable, a
+restarted CLI would depend on caller-held objects and would overstate restart
+safety.
+
 ## Trial preregistration
 
 `TrialRegistration` freezes the hypothesis, exploratory/confirmatory stage,
