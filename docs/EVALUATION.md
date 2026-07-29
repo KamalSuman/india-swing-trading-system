@@ -63,6 +63,20 @@ hidden by a successful join of the resolved subset. The panel is always
 execution eligibility all remain false. It calculates no indicator, label,
 rank, score, signal, order, or portfolio decision.
 
+`LocalPromotedFeatureInputStore` now publishes a canonical create-once manifest
+for this boundary. The manifest retains only the exact promoted corporate-
+action adjustment bridge ID, effective-session tick panel ID, cutoff, and a
+complete output projection; it does not duplicate either nested source graph.
+Reads resolve both exact source IDs and independently rerun
+`PromotedFeatureInputService`. Missing sources, path substitution, malformed or
+duplicate JSON, floating-point tokens, output tampering, and authority upgrades
+fail closed. The store exposes no list or latest-selection operation.
+
+The adjustment and effective-session tick resolvers are explicit dependencies.
+Their promoted panel types do not yet have durable local stores, so a
+restart-safe CLI publisher must not be claimed until those two upstream stores
+exist.
+
 `PromotedTechnicalFeatureService` is the next collection-only transformation.
 Its immutable configuration defaults to 61 sessions and computes per-listing
 multi-horizon returns, moving-average distance and close-direction breadth,
@@ -226,6 +240,14 @@ This command validates the canonical stored envelope and selects only the
 requested evidence ID. It does not rerun source acquisition. A fresh audit
 must use `publish` with the exact assembled dataset, replay runs, and
 cross-section resolver.
+
+`PromotedExperimentReadinessPublisher` is the exact-artifact programmatic
+entry point for a fresh audit. It accepts one explicit dataset assembly ID and
+a sorted, unique tuple of full cross-section panel IDs. It resolves only those
+objects, reconstructs the replay run from the panels, and publishes through the
+readiness-evidence store. It performs no discovery, provider call, or broker
+operation. CLI publication remains intentionally unwired until the promoted
+adjustment and tick source resolvers are durable.
 
 ## Trial preregistration
 

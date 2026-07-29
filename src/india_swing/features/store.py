@@ -6,6 +6,7 @@ import os
 import re
 import stat
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -15,7 +16,11 @@ from india_swing._filesystem import (
     advisory_file_lock,
     read_stable_regular_file,
 )
+from india_swing.corporate_actions.promoted_adjustments import (
+    VerifiedPromotedCorporateActionAdjustmentPanel,
+)
 from india_swing.evaluation.promoted_feature_inputs import (
+    PromotedFeatureInputService,
     VerifiedPromotedFeatureInputPanel,
 )
 from india_swing.features.codec import (
@@ -24,6 +29,10 @@ from india_swing.features.codec import (
     encode_cross_section_panel,
     encode_technical_feature_panel,
 )
+from india_swing.features.input_codec import (
+    decode_promoted_feature_input_record,
+    encode_promoted_feature_input_panel,
+)
 from india_swing.features.promoted_cross_section import (
     PromotedCrossSectionService,
     VerifiedPromotedCrossSectionPanel,
@@ -31,6 +40,9 @@ from india_swing.features.promoted_cross_section import (
 from india_swing.features.promoted_technical import (
     PromotedTechnicalFeatureService,
     VerifiedPromotedTechnicalFeaturePanel,
+)
+from india_swing.tick_sizes.effective_session import (
+    VerifiedPromotedEffectiveSessionTickPanel,
 )
 
 
@@ -48,6 +60,20 @@ class PromotedFeatureStoreNotFound(PromotedFeatureStoreError):
 
 class PromotedFeatureInputPanelResolver(Protocol):
     def get(self, panel_id: str) -> VerifiedPromotedFeatureInputPanel: ...
+
+
+class PromotedAdjustmentPanelResolver(Protocol):
+    def get(
+        self,
+        bridge_id: str,
+    ) -> VerifiedPromotedCorporateActionAdjustmentPanel: ...
+
+
+class PromotedEffectiveTickPanelResolver(Protocol):
+    def get(
+        self,
+        panel_id: str,
+    ) -> VerifiedPromotedEffectiveSessionTickPanel: ...
 
 
 class PromotedTechnicalFeaturePanelResolver(Protocol):
@@ -189,6 +215,127 @@ class ExactPromotedFeatureInputPanelResolver:
             ) from None
         value.verify_content_identity()
         return value
+
+
+class LocalPromotedFeatureInputStore:
+    """Replays exact feature inputs from adjustment and tick panels."""
+
+    def __init__(
+        self,
+        root: Path,
+        adjustment_resolver: PromotedAdjustmentPanelResolver,
+        tick_resolver: PromotedEffectiveTickPanelResolver,
+    ) -> None:
+        self.root = Path(root)
+        self.adjustment_resolver = adjustment_resolver
+        self.tick_resolver = tick_resolver
+
+    @property
+    def panels_root(self) -> Path:
+        return self.root / "inputs"
+
+    def path_for(self, panel_id: str) -> Path:
+        return _path(self.panels_root, panel_id)
+
+    def put(
+        self,
+        value: VerifiedPromotedFeatureInputPanel,
+    ) -> VerifiedPromotedFeatureInputPanel:
+        if type(value) is not VerifiedPromotedFeatureInputPanel:
+            raise TypeError("promoted feature-input panel must be exact")
+        value.verify_content_identity()
+        replayed = self._replay(
+            adjustment_bridge_id=value.adjustment_panel.bridge_id,
+            tick_panel_id=value.tick_panel.panel_id,
+            cutoff=value.cutoff,
+        )
+        if replayed != value:
+            raise PromotedFeatureStoreError(
+                "promoted feature-input source replay differs"
+            )
+        payload = encode_promoted_feature_input_panel(value)
+        stored = _put(
+            root=self.panels_root,
+            lock_name=".inputs.lock",
+            panel_id=value.panel_id,
+            payload=payload,
+            read_existing=lambda panel_id: _read(
+                self.panels_root,
+                panel_id,
+            ),
+        )
+        if stored != payload:
+            raise PromotedFeatureStoreConflict(
+                "promoted feature-input artifact differs"
+            )
+        return self.get(value.panel_id)
+
+    def get(
+        self,
+        panel_id: str,
+    ) -> VerifiedPromotedFeatureInputPanel:
+        payload = _read(self.panels_root, panel_id)
+        try:
+            record = decode_promoted_feature_input_record(payload)
+            if record.panel_id != panel_id:
+                raise PromotedFeatureStoreError(
+                    "promoted feature-input path identity differs"
+                )
+            replayed = self._replay(
+                adjustment_bridge_id=record.adjustment_bridge_id,
+                tick_panel_id=record.tick_panel_id,
+                cutoff=record.cutoff,
+            )
+            if (
+                replayed.panel_id != panel_id
+                or encode_promoted_feature_input_panel(replayed)
+                != payload
+            ):
+                raise PromotedFeatureStoreError(
+                    "promoted feature-input replay differs"
+                )
+            return replayed
+        except PromotedFeatureStoreError:
+            raise
+        except Exception:
+            raise PromotedFeatureStoreError(
+                "stored promoted feature-input artifact is invalid"
+            ) from None
+
+    def _replay(
+        self,
+        *,
+        adjustment_bridge_id: str,
+        tick_panel_id: str,
+        cutoff: datetime,
+    ) -> VerifiedPromotedFeatureInputPanel:
+        try:
+            adjustment = self.adjustment_resolver.get(
+                adjustment_bridge_id
+            )
+            tick = self.tick_resolver.get(tick_panel_id)
+            if (
+                type(adjustment)
+                is not VerifiedPromotedCorporateActionAdjustmentPanel
+                or adjustment.bridge_id != adjustment_bridge_id
+                or type(tick)
+                is not VerifiedPromotedEffectiveSessionTickPanel
+                or tick.panel_id != tick_panel_id
+            ):
+                raise PromotedFeatureStoreError(
+                    "promoted feature-input source differs"
+                )
+            return PromotedFeatureInputService().materialize(
+                adjustment_panel=adjustment,
+                tick_panel=tick,
+                cutoff=cutoff,
+            )
+        except PromotedFeatureStoreError:
+            raise
+        except Exception:
+            raise PromotedFeatureStoreError(
+                "promoted feature-input source replay failed"
+            ) from None
 
 
 class LocalPromotedTechnicalFeatureStore:
