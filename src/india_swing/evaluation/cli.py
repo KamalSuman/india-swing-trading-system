@@ -14,6 +14,10 @@ from .config import EvaluationEvidenceConfig, TrialRegistryConfig
 from .family_aggregate_store import LocalTrialFamilyAggregateStore
 from .family_report import build_trial_family_evaluation_report
 from .family_report_store import LocalTrialFamilyReportStore
+from .promoted_experiment_evidence_store import (
+    LocalPromotedExperimentReadinessEvidenceStore,
+    render_promoted_experiment_readiness_evidence,
+)
 from .promoted_report import build_promoted_walk_forward_report
 from .promoted_walk_forward_store import (
     LocalPromotedWalkForwardRunStore,
@@ -33,7 +37,7 @@ class SanitizedArgumentParser(argparse.ArgumentParser):
 
 def parser() -> argparse.ArgumentParser:
     root = SanitizedArgumentParser(
-        description="Publish and inspect immutable trial-family evaluation reports"
+        description="Publish and inspect immutable evaluation evidence"
     )
     commands = root.add_subparsers(dest="resource", required=True)
     report = commands.add_parser("report", help="manage family evaluation reports")
@@ -60,6 +64,19 @@ def parser() -> argparse.ArgumentParser:
         help="write one promoted walk-forward report to standard output",
     )
     promoted_show.add_argument("--trial-id", required=True)
+    readiness = commands.add_parser(
+        "promoted-readiness",
+        help="inspect one exact persisted experiment-readiness audit",
+    )
+    readiness_commands = readiness.add_subparsers(
+        dest="command",
+        required=True,
+    )
+    readiness_show = readiness_commands.add_parser(
+        "show",
+        help="write one exact persisted readiness report to standard output",
+    )
+    readiness_show.add_argument("--evidence-id", required=True)
     return root
 
 
@@ -76,6 +93,9 @@ def _stores():
         evidence_root,
         run_store,
     )
+    readiness_store = (
+        LocalPromotedExperimentReadinessEvidenceStore(evidence_root)
+    )
     aggregate_store = LocalTrialFamilyAggregateStore(
         evidence_root, registry, run_store
     )
@@ -84,6 +104,7 @@ def _stores():
         registry,
         run_store,
         promoted_run_store,
+        readiness_store,
         aggregate_store,
         report_store,
     )
@@ -96,9 +117,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             registry,
             run_store,
             promoted_run_store,
+            readiness_store,
             aggregate_store,
             report_store,
         ) = _stores()
+        if args.resource == "promoted-readiness":
+            evidence = readiness_store.get(args.evidence_id)
+            sys.stdout.write(
+                render_promoted_experiment_readiness_evidence(evidence)
+            )
+            return 0
         if args.resource == "promoted-run":
             manifest = promoted_run_store.get_manifest(args.trial_id)
             run = run_store.get(args.trial_id)

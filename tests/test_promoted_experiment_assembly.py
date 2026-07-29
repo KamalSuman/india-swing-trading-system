@@ -118,8 +118,11 @@ def _codes(report) -> set[PromotedExperimentReadinessIssueCode]:
 
 
 def tearDownModule() -> None:
+    global _SHARED_EVIDENCE, _SHARED_TEMP
     if _SHARED_TEMP is not None:
         _SHARED_TEMP.cleanup()
+    _SHARED_EVIDENCE = None
+    _SHARED_TEMP = None
 
 
 class PromotedExperimentReadinessConfigTests(unittest.TestCase):

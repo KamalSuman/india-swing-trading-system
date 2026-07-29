@@ -643,6 +643,14 @@ class PromotedExperimentReadinessService:
                 )
                 continue
             try:
+                panel_universe_ids = {
+                    (
+                        result.source_result.source_result
+                        .source_adjustment_result.identity_bindings[-1]
+                        .identity_snapshot_id
+                    )
+                    for result in panel.results
+                }
                 valid_panel = (
                     type(panel) is VerifiedPromotedCrossSectionPanel
                     and panel.panel_id
@@ -662,6 +670,8 @@ class PromotedExperimentReadinessService:
                         .signal_session
                     )
                     == signal_session
+                    and panel_universe_ids
+                    == session_universe_ids.get(signal_session, set())
                 )
                 if valid_panel:
                     panel.verify_content_identity()

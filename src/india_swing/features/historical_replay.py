@@ -538,3 +538,118 @@ class PromotedHistoricalReplayService:
             alert_eligible=False,
             execution_eligible=False,
         )
+
+
+def reconstruct_promoted_historical_replay_run(
+    cross_sections: tuple[
+        VerifiedPromotedCrossSectionPanel,
+        ...,
+    ],
+) -> PromotedHistoricalReplayRun:
+    """Rebuild one replay run from exact persisted cross-section panels."""
+
+    if (
+        type(cross_sections) is not tuple
+        or not cross_sections
+        or any(
+            type(value) is not VerifiedPromotedCrossSectionPanel
+            for value in cross_sections
+        )
+    ):
+        raise PromotedHistoricalReplayError(_ERR_INPUT)
+    try:
+        for value in cross_sections:
+            value.verify_content_identity()
+    except Exception:
+        raise PromotedHistoricalReplayError(_ERR_VERIFY) from None
+    ordered = tuple(
+        sorted(
+            cross_sections,
+            key=lambda value: (
+                value.source_panel.source_panel.adjustment_panel
+                .signal_session
+            ),
+        )
+    )
+    sessions = tuple(
+        (
+            value.source_panel.source_panel.adjustment_panel
+            .signal_session
+        )
+        for value in ordered
+    )
+    if sessions != tuple(sorted(set(sessions))):
+        raise PromotedHistoricalReplayError(_ERR_INPUT)
+
+    inputs = tuple(
+        PromotedHistoricalReplayInput(
+            market_session=session,
+            source_panel=panel.source_panel.source_panel,
+            technical_config=panel.source_panel.config,
+            cross_section_config=panel.config,
+            cutoff=panel.cutoff,
+        )
+        for session, panel in zip(sessions, ordered)
+    )
+    results: list[PromotedHistoricalReplayResult] = []
+    for replay_input, panel in zip(inputs, ordered):
+        technical = panel.source_panel
+        if technical.blocked_history_count > 0 or panel.blocked_history_count > 0:
+            status = (
+                PromotedHistoricalReplayStatus
+                .SESSION_REPLAYED_WITH_BLOCKERS
+            )
+        elif not panel.source_universe_cross_section_complete:
+            status = (
+                PromotedHistoricalReplayStatus
+                .SESSION_REPLAYED_SOURCE_UNIVERSE_INCOMPLETE
+            )
+        else:
+            status = (
+                PromotedHistoricalReplayStatus
+                .SESSION_REPLAYED_RESOLVED_COLLECTION_ONLY
+            )
+        results.append(
+            PromotedHistoricalReplayResult(
+                market_session=replay_input.market_session,
+                input_id=replay_input.input_id,
+                technical_panel_id=technical.panel_id,
+                cross_section_panel_id=panel.panel_id,
+                status=status,
+                technical_blocked_history_count=(
+                    technical.blocked_history_count
+                ),
+                cross_section_blocked_history_count=(
+                    panel.blocked_history_count
+                ),
+                unassigned_entry_count=panel.unassigned_entry_count,
+                orphan_bar_count=panel.orphan_bar_count,
+                reason_codes=_reasons(status),
+            )
+        )
+    result_tuple = tuple(results)
+    return PromotedHistoricalReplayRun(
+        schema_version=PROMOTED_HISTORICAL_REPLAY_SCHEMA_VERSION,
+        policy_version=PROMOTED_HISTORICAL_REPLAY_POLICY_VERSION,
+        inputs=inputs,
+        results=result_tuple,
+        replayed_session_count=len(result_tuple),
+        blocked_session_count=sum(
+            value.status
+            is PromotedHistoricalReplayStatus
+            .SESSION_REPLAYED_WITH_BLOCKERS
+            for value in result_tuple
+        ),
+        source_universe_incomplete_session_count=sum(
+            value.status
+            is PromotedHistoricalReplayStatus
+            .SESSION_REPLAYED_SOURCE_UNIVERSE_INCOMPLETE
+            for value in result_tuple
+        ),
+        readiness=ReferenceReadiness.COLLECTION_ONLY,
+        actionable=False,
+        training_eligible=False,
+        ranking_eligible=False,
+        alert_eligible=False,
+        execution_eligible=False,
+    )

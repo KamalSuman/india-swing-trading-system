@@ -203,6 +203,30 @@ compact missing-data checklist. A ready report grants eligibility only for the
 offline preregistered experiment. Its actionable, alert, and execution flags
 are permanently false.
 
+`LocalPromotedExperimentReadinessEvidenceStore.publish` reruns that audit from
+one exact assembled dataset and explicit replay runs before creating any
+artifact. The resulting canonical envelope contains the complete configuration
+and split plan, the exact dataset assembly and dataset IDs, a projection of
+each replay whose original run ID is independently recomputed, and the full
+readiness report. A replay projection can reconstruct its original run from
+the exact referenced cross-section panels. `reaudit` performs that
+reconstruction, verifies the exact dataset assembly, reruns the complete
+readiness audit, and requires the new report to equal the stored report. The
+envelope is create-once and addressed by its evidence ID; it provides no list,
+latest, or nearest-session operation.
+
+The persisted report can be rendered later without market-data or broker
+access:
+
+```powershell
+india-swing-evaluation promoted-readiness show --evidence-id <64-character-evidence-id>
+```
+
+This command validates the canonical stored envelope and selects only the
+requested evidence ID. It does not rerun source acquisition. A fresh audit
+must use `publish` with the exact assembled dataset, replay runs, and
+cross-section resolver.
+
 ## Trial preregistration
 
 `TrialRegistration` freezes the hypothesis, exploratory/confirmatory stage,
