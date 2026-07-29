@@ -79,6 +79,32 @@ probability, alert, and execution authority disabled. Cross-sectional ranks,
 market-regime classification, labels, models, LLM reasoning, and signals are
 separate later boundaries.
 
+## Persisted historical feature replay
+
+The promoted technical-feature and cross-section stores write canonical,
+create-once JSON manifests keyed only by their full panel IDs. A manifest
+contains the exact source panel ID, complete immutable configuration, cutoff,
+output result IDs, status counts, completeness fields, readiness, and safety
+flags. It is not self-attesting: every read resolves the exact upstream panel
+and independently reruns the deterministic service. The replayed canonical
+manifest must match the stored bytes exactly.
+
+These stores expose no listing, latest-version, or nearest-session operation.
+Repeated publication of the same panel is idempotent, while changed bytes at
+the same panel ID fail closed. Reads reject malformed JSON, duplicate keys,
+floating-point tokens, non-finite decimal configuration, authority upgrades,
+unsafe paths, and source-lineage disagreement.
+
+`PromotedHistoricalReplayService` accepts an ordered tuple of exact
+session-bound feature-input panels and immutable technical/cross-section
+configurations. Each session independently produces and publishes one
+technical panel and one ranked cross-section. Re-running the same inputs safely
+reuses the create-once artifacts, providing interruption recovery without
+selecting a latest artifact. The replay result records output IDs and whether
+the session retained feature/ranking blockers or unresolved source-universe
+evidence. It remains `COLLECTION_ONLY` and grants no training, ranking, alert,
+or execution authority.
+
 ## Trial preregistration
 
 `TrialRegistration` freezes the hypothesis, exploratory/confirmatory stage,
