@@ -133,6 +133,28 @@ research-intent batch whose actionable, alert, and execution flags are always
 false. They are inputs for offline walk-forward simulation only and are not
 broker orders or user notifications.
 
+Promoted research-intent manifests are create-once and keyed by their exact
+batch ID. They retain the source cross-section ID, complete policy
+configuration, entry session, capital assumption, decision/intent IDs, and
+safety projection. Reads resolve the exact cross-section and independently
+regenerate the complete batch; stored output fields are never accepted as
+their own authority. The store provides no listing or latest-session method.
+
+`PromotedWalkForwardStrategyGenerator` requires exactly one explicit
+cross-section binding for the first test session of every preregistered fold.
+The entry session is the second session in that fold's trading-session tuple,
+not the next calendar date. Missing, substituted, or unresolved fold bindings
+fail closed. Every fold-level research batch is persisted before its selected
+intents are adapted to the common evaluation contract.
+
+`PromotedWalkForwardEvaluationEngine` runs those strategy intents and the
+point-in-time liquid equal-weight benchmark through the same daily fill
+simulator, delivery-charge schedule, base slippage, stressed slippage, and
+purged walk-forward plan. Its result retains the fold bindings, replayed
+research batches, common generated-intent batches, comparison artifact, and
+per-fold metrics. A trial registration must bind the exact strategy policy,
+benchmark, split, universe, dataset, execution policy, and cost schedule.
+
 ## Trial preregistration
 
 `TrialRegistration` freezes the hypothesis, exploratory/confirmatory stage,
