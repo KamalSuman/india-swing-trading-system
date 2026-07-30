@@ -47,6 +47,7 @@ india-swing-daily-workflow-job = "india_swing.daily_workflow_job:main"
 india-swing-proposal-prepare = "india_swing.proposal_prepare:main"
 india-swing-promoted-engine = "india_swing.promoted_engine_cli:main"
 india-swing-promoted-graph-publish = "india_swing.promoted_graph_publisher_cli:main"
+india-swing-promoted-research-run = "india_swing.promoted_research_run_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

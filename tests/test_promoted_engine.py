@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from india_swing._exact_replay import ExactReplayScope
 from india_swing.calendar_data.materialization_store import (
     LocalCalendarMaterializationStore,
 )
@@ -85,6 +86,16 @@ class ExactResolver:
 
     def get(self, identity_value):
         return self.values[identity_value]
+
+
+class _CountingResolver:
+    def __init__(self, target) -> None:
+        self.target = target
+        self.calls = 0
+
+    def get(self, identity):
+        self.calls += 1
+        return self.target.get(identity)
 
 
 def _identity_stores(root: Path, calendar, snapshots) -> LocalPromotedStableListingHistoryStore:
@@ -211,10 +222,12 @@ def _build_engine_stores(root: Path):
     )
     cross_sections = LocalPromotedCrossSectionStore(engine_root, technical_features)
     research_intents = LocalPromotedResearchIntentStore(engine_root, cross_sections)
+    replay_scope = ExactReplayScope()
     engine_runs = LocalPromotedEngineRunStore(
         root / "runs",
         cross_sections=cross_sections,
         research_intents=research_intents,
+        replay_scope=replay_scope,
     )
     stores = PromotedEngineStores(
         corporate_action_adjustments=adjustment_store,
@@ -224,6 +237,7 @@ def _build_engine_stores(root: Path):
         cross_sections=cross_sections,
         research_intents=research_intents,
         engine_runs=engine_runs,
+        _replay_scope=replay_scope,
     )
     return (
         stores,
@@ -270,10 +284,12 @@ def _rebuild_engine_stores(
     )
     cross_sections = LocalPromotedCrossSectionStore(engine_root, technical_features)
     research_intents = LocalPromotedResearchIntentStore(engine_root, cross_sections)
+    replay_scope = ExactReplayScope()
     engine_runs = LocalPromotedEngineRunStore(
         root / "runs",
         cross_sections=cross_sections,
         research_intents=research_intents,
+        replay_scope=replay_scope,
     )
     return PromotedEngineStores(
         corporate_action_adjustments=adjustment_store,
@@ -283,6 +299,7 @@ def _rebuild_engine_stores(
         cross_sections=cross_sections,
         research_intents=research_intents,
         engine_runs=engine_runs,
+        _replay_scope=replay_scope,
     )
 
 
@@ -828,6 +845,7 @@ class PromotedEngineRunStoreTests(unittest.TestCase):
                 root / "conflict-runs",
                 cross_sections=stores.cross_sections,
                 research_intents=stores.research_intents,
+                replay_scope=stores._replay_scope,
             )
             path = conflicting_store.path_for(manifest.run_id)
             path.parent.mkdir(parents=True)
@@ -840,6 +858,52 @@ class PromotedEngineRunStoreTests(unittest.TestCase):
             stores, *_ = _build_engine_stores(Path(tmp))
             with self.assertRaises(PromotedEngineNotFound):
                 stores.engine_runs.get("0" * 64)
+
+    def test_get_resolves_ancestry_once_per_operation_and_fresh_across_operations(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (
+                stores,
+                history,
+                adjustment,
+                ticks,
+                actions,
+                promotion_ids,
+                calendar,
+                snapshots,
+            ) = _build_engine_stores(root)
+            request = _small_request(
+                adjustment=adjustment,
+                ticks=ticks,
+                expected_promotion_ids=promotion_ids,
+                actions=actions,
+                technical_config=_small_config(),
+                cross_section_config=PromotedCrossSectionConfig(
+                    minimum_computed_instruments=1
+                ),
+                intent_config=_permissive_config(),
+            )
+            manifest = PromotedEngineRunner().run(request, stores)
+
+            counting_cross_sections = _CountingResolver(stores.cross_sections)
+            counting_research_intents = _CountingResolver(stores.research_intents)
+            probe = LocalPromotedEngineRunStore(
+                root / "runs",
+                cross_sections=counting_cross_sections,
+                research_intents=counting_research_intents,
+                replay_scope=stores._replay_scope,
+            )
+            probe.get(manifest.run_id)
+            self.assertEqual(counting_cross_sections.calls, 1)
+            self.assertEqual(counting_research_intents.calls, 1)
+
+            # A second, separate top-level get performs fresh resolver
+            # calls -- caching never survives past one cold operation.
+            probe.get(manifest.run_id)
+            self.assertEqual(counting_cross_sections.calls, 2)
+            self.assertEqual(counting_research_intents.calls, 2)
 
     def test_symlinked_target_is_rejected_when_supported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1159,22 +1223,31 @@ class BuildPromotedEngineStoresTests(unittest.TestCase):
 
             # Top-level cross-wiring: the two stores the runner calls
             # directly, and the two the run store verifies against, must be
-            # the exact same shared instances throughout.
+            # the exact same shared instances throughout. Every nested
+            # dependency below is wrapped in one operation-scoped
+            # ScopedExactResolver sharing PromotedEngineStores._replay_scope
+            # (mirroring build_promoted_graph_stores' own wiring), so
+            # reaching the underlying real store requires unwrapping through
+            # ``.resolver`` at each such layer.
             self.assertIs(
-                stores.feature_inputs.adjustment_resolver,
+                stores.feature_inputs.adjustment_resolver.resolver,
                 stores.corporate_action_adjustments,
             )
             self.assertIs(
-                stores.feature_inputs.tick_resolver, stores.effective_session_ticks
+                stores.feature_inputs.tick_resolver.resolver,
+                stores.effective_session_ticks,
             )
             self.assertIs(
-                stores.technical_features.source_resolver, stores.feature_inputs
+                stores.technical_features.source_resolver.resolver,
+                stores.feature_inputs,
             )
             self.assertIs(
-                stores.cross_sections.source_resolver, stores.technical_features
+                stores.cross_sections.source_resolver.resolver,
+                stores.technical_features,
             )
             self.assertIs(
-                stores.research_intents.cross_section_resolver, stores.cross_sections
+                stores.research_intents.cross_section_resolver.resolver,
+                stores.cross_sections,
             )
             self.assertIs(stores.engine_runs.cross_sections, stores.cross_sections)
             self.assertIs(
@@ -1185,8 +1258,10 @@ class BuildPromotedEngineStoresTests(unittest.TestCase):
             )
 
             # Both graph stores share one history store, rooted at promoted_root.
-            history_store = stores.corporate_action_adjustments.histories
-            self.assertIs(stores.effective_session_ticks.histories, history_store)
+            history_store = stores.corporate_action_adjustments.histories.resolver
+            self.assertIs(
+                stores.effective_session_ticks.histories.resolver, history_store
+            )
             self.assertIs(type(history_store), LocalPromotedStableListingHistoryStore)
             self.assertEqual(
                 history_store._store.root,
@@ -1194,7 +1269,7 @@ class BuildPromotedEngineStoresTests(unittest.TestCase):
             )
 
             corporate_action_snapshots = (
-                stores.corporate_action_adjustments.corporate_actions
+                stores.corporate_action_adjustments.corporate_actions.resolver
             )
             self.assertIs(
                 type(corporate_action_snapshots), LocalCorporateActionSnapshotStore
@@ -1204,7 +1279,7 @@ class BuildPromotedEngineStoresTests(unittest.TestCase):
                 promoted_root / "corporate-action-snapshots",
             )
 
-            tick_snapshot_store = history_store.tick_snapshots
+            tick_snapshot_store = history_store.tick_snapshots.resolver
             self.assertIs(
                 type(tick_snapshot_store), LocalPromotedSessionTickSnapshotStore
             )
@@ -1213,18 +1288,21 @@ class BuildPromotedEngineStoresTests(unittest.TestCase):
                 promoted_root / "session-tick-snapshots",
             )
 
-            frame_store = tick_snapshot_store.frames
+            frame_store = tick_snapshot_store.frames.resolver
             self.assertIs(type(frame_store), LocalPromotedSessionMarketDataFrameStore)
             self.assertEqual(
                 frame_store._store.root,
                 promoted_root / "session-market-data-frames",
             )
             self.assertIs(
-                type(frame_store.corpora), LocalHistoricalEvaluationCorpusStore
+                type(frame_store.corpora.resolver),
+                LocalHistoricalEvaluationCorpusStore,
             )
-            self.assertEqual(frame_store.corpora.root, historical_corpus_root)
+            self.assertEqual(
+                frame_store.corpora.resolver.root, historical_corpus_root
+            )
 
-            universe_store = frame_store.universes
+            universe_store = frame_store.universes.resolver
             self.assertIs(
                 type(universe_store), LocalPromotedIdentitySessionUniverseStore
             )
@@ -1232,21 +1310,25 @@ class BuildPromotedEngineStoresTests(unittest.TestCase):
                 universe_store._store.root,
                 promoted_root / "identity-session-universes",
             )
-            self.assertIs(type(universe_store.calendars), _CalendarResolverAdapter)
             self.assertIs(
-                type(universe_store.calendars._store),
+                type(universe_store.calendars.resolver), _CalendarResolverAdapter
+            )
+            self.assertIs(
+                type(universe_store.calendars.resolver._store),
                 LocalCalendarMaterializationStore,
             )
-            self.assertEqual(universe_store.calendars._store.root, calendar_root)
             self.assertEqual(
-                universe_store.calendars._store.daily_reports_root,
+                universe_store.calendars.resolver._store.root, calendar_root
+            )
+            self.assertEqual(
+                universe_store.calendars.resolver._store.daily_reports_root,
                 daily_reports_root,
             )
             # The stable-listing history store shares the identical
             # calendar-resolver instance as the session-universe store.
             self.assertIs(history_store.calendars, universe_store.calendars)
 
-            adjudication_store = universe_store.adjudications
+            adjudication_store = universe_store.adjudications.resolver
             self.assertIs(
                 type(adjudication_store), LocalPromotedIdentityAdjudicationStore
             )
@@ -1255,30 +1337,40 @@ class BuildPromotedEngineStoresTests(unittest.TestCase):
                 promoted_root / "identity-adjudications",
             )
             self.assertIs(
-                type(adjudication_store.evidence), LocalIdentityEvidenceArtifactStore
+                type(adjudication_store.evidence.resolver),
+                LocalIdentityEvidenceArtifactStore,
             )
-            self.assertEqual(adjudication_store.evidence.root, identity_evidence_root)
+            self.assertEqual(
+                adjudication_store.evidence.resolver.root, identity_evidence_root
+            )
             self.assertIs(
-                type(adjudication_store.reviews), LocalIdentityReviewBundleStore
+                type(adjudication_store.reviews.resolver),
+                LocalIdentityReviewBundleStore,
             )
-            self.assertEqual(adjudication_store.reviews.root, identity_evidence_root)
+            self.assertEqual(
+                adjudication_store.reviews.resolver.root, identity_evidence_root
+            )
 
-            intake_store = adjudication_store.intakes
+            intake_store = adjudication_store.intakes.resolver
             self.assertIs(type(intake_store), LocalPromotedIdentityIntakeStore)
             self.assertEqual(
                 intake_store._store.root, promoted_root / "identity-intakes"
             )
             self.assertIs(
-                type(intake_store.promotions), LocalReferenceArtifactPromotionStore
+                type(intake_store.promotions.resolver),
+                LocalReferenceArtifactPromotionStore,
             )
             self.assertEqual(
-                intake_store.promotions.root,
+                intake_store.promotions.resolver.root,
                 promoted_root / "promotions",
             )
             self.assertIs(
-                type(intake_store.promotions.artifacts), LocalReferenceArtifactStore
+                type(intake_store.promotions.resolver.artifacts),
+                LocalReferenceArtifactStore,
             )
-            self.assertEqual(intake_store.promotions.artifacts.root, reference_root)
+            self.assertEqual(
+                intake_store.promotions.resolver.artifacts.root, reference_root
+            )
 
 
 if __name__ == "__main__":

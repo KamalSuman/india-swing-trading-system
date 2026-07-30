@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
+from india_swing._exact_replay import ExactReplayScope
 from india_swing import promoted_engine_cli
 from india_swing.corporate_actions.promoted_adjustments import (
     PromotedCorporateActionAdjustmentService,
@@ -154,10 +155,12 @@ def _build_stores_for_cli(root: Path) -> tuple[PromotedEngineStores, dict[str, o
     )
     cross_sections = LocalPromotedCrossSectionStore(engine_root, technical_features)
     research_intents = LocalPromotedResearchIntentStore(engine_root, cross_sections)
+    replay_scope = ExactReplayScope()
     engine_runs = LocalPromotedEngineRunStore(
         root / "runs",
         cross_sections=cross_sections,
         research_intents=research_intents,
+        replay_scope=replay_scope,
     )
     stores = PromotedEngineStores(
         corporate_action_adjustments=adjustment_store,
@@ -167,6 +170,7 @@ def _build_stores_for_cli(root: Path) -> tuple[PromotedEngineStores, dict[str, o
         cross_sections=cross_sections,
         research_intents=research_intents,
         engine_runs=engine_runs,
+        _replay_scope=replay_scope,
     )
     promotion_ids = tuple(
         sorted(

@@ -91,7 +91,19 @@ This workflow closes the automated **EOD paper-outcome leg**. It does not yet
 turn collection-only daily evidence into a live proposal batch. The signal
 engine correctly rejects collection-only inputs; real proposal generation
 still requires point-in-time promotion of stable identity, adjusted prices,
-corporate actions, tick sizes, and universe evidence. The next engine
-milestone is the exact promoted-evidence-to-proposal-graph bridge, followed by
-the already-built paper-only operational quote/decision job at the next
-session's entry window.
+corporate actions, tick sizes, and universe evidence.
+
+The exact promoted-evidence-to-proposal-graph bridge is now implemented:
+`PromotedGraphPublisher`/`india-swing-promoted-graph-publish` assembles the
+promoted identity/session/history/corporate-action graph into one durable,
+exact-ID `PromotedGraphPublicationManifest`; `PromotedEngineRunner`/
+`india-swing-promoted-engine` runs one signal-session paper research pass
+from an already-published graph's two exact roots; and
+`PromotedResearchOrchestrator`/`india-swing-promoted-research-run` derives
+those roots directly from one exact `graph_manifest_id` and durably binds
+both terminal manifests together, so a single restart-safe command chain now
+runs end to end from published graph evidence to a bound paper research
+result. The next bounded milestone is turning one durable
+`PromotedResearchRunManifest`'s selected research intents into the
+already-built paper-only operational quote/decision job at the next
+session's entry window -- that translation does not exist yet.

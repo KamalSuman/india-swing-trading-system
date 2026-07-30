@@ -28,13 +28,11 @@ import os
 import re
 import stat
 import tempfile
-from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timezone
 from pathlib import Path
-from threading import local
-from typing import Iterator
 
+from india_swing._exact_replay import ExactReplayScope, ScopedExactResolver
 from india_swing._filesystem import (
     FileLockUnavailable,
     FileSafetyError,
@@ -123,55 +121,14 @@ class PromotedGraphPublisherNotFound(PromotedGraphPublisherError):
     pass
 
 
-class _ReplayScope:
-    """Deduplicate exact immutable resolver reads within one top-level replay.
-
-    The cache is deliberately empty outside ``open()`` and is discarded when
-    the outermost operation finishes.  A later publication or restart therefore
-    performs a fresh durable replay and cannot inherit trust from an earlier
-    operation.
-    """
-
-    def __init__(self) -> None:
-        self._local = local()
-
-    @contextmanager
-    def open(self) -> Iterator[None]:
-        values = getattr(self._local, "values", None)
-        outermost = values is None
-        if outermost:
-            self._local.values = {}
-        try:
-            yield
-        finally:
-            if outermost:
-                del self._local.values
-
-    def resolve(self, namespace: str, resolver: object, identity: str) -> object:
-        values = getattr(self._local, "values", None)
-        if values is None:
-            return resolver.get(identity)  # type: ignore[attr-defined]
-        key = (namespace, identity)
-        if key not in values:
-            values[key] = resolver.get(identity)  # type: ignore[attr-defined]
-        return values[key]
-
-
-class _ScopedExactResolver:
-    """Exact-ID resolver facade backed by one operation-scoped replay cache."""
-
-    def __init__(
-        self,
-        namespace: str,
-        resolver: object,
-        replay_scope: _ReplayScope,
-    ) -> None:
-        self.namespace = namespace
-        self.resolver = resolver
-        self.replay_scope = replay_scope
-
-    def get(self, identity: str) -> object:
-        return self.replay_scope.resolve(self.namespace, self.resolver, identity)
+# Private aliases preserved so this module's own composition/store code and
+# every existing test that imports these two names from here (including the
+# adversarial ReplayScopeTests suite) keep working unchanged. The actual
+# implementation now lives in india_swing._exact_replay so promoted_engine.py
+# and promoted_research_run.py can share the exact same mechanism instead of
+# each re-deriving their own upstream identity/session/history graph.
+_ReplayScope = ExactReplayScope
+_ScopedExactResolver = ScopedExactResolver
 
 
 PROMOTED_GRAPH_SPEC_SCHEMA_VERSION = "promoted-graph-publication-spec/v1"

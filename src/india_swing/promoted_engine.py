@@ -26,6 +26,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Protocol
 
+from india_swing._exact_replay import ExactReplayScope, ScopedExactResolver
 from india_swing._filesystem import (
     FileLockUnavailable,
     FileSafetyError,
@@ -509,6 +510,70 @@ class PromotedEngineStores:
     cross_sections: LocalPromotedCrossSectionStore
     research_intents: LocalPromotedResearchIntentStore
     engine_runs: "LocalPromotedEngineRunStore"
+    _replay_scope: ExactReplayScope = field(repr=False)
+
+
+def build_promoted_engine_downstream_stores(
+    *,
+    corporate_action_adjustments,
+    effective_session_ticks,
+    promoted_root: Path,
+    engine_run_root: Path,
+    replay_scope: ExactReplayScope,
+) -> PromotedEngineStores:
+    """Construct only the engine's own downstream stores from already-
+    resolved exact adjustment/effective-tick resolvers.
+
+    This is the bounded composition boundary a caller with its own real
+    upstream adjustment/effective-tick stores (for example, the promoted-
+    research bridge reusing a promoted graph's own stores) uses to avoid
+    building a second, independent upstream identity/session/history
+    resolver graph. ``build_promoted_engine_stores`` below is the full
+    seven-root factory: it builds that upstream chain itself and delegates
+    here for the downstream half, so both entry points share one wiring.
+    """
+
+    adjustment_resolver = ScopedExactResolver(
+        "corporate-action-adjustment", corporate_action_adjustments, replay_scope
+    )
+    tick_resolver = ScopedExactResolver(
+        "effective-session-tick", effective_session_ticks, replay_scope
+    )
+    feature_inputs = LocalPromotedFeatureInputStore(
+        promoted_root, adjustment_resolver, tick_resolver
+    )
+    feature_input_resolver = ScopedExactResolver(
+        "feature-input", feature_inputs, replay_scope
+    )
+    technical_features = LocalPromotedTechnicalFeatureStore(
+        promoted_root, feature_input_resolver
+    )
+    technical_resolver = ScopedExactResolver(
+        "technical-feature", technical_features, replay_scope
+    )
+    cross_sections = LocalPromotedCrossSectionStore(promoted_root, technical_resolver)
+    cross_section_resolver = ScopedExactResolver(
+        "cross-section", cross_sections, replay_scope
+    )
+    research_intents = LocalPromotedResearchIntentStore(
+        promoted_root, cross_section_resolver
+    )
+    engine_runs = LocalPromotedEngineRunStore(
+        engine_run_root,
+        cross_sections=cross_sections,
+        research_intents=research_intents,
+        replay_scope=replay_scope,
+    )
+    return PromotedEngineStores(
+        corporate_action_adjustments=corporate_action_adjustments,
+        effective_session_ticks=effective_session_ticks,
+        feature_inputs=feature_inputs,
+        technical_features=technical_features,
+        cross_sections=cross_sections,
+        research_intents=research_intents,
+        engine_runs=engine_runs,
+        _replay_scope=replay_scope,
+    )
 
 
 def build_promoted_engine_stores(
@@ -523,67 +588,92 @@ def build_promoted_engine_stores(
 ) -> PromotedEngineStores:
     """Construct every real durable store from explicit roots.
 
-    This is the only place the runner's stores are assembled. It never
-    accepts a caller-supplied fake in place of a real store, and it exposes
-    no discovery: every store here resolves only the exact ID it is asked
-    for.
+    This is the only place the runner's stores are assembled from raw
+    filesystem roots. It never accepts a caller-supplied fake in place of a
+    real store, and it exposes no discovery: every store here resolves only
+    the exact ID it is asked for. Every nested resolver shares one
+    operation-scoped replay cache (see build_promoted_engine_downstream_stores
+    above), so a single top-level operation resolves each exact ancestor at
+    most once.
     """
 
+    replay_scope = ExactReplayScope()
     reference_artifacts = LocalReferenceArtifactStore(reference_root)
     reference_promotions = LocalReferenceArtifactPromotionStore(
         promoted_root, reference_artifacts
     )
     identity_evidence = LocalIdentityEvidenceArtifactStore(identity_evidence_root)
     identity_reviews = LocalIdentityReviewBundleStore(identity_evidence_root)
+    promotion_resolver = ScopedExactResolver(
+        "reference-promotion", reference_promotions, replay_scope
+    )
+    evidence_resolver = ScopedExactResolver(
+        "identity-evidence", identity_evidence, replay_scope
+    )
+    review_resolver = ScopedExactResolver(
+        "identity-review", identity_reviews, replay_scope
+    )
     identity_intakes = LocalPromotedIdentityIntakeStore(
-        promoted_root, reference_promotions
+        promoted_root, promotion_resolver
+    )
+    intake_resolver = ScopedExactResolver(
+        "identity-intake", identity_intakes, replay_scope
     )
     identity_adjudications = LocalPromotedIdentityAdjudicationStore(
-        promoted_root, identity_intakes, identity_evidence, identity_reviews
+        promoted_root, intake_resolver, evidence_resolver, review_resolver
+    )
+    adjudication_resolver = ScopedExactResolver(
+        "identity-adjudication", identity_adjudications, replay_scope
     )
     calendars = LocalCalendarMaterializationStore(calendar_root, daily_reports_root)
-    calendar_resolver = _CalendarResolverAdapter(calendars)
+    calendars_adapter = _CalendarResolverAdapter(calendars)
+    calendar_resolver = ScopedExactResolver(
+        "calendar-materialization", calendars_adapter, replay_scope
+    )
     identity_session_universes = LocalPromotedIdentitySessionUniverseStore(
-        promoted_root, identity_adjudications, calendar_resolver
+        promoted_root, adjudication_resolver, calendar_resolver
+    )
+    universe_resolver = ScopedExactResolver(
+        "identity-session-universe", identity_session_universes, replay_scope
     )
     historical_corpus = LocalHistoricalEvaluationCorpusStore(historical_corpus_root)
+    corpus_resolver = ScopedExactResolver(
+        "historical-corpus", historical_corpus, replay_scope
+    )
     session_market_data_frames = LocalPromotedSessionMarketDataFrameStore(
-        promoted_root, identity_session_universes, historical_corpus
+        promoted_root, universe_resolver, corpus_resolver
+    )
+    frame_resolver = ScopedExactResolver(
+        "session-market-data-frame", session_market_data_frames, replay_scope
     )
     session_tick_snapshots = LocalPromotedSessionTickSnapshotStore(
-        promoted_root, session_market_data_frames
+        promoted_root, frame_resolver
+    )
+    tick_snapshot_resolver = ScopedExactResolver(
+        "session-tick-snapshot", session_tick_snapshots, replay_scope
     )
     stable_listing_histories = LocalPromotedStableListingHistoryStore(
-        promoted_root, session_tick_snapshots, calendar_resolver
+        promoted_root, tick_snapshot_resolver, calendar_resolver
+    )
+    history_resolver = ScopedExactResolver(
+        "stable-listing-history", stable_listing_histories, replay_scope
     )
     corporate_action_snapshots = LocalCorporateActionSnapshotStore(promoted_root)
+    corporate_action_resolver = ScopedExactResolver(
+        "corporate-action-snapshot", corporate_action_snapshots, replay_scope
+    )
     corporate_action_adjustments = LocalPromotedCorporateActionAdjustmentStore(
-        promoted_root, stable_listing_histories, corporate_action_snapshots
+        promoted_root, history_resolver, corporate_action_resolver
     )
     effective_session_ticks = LocalPromotedEffectiveSessionTickStore(
-        promoted_root, stable_listing_histories
+        promoted_root, history_resolver
     )
-    feature_inputs = LocalPromotedFeatureInputStore(
-        promoted_root, corporate_action_adjustments, effective_session_ticks
-    )
-    technical_features = LocalPromotedTechnicalFeatureStore(
-        promoted_root, feature_inputs
-    )
-    cross_sections = LocalPromotedCrossSectionStore(promoted_root, technical_features)
-    research_intents = LocalPromotedResearchIntentStore(promoted_root, cross_sections)
-    engine_runs = LocalPromotedEngineRunStore(
-        engine_run_root,
-        cross_sections=cross_sections,
-        research_intents=research_intents,
-    )
-    return PromotedEngineStores(
+    return build_promoted_engine_downstream_stores(
         corporate_action_adjustments=corporate_action_adjustments,
         effective_session_ticks=effective_session_ticks,
-        feature_inputs=feature_inputs,
-        technical_features=technical_features,
-        cross_sections=cross_sections,
-        research_intents=research_intents,
-        engine_runs=engine_runs,
+        promoted_root=promoted_root,
+        engine_run_root=engine_run_root,
+        replay_scope=replay_scope,
     )
 
 
@@ -606,6 +696,18 @@ class PromotedEngineRunner:
             raise TypeError("promoted engine stores must be exact")
         request.verify_content_identity()
 
+        with stores._replay_scope.open():
+            run_id = self._run_within_scope(request, stores).run_id
+        # One final cold get, entirely outside the scope just closed: this
+        # proves the published manifest independently re-verifies from
+        # scratch rather than inheriting trust from the construction above.
+        return stores.engine_runs.get(run_id)
+
+    def _run_within_scope(
+        self,
+        request: PromotedEngineRunRequest,
+        stores: PromotedEngineStores,
+    ) -> PromotedEngineRunManifest:
         try:
             adjustment_panel = stores.corporate_action_adjustments.get(
                 request.adjustment_bridge_id
@@ -959,10 +1061,12 @@ class LocalPromotedEngineRunStore:
         *,
         cross_sections,
         research_intents,
+        replay_scope: ExactReplayScope,
     ) -> None:
         self.root = Path(root) / self._DIRECTORY
         self.cross_sections = cross_sections
         self.research_intents = research_intents
+        self._replay_scope = replay_scope
 
     def path_for(self, run_id: str) -> Path:
         return self.root / f"{_require_sha(run_id, _ERR_ID)}.json"
@@ -987,6 +1091,10 @@ class LocalPromotedEngineRunStore:
         return self.get(manifest.run_id)
 
     def get(self, run_id: str) -> PromotedEngineRunManifest:
+        with self._replay_scope.open():
+            return self._get(run_id)
+
+    def _get(self, run_id: str) -> PromotedEngineRunManifest:
         path = self.path_for(run_id)
         payload = self._read(path)
         manifest = decode_promoted_engine_run_manifest(payload)
