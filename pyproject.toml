@@ -45,6 +45,7 @@ india-swing-paper-portfolio-prepare = "india_swing.paper_portfolio_prepare:main"
 india-swing-paper-portfolio-restore = "india_swing.paper_portfolio_restore:main"
 india-swing-daily-workflow-job = "india_swing.daily_workflow_job:main"
 india-swing-proposal-prepare = "india_swing.proposal_prepare:main"
+india-swing-promoted-engine = "india_swing.promoted_engine_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

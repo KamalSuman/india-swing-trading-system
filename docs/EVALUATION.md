@@ -73,9 +73,10 @@ duplicate JSON, floating-point tokens, output tampering, and authority upgrades
 fail closed. The store exposes no list or latest-selection operation.
 
 The adjustment and effective-session tick resolvers are explicit dependencies.
-Their promoted panel types do not yet have durable local stores, so a
-restart-safe CLI publisher must not be claimed until those two upstream stores
-exist.
+`promoted_graph_store.py` now supplies durable local stores for both promoted
+panel types (`LocalPromotedCorporateActionAdjustmentStore`,
+`LocalPromotedEffectiveSessionTickStore`), and the promoted-engine runner
+documented below is the restart-safe CLI publisher built on top of them.
 
 `PromotedTechnicalFeatureService` is the next collection-only transformation.
 Its immutable configuration defaults to 61 sessions and computes per-listing
@@ -260,11 +261,101 @@ nearest, or discovery operation.
 
 The adjustment and effective-tick stores compose directly with
 `LocalPromotedFeatureInputStore`, closing the replayable middle of the graph
-through cross-sectional features. CLI publication remains withheld for one
-narrower reason: the reference-promotion root and corporate-action snapshot
-root still need sealed local stores. Until those two roots are durable, a
-restarted CLI would depend on caller-held objects and would overstate restart
-safety.
+through cross-sectional features. The reference-promotion root
+(`LocalReferenceArtifactPromotionStore`) and corporate-action snapshot root
+(`LocalCorporateActionSnapshotStore`) are now durable, sealed local stores,
+which closes the last gap that previously kept a restart-safe CLI from being
+claimed.
+
+## Promoted-engine runner (paper-only, restart-safe)
+
+`src/india_swing/promoted_engine.py` is the one restart-safe, single-signal-
+session, paper-only runner that ties every existing promoted boundary
+together end to end. It consumes only already-published promoted adjustment
+and effective-session-tick evidence: it never discovers, imports,
+adjudicates, or publishes the upstream promoted graph, and it never sends a
+Telegram alert or places a broker order.
+
+A `PromotedEngineRunRequest` pins exact `adjustment_bridge_id`,
+`effective_tick_panel_id`, a sorted unique non-empty tuple of
+`expected_reference_promotion_ids`, an `expected_corporate_action_snapshot_id`,
+`signal_session`, `entry_session` (which must be after `signal_session`), an
+aware `cutoff`, a positive `initial_capital`, and immutable
+`PromotedTechnicalFeatureConfig`/`PromotedCrossSectionConfig`/
+`PromotedIntentPolicyConfig` objects; its `request_id` content-binds every
+field. `build_promoted_engine_stores` is the local exact-store composition
+boundary: given seven explicit roots (reference data, identity evidence,
+calendar data, daily reports, historical corpus, promoted evidence, and
+engine-run evidence) it constructs every real durable store this project
+already has -- `LocalReferenceArtifactStore` +
+`LocalReferenceArtifactPromotionStore`, `LocalIdentityEvidenceArtifactStore`,
+`LocalIdentityReviewBundleStore`, `LocalCalendarMaterializationStore`,
+`LocalHistoricalEvaluationCorpusStore`, `LocalCorporateActionSnapshotStore`,
+every `LocalPromoted*` graph store, the three promoted feature stores, and
+`LocalPromotedResearchIntentStore` -- and exposes no list/latest/nearest/find
+operation anywhere in the composition.
+
+`PromotedEngineRunner.run` resolves the adjustment and effective-tick panels
+from those fresh stores (which themselves cascade all the way back through
+the entire identity graph to every reference-artifact promotion) and
+independently verifies exact IDs, matching signal session, cutoff
+compatibility, shared stable-history lineage, the exact expected corporate-
+action snapshot ID, and the exact set of reference-promotion IDs reachable
+through the reconstructed identity graph -- failing closed with a sanitized
+static error on any missing, extra, substituted, future-known, or
+inconsistent source. It then materializes and persists the feature-input
+panel through `PromotedFeatureInputService`/`LocalPromotedFeatureInputStore`,
+replays one session through `PromotedHistoricalReplayService` into
+`LocalPromotedTechnicalFeatureStore`/`LocalPromotedCrossSectionStore`, and
+generates and persists one research-intent batch through
+`PromotedResearchIntentService`/`LocalPromotedResearchIntentStore` -- reusing
+every existing algorithm and risk gate unchanged.
+
+A canonical `PromotedEngineRunManifest` binds the request ID and its
+**complete verifiable preimage** -- `adjustment_bridge_id`,
+`effective_tick_panel_id`, the sorted unique `expected_reference_promotion_ids`,
+`expected_corporate_action_snapshot_id`, the sessions, cutoff, capital, and
+every configuration ID -- plus every output panel/batch/replay-run ID and a
+permanently-true `paper_only` flag; its `run_id` is content-derived. A single
+shared request-identity function is called both when
+`PromotedEngineRunRequest` first computes its own `request_id` and every time
+the manifest reconstructs and cross-checks it, so `request_id` is never an
+opaque, unverifiable stored hash: any retained root pin, session, cutoff,
+capital, or config ID that does not recompute to the manifest's own
+`request_id` fails closed at construction, decode, and `get()` alike.
+`LocalPromotedEngineRunStore` publishes a manifest only after independently
+re-verifying every downstream object through its own real stores, and
+`get(run_id)` never trusts the stored manifest: it re-resolves the
+cross-section panel (which itself independently re-resolves the technical and
+feature-input panels beneath it, and through them the adjustment and
+effective-tick panels) and the research-intent batch, checks the resolved
+`adjustment_bridge_id`, `effective_tick_panel_id`, expected corporate-action
+snapshot ID, and the exact reachable reference-promotion ID set against the
+manifest's own retained root pins, reconstructs the historical-replay run,
+and requires the recomputed `run_id` and canonical bytes to match before
+returning anything -- rejecting tampering, root-pin substitution, path
+substitution, and links/reparse points exactly like the project's other
+durable stores. A manifest that is fully self-consistent on its own terms
+(its own `request_id`/`run_id` correctly recompute from its own retained
+fields) still fails closed if those retained root pins disagree with what the
+independently reconstructed downstream lineage actually resolves to.
+
+The `india-swing-promoted-engine` CLI takes all seven roots and the exact
+source IDs above and uses the existing immutable default feature/cross-
+section/intent configurations for this first version. Its success JSON is a
+sanitized audit record only (status, run identifiers, source/output/config
+IDs, sessions, cutoff, candidate/intent counts, and `paper_only: true`); a
+valid zero-intent or fully blocked research batch is a successful, auditable
+paper result, not an exception. Every invalid or unresolved invocation --
+including missing required arguments, unknown options, and malformed
+argument values, which a `SanitizedArgumentParser` raises into the same
+boundary instead of letting argparse print usage/error text directly --
+returns exit code 2 with only `status=FAILED` and `error_type`; no raw
+argument value, path, ID, or parser text is ever emitted. `--help` is
+unaffected and still prints normal help text. This command is deliberately
+non-authoritative: it is paper/research infrastructure that never touches a
+broker, Telegram, GCP, the network, or a live store, and it cannot itself
+upgrade any readiness, actionable, alert, or execution flag.
 
 ## Trial preregistration
 
