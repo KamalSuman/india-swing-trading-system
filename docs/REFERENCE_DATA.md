@@ -245,6 +245,44 @@ validation, alert eligibility, or profitability, is not a
 the stored artifact's own `AcquisitionMode`, readiness, or `actionable`
 flag on the sealed archive.
 
+## Durable promotion-replay store
+
+`src/india_swing/reference_data/promotion_store.py` implements
+`LocalReferenceArtifactPromotionStore`, the durable root store that lets
+`VerifiedReferenceArtifactPromotion` survive a process restart. It is a
+persistence boundary only: the stored manifest retains the promotion/join
+IDs, the exact source artifact/manifest IDs and raw/normalized hashes, the
+exact receipt bytes, and every field of the exact
+`TrustedReferenceAcquisitionBinding` -- but none of that is trusted as
+authority on its own. The persisted binding is a local trust-root input, not
+something independently authenticated by a self-consistent manifest: a
+manifest that agrees with itself only proves the file was not corrupted, not
+that the trust boundary it records is the one that was originally accepted.
+`get(promotion_id)` always resolves only the exact pinned
+`StoredReferenceArtifact` through the caller-supplied
+`LocalReferenceArtifactStore`, reconstructs the trusted binding and verified
+receipt from the retained fields, joins through a private in-process reader
+that serves only the sealed artifact's own already-verified raw bytes for the
+exact receipt-pinned bucket/object/generation (never GCP, network, or a
+bucket listing), and re-promotes -- requiring exact agreement with the stored
+`promotion_id` before returning anything. The upstream promotion identity
+(`reference-artifact-promotion/v2`) content-binds every field of the trusted
+binding -- `expected_receipt_sha256`, `expected_raw_sha256`, `allowed_bucket`,
+`target_report_date`, `not_before`, `cutoff`, and `trusted_acquirer_id` --
+into the promotion's own `promotion_id`. This means an in-place change to any
+one binding field, even one that is still individually valid (for example
+widening `cutoff` by a day), cannot silently redefine the trust boundary
+under the original `promotion_id`: the independently reconstructed
+`promotion_id` differs from the pinned one and `get` fails closed instead of
+accepting the widened binding. `put(promotion)` performs the identical replay
+before writing, so a promotion whose retained receipt/binding cannot be
+independently reconstructed from the pinned sealed artifact leaves no target
+file behind. Exposes only `put`, `get`, and `path_for`; there is no list,
+latest, or nearest-selection capability. A successfully stored promotion is
+still not trading, alert, or capital authority, and it does not change the
+sealed reference artifact's own `AcquisitionMode`, readiness, or `actionable`
+flag.
+
 ## Calendar source hierarchy
 
 The human-facing source is NSE's

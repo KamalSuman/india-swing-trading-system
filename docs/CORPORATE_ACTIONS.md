@@ -79,6 +79,34 @@ Even a fully adjusted bridge remains `COLLECTION_ONLY` and feature-ineligible:
 the collected security-master tick value is not yet a verified effective-dated
 tick interval.
 
+## Durable snapshot store
+
+`src/india_swing/corporate_actions/snapshot_store.py` implements
+`LocalCorporateActionSnapshotStore`, the durable root store that lets a
+`CorporateActionSnapshot` survive a process restart. `CorporateActionSnapshot`
+has no lower durable source, so this is a leaf persistence boundary only: it
+neither upgrades nor downgrades whatever valid `readiness`/`complete`/
+`actionable`/reason-code state the source snapshot already carries, and a
+successfully stored snapshot is never independent official-source
+provenance -- it proves only that the exact content was durably persisted.
+`get(snapshot_id)` never trusts a stored ID: it strictly decodes every
+field (rejecting duplicate keys, float/NaN/Infinity tokens, unknown/missing
+fields, malformed hashes/dates/aware-UTC datetimes/enums, bool-as-int, and
+noncanonical or non-positive Decimal economic terms) and constructs genuine
+`CorporateActionEvent`/`CorporateActionSnapshot` values, so their own
+construction-time validation and content identity independently replay.
+Decimal economic terms are validated by exact canonical-text round-trip
+(`str(Decimal(value)) == value`), not by a restrictive digit-only shape: this
+accepts every strictly positive representation `Decimal` can itself produce,
+including scientific-notation forms such as `"1E+2"` or `"1E-7"`, and rejects
+only non-finite, zero, negative (including every signed-zero spelling), or
+non-round-tripping text -- never using `float` anywhere in the check.
+`put(value)` decodes its own freshly encoded payload and requires exact
+reconstructed equality (including `snapshot_id`) before writing anything, so
+a value the codec cannot faithfully replay leaves no target artifact behind.
+Exposes only `put`, `get`, and `path_for`; there is no list, latest, or
+nearest-selection capability.
+
 ## Remaining work
 
 Once a real official NSE export is available, the next increment will add:

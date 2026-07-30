@@ -826,7 +826,7 @@ class ReferenceArtifactPromotionDirectConstructionMismatchTests(unittest.TestCas
             join, artifact = _build_pair(Path(tmp))
             promotion = ReferenceArtifactPromotionService().promote(join, artifact)
             kwargs = _kwargs_from(promotion)
-            kwargs["schema_version"] = "reference-artifact-promotion/v2"
+            kwargs["schema_version"] = "reference-artifact-promotion/v3"
             with self.assertRaises(ReferenceArtifactPromotionError):
                 VerifiedReferenceArtifactPromotion(**kwargs)
 
@@ -962,6 +962,17 @@ class ReferenceArtifactPromotionMutationTests(unittest.TestCase):
                 promotion.join.receipt.binding,
                 "allowed_bucket",
                 "another-syntactically-valid-bucket",
+            )
+            with self.assertRaises(ReferenceArtifactPromotionError):
+                promotion.verify_content_identity()
+
+    def test_mutating_nested_binding_cutoff_field_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            promotion = self._promotion(tmp)
+            object.__setattr__(
+                promotion.join.receipt.binding,
+                "cutoff",
+                promotion.join.receipt.binding.cutoff + timedelta(days=1),
             )
             with self.assertRaises(ReferenceArtifactPromotionError):
                 promotion.verify_content_identity()
@@ -1172,6 +1183,13 @@ class ReferenceArtifactPromotionContentIdCompletenessTests(unittest.TestCase):
                     "ordered_row_digest",
                     "report_date",
                     "knowledge_time",
+                    "trusted_binding_expected_receipt_sha256",
+                    "trusted_binding_expected_raw_sha256",
+                    "trusted_binding_allowed_bucket",
+                    "trusted_binding_target_report_date",
+                    "trusted_binding_not_before",
+                    "trusted_binding_cutoff",
+                    "trusted_binding_trusted_acquirer_id",
                     "promoted_acquisition_mode",
                     "promoted_readiness",
                     "actionable",
@@ -1247,6 +1265,25 @@ class ReferenceArtifactPromotionContentIdCompletenessTests(unittest.TestCase):
             )
             self.assertEqual(artifact_a.manifest.artifact_id, artifact_b.manifest.artifact_id)
             self.assertNotEqual(artifact_a.manifest.manifest_id, artifact_b.manifest.manifest_id)
+
+            promotion_a = ReferenceArtifactPromotionService().promote(join_a, artifact_a)
+            promotion_b = ReferenceArtifactPromotionService().promote(join_b, artifact_b)
+            self.assertNotEqual(promotion_a.promotion_id, promotion_b.promotion_id)
+
+    def test_different_binding_cutoff_changes_promotion_id(self) -> None:
+        # Blocker 2 regression: two otherwise-identical valid receipt/join/
+        # artifact graphs whose TrustedReferenceAcquisitionBinding differs
+        # only in a still-individually-valid cutoff must not collide under
+        # the same promotion_id. The v2 upstream identity content-binds
+        # every trusted binding field, so widening cutoff alone is enough
+        # to change the promotion_id.
+        with tempfile.TemporaryDirectory() as tmp_a, tempfile.TemporaryDirectory() as tmp_b:
+            gz_bytes = _security_master_gzip()
+            join_a = _join_for(gz_bytes, cutoff=_CUTOFF)
+            artifact_a = _import_artifact(Path(tmp_a), gz_bytes)
+            join_b = _join_for(gz_bytes, cutoff=_CUTOFF + timedelta(days=1))
+            artifact_b = _import_artifact(Path(tmp_b), gz_bytes)
+            self.assertNotEqual(join_a.receipt.binding.cutoff, join_b.receipt.binding.cutoff)
 
             promotion_a = ReferenceArtifactPromotionService().promote(join_a, artifact_a)
             promotion_b = ReferenceArtifactPromotionService().promote(join_b, artifact_b)

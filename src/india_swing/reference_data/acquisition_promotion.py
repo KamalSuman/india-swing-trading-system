@@ -9,6 +9,7 @@ from india_swing.identity import content_id
 from india_swing.reference.models import ReferenceReadiness
 
 from .acquisition_join import VerifiedReferenceAcquisitionJoin
+from .acquisition_receipt import TrustedReferenceAcquisitionBinding
 from .codec import encode_security_master
 from .models import (
     NSE_CM_SECURITY_PARSER_VERSION,
@@ -35,12 +36,13 @@ def _reference_data_artifact_store():
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
-REFERENCE_ARTIFACT_PROMOTION_SCHEMA_VERSION = "reference-artifact-promotion/v1"
+REFERENCE_ARTIFACT_PROMOTION_SCHEMA_VERSION = "reference-artifact-promotion/v2"
 
 _ERR_TYPE = "reference artifact promotion type is invalid"
 _ERR_SCHEMA_VERSION = "reference artifact promotion schema version is unsupported"
 _ERR_JOIN = "reference artifact promotion join is invalid"
 _ERR_ARTIFACT = "reference artifact promotion source artifact is invalid"
+_ERR_BINDING = "reference artifact promotion trusted binding is invalid"
 _ERR_PROVENANCE = (
     "reference artifact promotion source provenance could not be verified"
 )
@@ -176,10 +178,23 @@ def _promotion_identity(
 
     Binds schema, join_id, receipt hash, source artifact_id, source
     manifest_id, trusted raw/normalized/uncompressed/header/ordered-row
-    hashes, report date, knowledge time, and the fixed promoted acquisition
-    mode/readiness/actionable facts -- no filesystem path, mtime, repr, or
-    runtime identity.
+    hashes, report date, knowledge time, every field of the exact trusted
+    TrustedReferenceAcquisitionBinding this receipt was verified against,
+    and the fixed promoted acquisition mode/readiness/actionable facts --
+    no filesystem path, mtime, repr, or runtime identity.
+
+    Content-binding the trusted binding itself (not merely the receipt it
+    produced) is deliberate: the binding is a local trust-root input, not
+    something independently authenticated by the receipt's own bytes. A
+    still-individually-valid change to any binding field (for example
+    widening ``cutoff``) must therefore produce a different promotion_id
+    rather than silently redefining the trust boundary under the same
+    identity.
     """
+
+    binding = join.receipt.binding
+    if type(binding) is not TrustedReferenceAcquisitionBinding:
+        raise ReferenceArtifactPromotionError(_ERR_BINDING)
 
     return {
         "schema_version": REFERENCE_ARTIFACT_PROMOTION_SCHEMA_VERSION,
@@ -194,6 +209,13 @@ def _promotion_identity(
         "ordered_row_digest": join.parsed.ordered_row_digest,
         "report_date": verified_report_date,
         "knowledge_time": knowledge_time,
+        "trusted_binding_expected_receipt_sha256": binding.expected_receipt_sha256,
+        "trusted_binding_expected_raw_sha256": binding.expected_raw_sha256,
+        "trusted_binding_allowed_bucket": binding.allowed_bucket,
+        "trusted_binding_target_report_date": binding.target_report_date,
+        "trusted_binding_not_before": binding.not_before,
+        "trusted_binding_cutoff": binding.cutoff,
+        "trusted_binding_trusted_acquirer_id": binding.trusted_acquirer_id,
         "promoted_acquisition_mode": AcquisitionMode.TRUSTED_PINNED_GCS_RECEIPT,
         "promoted_readiness": ReferenceReadiness.POINT_IN_TIME_VERIFIED,
         "actionable": False,
