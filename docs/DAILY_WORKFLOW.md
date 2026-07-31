@@ -149,7 +149,16 @@ and returns one content-addressed `COMPLETE` or sanitized `FAILED` result
 retaining only the exact verified prefix of artifacts produced before
 termination -- never exception text, credentials, URLs, or a source-provided
 message. It still contains no persistence, notification, broker order, or
-paper-ledger registration capability. The next bounded milestone is wiring
-create-once local persistence, paper-ledger registration, and Telegram
-delivery around an accepted terminal result -- that wiring does not exist
-yet.
+paper-ledger registration capability. The restart-safe local publication
+layer around it is now implemented too: `publish_promoted_operational_result`/
+`run_and_publish_promoted_operational_service` (see
+docs/PROMOTED_OPERATIONAL_PERSISTENCE.md) derive one immutable advisory for
+every `COMPLETE`/`FAILED` result, derive and create-once register a paper
+trade only for a singular `COMPLETE` `PAPER_BUY`, publish every side effect
+idempotently (advisory, then registration, then terminal record last), and
+replay an existing sealed terminal without ever touching the clock, either
+source property, or either acquisition method again. Local advisory
+creation is not Telegram delivery and grants no notification or execution
+authority. The next bounded milestone is explicitly authorized Telegram
+delivery and GCP job wiring around an accepted terminal result -- that
+wiring does not exist yet.
