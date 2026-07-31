@@ -138,7 +138,18 @@ rationale and cancellation conditions, canonical `QUOTE:`/`ALLOCATION:` veto
 coverage, and a human-readable advisory that always opens with `PAPER
 RESEARCH ONLY — MANUAL REVIEW REQUIRED — DO NOT AUTO-EXECUTE`; more than one
 allocated outcome is rejected as an integrity error, and the package still
-cannot place an order, notify, or persist. The next bounded milestone is the
-operational runner that acquires Kite quotes, reads real portfolio state,
-persists terminal state, and sends paper notifications -- that runner does
-not exist yet.
+cannot place an order, notify, or persist. The restart-neutral runner core
+that composes all four pure boundaries is now implemented too:
+`execute_promoted_operational_run` (see docs/PROMOTED_OPERATIONAL_RUNNER.md)
+binds one exact quote-gate spec, allocation policy, expected quote/portfolio
+source identity, and a Kite-safe quote-chunk ceiling, acquires only exact
+read-only inputs through two injected ports plus an injected clock, runs the
+existing quote-gate -> allocation -> decision-package chain exactly once,
+and returns one content-addressed `COMPLETE` or sanitized `FAILED` result
+retaining only the exact verified prefix of artifacts produced before
+termination -- never exception text, credentials, URLs, or a source-provided
+message. It still contains no persistence, notification, broker order, or
+paper-ledger registration capability. The next bounded milestone is wiring
+create-once local persistence, paper-ledger registration, and Telegram
+delivery around an accepted terminal result -- that wiring does not exist
+yet.
