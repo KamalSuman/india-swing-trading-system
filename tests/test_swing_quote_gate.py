@@ -6,6 +6,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from india_swing.market_data.models import FullQuoteBatch, KiteDepthLevel, KiteFullQuote
+from india_swing.signals import quote_quality
 from india_swing.signals.proposal_batch import assemble_swing_proposal_batch
 from india_swing.signals.quote_gate import (
     SwingQuoteGateBatch,
@@ -234,6 +235,36 @@ class SwingQuoteGateBatchTests(unittest.TestCase):
             self.assertFalse(outcome.execution_eligible)
         self.assertFalse(gate_batch.execution_eligible)
         gate_batch.verify_content_identity()
+
+    def test_extracted_quote_quality_evaluator_matches_legacy_common_reasons_and_spread(
+        self,
+    ) -> None:
+        quote_batch = self._happy_batch()
+        window = self.proposal_a.entry_window
+        quote_a = quote_batch.quotes[0]
+        policy = SwingQuoteGatePolicy()
+
+        result = quote_quality.evaluate_quote_quality(
+            quote=quote_a,
+            expected_listing_key=f"NSE:{self.proposal_a.symbol}",
+            decision_not_before=window.earliest_entry_at,
+            decision_deadline=window.entry_expires_at,
+            evaluated_at=self.evaluated_at,
+            maximum_quote_age_seconds=policy.maximum_quote_age_seconds,
+            maximum_last_trade_age_seconds=policy.maximum_last_trade_age_seconds,
+            maximum_spread_bps=policy.maximum_spread_bps,
+        )
+
+        gate_batch = assemble_swing_quote_gate_batch(
+            proposal_batch=self.proposal_batch,
+            quote_batch=quote_batch,
+            evaluated_at=self.evaluated_at,
+        )
+        legacy_outcome = gate_batch.outcomes[0]
+
+        self.assertEqual(result.reason_codes, ())
+        self.assertEqual(legacy_outcome.reason_codes, ())
+        self.assertEqual(result.observed_spread_bps, legacy_outcome.observed_spread_bps)
 
     def test_batch_ids_are_deterministic(self) -> None:
         quote_batch = self._happy_batch()

@@ -10,6 +10,7 @@ from india_swing.market_data.models import FullQuoteBatch, KiteFullQuote
 
 from .deterministic_swing import SwingTradeLevels, calculate_swing_trade_levels
 from .proposal_batch import SwingProposalBatch, SwingTechnicalProposal
+from .quote_quality import QuoteQualityError, evaluate_quote_quality
 
 
 ZERO = Decimal("0")
@@ -102,47 +103,23 @@ def _evaluate_quote_gate(
 
     window = proposal.entry_window
     levels = proposal.levels
-    reasons: set[str] = set()
 
-    if evaluated_at < window.earliest_entry_at:
-        reasons.add(SwingQuoteGateReason.ENTRY_WINDOW_NOT_OPEN.value)
-    if evaluated_at > window.entry_expires_at:
-        reasons.add(SwingQuoteGateReason.ENTRY_WINDOW_EXPIRED.value)
+    try:
+        quality = evaluate_quote_quality(
+            quote=quote,
+            expected_listing_key=f"NSE:{proposal.symbol}",
+            decision_not_before=window.earliest_entry_at,
+            decision_deadline=window.entry_expires_at,
+            evaluated_at=evaluated_at,
+            maximum_quote_age_seconds=policy.maximum_quote_age_seconds,
+            maximum_last_trade_age_seconds=policy.maximum_last_trade_age_seconds,
+            maximum_spread_bps=policy.maximum_spread_bps,
+        )
+    except QuoteQualityError as exc:
+        raise SwingQuoteGateError(str(exc)) from None
 
-    if (
-        quote.exchange_timestamp < window.earliest_entry_at
-        or quote.exchange_timestamp > window.entry_expires_at
-    ):
-        reasons.add(SwingQuoteGateReason.QUOTE_OUTSIDE_ENTRY_WINDOW.value)
-    quote_age_seconds = (evaluated_at - quote.exchange_timestamp).total_seconds()
-    if quote_age_seconds < 0 or quote_age_seconds > policy.maximum_quote_age_seconds:
-        reasons.add(SwingQuoteGateReason.QUOTE_STALE.value)
-
-    if quote.last_trade_time is None:
-        reasons.add(SwingQuoteGateReason.LAST_TRADE_TIME_MISSING.value)
-    else:
-        if (
-            quote.last_trade_time < window.earliest_entry_at
-            or quote.last_trade_time > window.entry_expires_at
-        ):
-            reasons.add(SwingQuoteGateReason.LAST_TRADE_OUTSIDE_ENTRY_WINDOW.value)
-        last_trade_age_seconds = (evaluated_at - quote.last_trade_time).total_seconds()
-        if (
-            last_trade_age_seconds < 0
-            or last_trade_age_seconds > policy.maximum_last_trade_age_seconds
-        ):
-            reasons.add(SwingQuoteGateReason.LAST_TRADE_STALE.value)
-
-    observed_spread_bps = quote.spread_bps
-    if not quote.has_two_sided_depth:
-        reasons.add(SwingQuoteGateReason.TWO_SIDED_DEPTH_MISSING.value)
-    if observed_spread_bps is None:
-        reasons.add(SwingQuoteGateReason.SPREAD_UNAVAILABLE.value)
-    elif observed_spread_bps > policy.maximum_spread_bps:
-        reasons.add(SwingQuoteGateReason.SPREAD_ABOVE_POLICY_MAX.value)
-
-    if quote.at_lower_circuit or quote.at_upper_circuit:
-        reasons.add(SwingQuoteGateReason.CIRCUIT_LOCKED.value)
+    reasons: set[str] = set(quality.reason_codes)
+    observed_spread_bps = quality.observed_spread_bps
 
     if not (levels.entry_low <= quote.last_price <= levels.entry_high):
         reasons.add(SwingQuoteGateReason.LAST_PRICE_OUTSIDE_ENTRY_RANGE.value)

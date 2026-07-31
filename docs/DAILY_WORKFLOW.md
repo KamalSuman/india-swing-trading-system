@@ -110,7 +110,16 @@ exact `PromotedResearchRunManifest` and materializes a durable, restart-safe
 matches the selected research intents (see
 docs/PROMOTED_OPERATIONAL_PREPARATION.md). It deliberately stops at exact
 quote keys and lineage -- it does not acquire a quote, create a
-`SwingProposalBatch`, or grant actionability. The next bounded milestone is
-turning that operational preparation into the already-built paper-only
-operational quote/decision job at the next session's entry window -- that
-translation does not exist yet.
+`SwingProposalBatch`, or grant actionability. The next increment is now
+implemented too: `evaluate_promoted_operational_quote_gate` (see
+docs/PROMOTED_OPERATIONAL_QUOTES.md) binds one exact operational
+preparation to one already-acquired, exact `FullQuoteBatch` and produces
+one PASS/VETO outcome per retained candidate using the same
+proposal-independent quote-quality checks the legacy Swing quote gate uses,
+plus promoted-intent-native limit/stop/target/tick checks. It still only
+evaluates quotes -- it does not acquire a quote, rank a candidate, size a
+position, produce a BUY decision, notify, register a paper trade, or
+execute. The next bounded milestone is the operational runner that acquires
+Kite quotes, reads portfolio state, applies ranking/sizing/risk, persists
+terminal state, and sends paper notifications -- that runner does not exist
+yet.
