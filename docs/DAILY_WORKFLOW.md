@@ -128,7 +128,17 @@ position, research-liquidity, and top-of-book constraints, reusing the
 accepted `SwingPortfolioSnapshot`/`SwingPortfolioSizingPolicy` types
 unchanged; operational quantity can only stay equal to or shrink from the
 retained research quantity, and it still produces no BUY decision,
-notification, persistence, or execution authority. The next bounded
-milestone is the operational runner that acquires Kite quotes, reads real
-portfolio state, persists terminal state, and sends paper notifications --
-that runner does not exist yet.
+notification, persistence, or execution authority. The fourth and final
+pure boundary before a runner exists is now implemented too:
+`assemble_promoted_operational_decision_package` (see
+docs/PROMOTED_OPERATIONAL_DECISIONS.md) consumes one exact allocation batch
+and produces exactly one content-addressed `PAPER_BUY`/`NO_TRADE` decision
+package with complete quantity-cap evidence, deterministically replayed
+rationale and cancellation conditions, canonical `QUOTE:`/`ALLOCATION:` veto
+coverage, and a human-readable advisory that always opens with `PAPER
+RESEARCH ONLY — MANUAL REVIEW REQUIRED — DO NOT AUTO-EXECUTE`; more than one
+allocated outcome is rejected as an integrity error, and the package still
+cannot place an order, notify, or persist. The next bounded milestone is the
+operational runner that acquires Kite quotes, reads real portfolio state,
+persists terminal state, and sends paper notifications -- that runner does
+not exist yet.

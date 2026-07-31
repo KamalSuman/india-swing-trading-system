@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass, field, fields
 from decimal import ROUND_FLOOR, Decimal
 from enum import Enum
+from typing import NamedTuple
 
 from india_swing.identity import content_id
 from india_swing.promoted_operational_quote_gate import (
@@ -55,6 +56,9 @@ PROMOTED_OPERATIONAL_ALLOCATION_OUTCOME_SCHEMA_VERSION = (
 PROMOTED_OPERATIONAL_ALLOCATION_BATCH_SCHEMA_VERSION = (
     "promoted-operational-allocation-batch/v1"
 )
+PROMOTED_OPERATIONAL_ALLOCATION_EVIDENCE_SCHEMA_VERSION = (
+    "promoted-operational-allocation-evidence/v1"
+)
 
 
 class PromotedOperationalAllocationError(ValueError):
@@ -71,6 +75,7 @@ _ERR_OUTCOME = "promoted operational allocation outcome is invalid"
 _ERR_COVERAGE = "promoted operational allocation coverage is invalid"
 _ERR_PORTFOLIO = "promoted operational allocation portfolio snapshot is invalid"
 _ERR_REPLAY = "promoted operational allocation could not replay"
+_ERR_EVIDENCE = "promoted operational allocation evidence is invalid"
 
 
 class PromotedOperationalAllocationDisposition(str, Enum):
@@ -342,27 +347,46 @@ def _floor_units(value: Decimal) -> int:
     return int(value.to_integral_value(rounding=ROUND_FLOOR))
 
 
-def _evaluate_allocation(
+class _AllocationCeilings(NamedTuple):
+    """Every independently-derived allocation quantity ceiling plus the
+    feasible quantity before any non-quantity veto is applied. Shared
+    unchanged between ``_evaluate_allocation`` and the allocation-evidence
+    builder so evidence can never diverge from the actual calculation.
+
+    ``feasible_quantity`` is mathematically identical to allocation's
+    original single combined ``min(per_trade_budget, remaining_open_risk) /
+    loss_per_share`` risk cap: for any positive ``c``,
+    ``floor(min(a, b) / c) == min(floor(a / c), floor(b / c))``, so
+    splitting that one combined ceiling into the two separate
+    ``per_trade_risk_quantity``/``total_open_risk_quantity`` ceilings named
+    below and taking their min alongside every other ceiling reproduces the
+    exact same feasible quantity as before.
+    """
+
+    research_quantity: int
+    per_trade_risk_quantity: int
+    total_open_risk_quantity: int
+    position_notional_quantity: int
+    gross_exposure_quantity: int
+    cash_quantity: int
+    ask_depth_quantity: int
+    feasible_quantity: int
+    loss_per_share: Decimal
+    reward_per_share: Decimal
+    net_reward_risk: Decimal
+
+
+def _compute_allocation_ceilings(
     quote_outcome: PromotedOperationalQuoteOutcome,
     portfolio_context: PromotedOperationalPortfolioContext,
     allocation_policy: PromotedOperationalAllocationPolicy,
     state_before: PromotedOperationalAllocationState,
-) -> tuple[
-    PromotedOperationalAllocationDisposition,
-    tuple[str, ...],
-    int,
-    Decimal,
-    Decimal,
-    Decimal,
-    Decimal,
-    PromotedOperationalAllocationState,
-]:
-    """Pure, replay-verifiable allocation of one exact PASS candidate.
-
-    Never changes quantity, limit, stop, target, tick, cost buffer, or
-    holding period retained inside the research intent. All Decimal
-    arithmetic runs inside an explicit local context so the result never
-    depends on the caller's ambient global Decimal precision/rounding.
+) -> _AllocationCeilings:
+    """Pure, replay-verifiable computation of every allocation quantity
+    ceiling and the feasible quantity before any non-quantity veto. All
+    Decimal arithmetic runs inside an explicit local context so the result
+    never depends on the caller's ambient global Decimal precision/
+    rounding.
     """
 
     candidate = quote_outcome.candidate
@@ -391,33 +415,120 @@ def _evaluate_allocation(
         maximum_open_risk = capital * policy.maximum_total_open_risk_fraction
         maximum_position_notional = capital * policy.maximum_position_notional_fraction
         maximum_gross_exposure = capital * policy.maximum_gross_exposure_fraction
-        daily_loss_limit = capital * policy.maximum_daily_loss_fraction
-        pilot_drawdown_limit = capital * policy.maximum_pilot_drawdown_fraction
         remaining_open_risk = max(ZERO, maximum_open_risk - state_before.open_risk)
         remaining_gross_exposure = max(
             ZERO, maximum_gross_exposure - state_before.gross_exposure
         )
 
         research_quantity = entry_order.quantity
-        risk_quantity = _floor_units(
-            min(per_trade_budget, remaining_open_risk) / loss_per_share
+        per_trade_risk_quantity = _floor_units(per_trade_budget / loss_per_share)
+        total_open_risk_quantity = _floor_units(remaining_open_risk / loss_per_share)
+        position_notional_quantity = _floor_units(
+            maximum_position_notional / reference_entry_price
         )
-        position_quantity = _floor_units(maximum_position_notional / reference_entry_price)
-        gross_quantity = _floor_units(remaining_gross_exposure / reference_entry_price)
+        gross_exposure_quantity = _floor_units(
+            remaining_gross_exposure / reference_entry_price
+        )
         cash_quantity = _floor_units(
             state_before.cash_available / (reference_entry_price + cost_buffer)
         )
-        ask_quantity_cap = _floor_units(
+        ask_depth_quantity = _floor_units(
             Decimal(_top_ask_quantity(quote_outcome)) * policy.maximum_top_ask_participation
         )
-        quantity = min(
+        feasible_quantity = min(
             research_quantity,
-            risk_quantity,
-            position_quantity,
-            gross_quantity,
+            per_trade_risk_quantity,
+            total_open_risk_quantity,
+            position_notional_quantity,
+            gross_exposure_quantity,
             cash_quantity,
-            ask_quantity_cap,
+            ask_depth_quantity,
         )
+
+        return _AllocationCeilings(
+            research_quantity=research_quantity,
+            per_trade_risk_quantity=per_trade_risk_quantity,
+            total_open_risk_quantity=total_open_risk_quantity,
+            position_notional_quantity=position_notional_quantity,
+            gross_exposure_quantity=gross_exposure_quantity,
+            cash_quantity=cash_quantity,
+            ask_depth_quantity=ask_depth_quantity,
+            feasible_quantity=feasible_quantity,
+            loss_per_share=loss_per_share,
+            reward_per_share=reward_per_share,
+            net_reward_risk=net_reward_risk,
+        )
+
+
+_CEILING_CODE_RESEARCH_QUANTITY = "RESEARCH_QUANTITY"
+_CEILING_CODE_PER_TRADE_RISK = "PER_TRADE_RISK"
+_CEILING_CODE_TOTAL_OPEN_RISK = "TOTAL_OPEN_RISK"
+_CEILING_CODE_POSITION_NOTIONAL = "POSITION_NOTIONAL"
+_CEILING_CODE_GROSS_EXPOSURE = "GROSS_EXPOSURE"
+_CEILING_CODE_CASH = "CASH"
+_CEILING_CODE_ASK_DEPTH_PARTICIPATION = "ASK_DEPTH_PARTICIPATION"
+
+
+def _binding_ceiling_codes(ceilings: _AllocationCeilings) -> tuple[str, ...]:
+    """Canonical, sorted, unique codes for every ceiling exactly equal to
+    the feasible quantity -- the ceiling(s) that actually bound it. More
+    than one code can tie."""
+
+    pairs = (
+        (_CEILING_CODE_RESEARCH_QUANTITY, ceilings.research_quantity),
+        (_CEILING_CODE_PER_TRADE_RISK, ceilings.per_trade_risk_quantity),
+        (_CEILING_CODE_TOTAL_OPEN_RISK, ceilings.total_open_risk_quantity),
+        (_CEILING_CODE_POSITION_NOTIONAL, ceilings.position_notional_quantity),
+        (_CEILING_CODE_GROSS_EXPOSURE, ceilings.gross_exposure_quantity),
+        (_CEILING_CODE_CASH, ceilings.cash_quantity),
+        (_CEILING_CODE_ASK_DEPTH_PARTICIPATION, ceilings.ask_depth_quantity),
+    )
+    return tuple(
+        sorted(code for code, value in pairs if value == ceilings.feasible_quantity)
+    )
+
+
+def _evaluate_allocation(
+    quote_outcome: PromotedOperationalQuoteOutcome,
+    portfolio_context: PromotedOperationalPortfolioContext,
+    allocation_policy: PromotedOperationalAllocationPolicy,
+    state_before: PromotedOperationalAllocationState,
+) -> tuple[
+    PromotedOperationalAllocationDisposition,
+    tuple[str, ...],
+    int,
+    Decimal,
+    Decimal,
+    Decimal,
+    Decimal,
+    PromotedOperationalAllocationState,
+]:
+    """Pure, replay-verifiable allocation of one exact PASS candidate.
+
+    Never changes quantity, limit, stop, target, tick, cost buffer, or
+    holding period retained inside the research intent. Shares its quantity
+    ceilings with ``_compute_allocation_ceilings`` (also used by the
+    allocation-evidence builder) so evidence can never diverge from the
+    actual allocation calculation. All Decimal arithmetic runs inside an
+    explicit local context so the result never depends on the caller's
+    ambient global Decimal precision/rounding.
+    """
+
+    candidate = quote_outcome.candidate
+    entry_order = candidate.research_intent.evaluation_intent.entry_order
+    ceilings = _compute_allocation_ceilings(
+        quote_outcome, portfolio_context, allocation_policy, state_before
+    )
+
+    with decimal.localcontext() as ctx:
+        ctx.prec = 50
+        ctx.rounding = decimal.ROUND_HALF_EVEN
+
+        policy = allocation_policy.policy
+        portfolio = portfolio_context.portfolio
+        capital = portfolio.capital
+        daily_loss_limit = capital * policy.maximum_daily_loss_fraction
+        pilot_drawdown_limit = capital * policy.maximum_pilot_drawdown_fraction
 
         reasons: set[str] = set()
         if candidate.listing_key in state_before.open_listing_keys:
@@ -439,25 +550,26 @@ def _evaluate_allocation(
             reasons.add(
                 PromotedOperationalAllocationReason.MAX_NEW_POSITIONS_PER_RUN_REACHED.value
             )
-        if net_reward_risk < policy.minimum_net_reward_risk:
+        if ceilings.net_reward_risk < policy.minimum_net_reward_risk:
             reasons.add(
                 PromotedOperationalAllocationReason.NET_REWARD_RISK_BELOW_MINIMUM.value
             )
-        if _floor_units(per_trade_budget / loss_per_share) < 1:
+        if ceilings.per_trade_risk_quantity < 1:
             reasons.add(PromotedOperationalAllocationReason.PER_TRADE_RISK_TOO_SMALL.value)
-        if _floor_units(remaining_open_risk / loss_per_share) < 1:
+        if ceilings.total_open_risk_quantity < 1:
             reasons.add(PromotedOperationalAllocationReason.TOTAL_OPEN_RISK_EXHAUSTED.value)
-        if position_quantity < 1:
+        if ceilings.position_notional_quantity < 1:
             reasons.add(
                 PromotedOperationalAllocationReason.POSITION_NOTIONAL_CAP_TOO_SMALL.value
             )
-        if gross_quantity < 1:
+        if ceilings.gross_exposure_quantity < 1:
             reasons.add(PromotedOperationalAllocationReason.GROSS_EXPOSURE_EXHAUSTED.value)
-        if cash_quantity < 1:
+        if ceilings.cash_quantity < 1:
             reasons.add(PromotedOperationalAllocationReason.CASH_EXHAUSTED.value)
-        if ask_quantity_cap < 1:
+        if ceilings.ask_depth_quantity < 1:
             reasons.add(PromotedOperationalAllocationReason.ASK_DEPTH_CAP_TOO_SMALL.value)
 
+        quantity = ceilings.feasible_quantity
         if reasons or quantity < 1:
             if quantity < 1 and not reasons:
                 raise PromotedOperationalAllocationError(_ERR_QUOTE)
@@ -468,13 +580,15 @@ def _evaluate_allocation(
                 ZERO,
                 ZERO,
                 ZERO,
-                net_reward_risk,
+                ceilings.net_reward_risk,
                 state_before,
             )
 
+        reference_entry_price = quote_outcome.reference_entry_price
+        cost_buffer = candidate.research_intent.estimated_cost_buffer
         entry_notional = reference_entry_price * quantity
         estimated_round_trip_cost = cost_buffer * quantity
-        planned_max_loss = loss_per_share * quantity
+        planned_max_loss = ceilings.loss_per_share * quantity
         state_after = PromotedOperationalAllocationState(
             cash_available=(
                 state_before.cash_available - entry_notional - estimated_round_trip_cost
@@ -492,7 +606,7 @@ def _evaluate_allocation(
             entry_notional,
             estimated_round_trip_cost,
             planned_max_loss,
-            net_reward_risk,
+            ceilings.net_reward_risk,
             state_after,
         )
 
@@ -654,6 +768,140 @@ class PromotedOperationalAllocationOutcome:
     @property
     def execution_eligible(self) -> bool:
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class PromotedOperationalAllocationEvidence:
+    """Replayable quantity-ceiling and reward/risk evidence for one exact
+    ``PromotedOperationalAllocationOutcome``, derived through the identical
+    calculation path ``_evaluate_allocation`` itself uses
+    (``_compute_allocation_ceilings``) rather than a divergent copy.
+    Produced for either disposition; a decision built on top of this module
+    only uses evidence for an ``ALLOCATED`` outcome.
+    """
+
+    allocation_outcome_id: str
+    outcome: PromotedOperationalAllocationOutcome
+    research_quantity_ceiling: int
+    per_trade_risk_quantity_ceiling: int
+    total_open_risk_quantity_ceiling: int
+    position_notional_quantity_ceiling: int
+    gross_exposure_quantity_ceiling: int
+    cash_quantity_ceiling: int
+    ask_depth_quantity_ceiling: int
+    feasible_quantity: int
+    operational_quantity: int
+    loss_per_share: Decimal
+    reward_per_share: Decimal
+    operational_net_reward_risk: Decimal
+    binding_ceiling_codes: tuple[str, ...]
+    evidence_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._verify()
+        object.__setattr__(self, "evidence_id", self._calculated_id())
+
+    def _verify(self) -> None:
+        if type(self.outcome) is not PromotedOperationalAllocationOutcome:
+            raise PromotedOperationalAllocationError(_ERR_TYPE)
+        self.outcome.verify_content_identity()
+        if self.allocation_outcome_id != self.outcome.allocation_outcome_id:
+            raise PromotedOperationalAllocationError(_ERR_EVIDENCE)
+
+        ceilings = _compute_allocation_ceilings(
+            self.outcome.quote_outcome,
+            self.outcome.portfolio_context,
+            self.outcome.allocation_policy,
+            self.outcome.state_before,
+        )
+        for actual, expected in (
+            (self.research_quantity_ceiling, ceilings.research_quantity),
+            (self.per_trade_risk_quantity_ceiling, ceilings.per_trade_risk_quantity),
+            (self.total_open_risk_quantity_ceiling, ceilings.total_open_risk_quantity),
+            (self.position_notional_quantity_ceiling, ceilings.position_notional_quantity),
+            (self.gross_exposure_quantity_ceiling, ceilings.gross_exposure_quantity),
+            (self.cash_quantity_ceiling, ceilings.cash_quantity),
+            (self.ask_depth_quantity_ceiling, ceilings.ask_depth_quantity),
+            (self.feasible_quantity, ceilings.feasible_quantity),
+        ):
+            if type(actual) is not int or actual != expected:
+                raise PromotedOperationalAllocationError(_ERR_EVIDENCE)
+        if (
+            type(self.operational_quantity) is not int
+            or self.operational_quantity != self.outcome.operational_quantity
+        ):
+            raise PromotedOperationalAllocationError(_ERR_EVIDENCE)
+        for actual, expected in (
+            (self.loss_per_share, ceilings.loss_per_share),
+            (self.reward_per_share, ceilings.reward_per_share),
+            (self.operational_net_reward_risk, ceilings.net_reward_risk),
+        ):
+            if type(actual) is not Decimal or actual != expected:
+                raise PromotedOperationalAllocationError(_ERR_EVIDENCE)
+        if self.operational_net_reward_risk != self.outcome.operational_net_reward_risk:
+            raise PromotedOperationalAllocationError(_ERR_EVIDENCE)
+        expected_codes = _binding_ceiling_codes(ceilings)
+        if (
+            type(self.binding_ceiling_codes) is not tuple
+            or self.binding_ceiling_codes != expected_codes
+        ):
+            raise PromotedOperationalAllocationError(_ERR_EVIDENCE)
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                "schema": PROMOTED_OPERATIONAL_ALLOCATION_EVIDENCE_SCHEMA_VERSION,
+                **{
+                    value.name: getattr(self, value.name)
+                    for value in fields(self)
+                    if value.name != "evidence_id"
+                },
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        self._verify()
+        if self.evidence_id != self._calculated_id():
+            raise PromotedOperationalAllocationError(_ERR_EVIDENCE)
+
+
+def build_promoted_operational_allocation_evidence(
+    outcome: PromotedOperationalAllocationOutcome,
+) -> PromotedOperationalAllocationEvidence:
+    """Pure builder: derive one exact ``PromotedOperationalAllocationEvidence``
+    from one already-verified ``PromotedOperationalAllocationOutcome``,
+    through the identical calculation path allocation itself used. Never
+    changes an existing allocation public type, schema, ID, quantity, or
+    reason.
+    """
+
+    if type(outcome) is not PromotedOperationalAllocationOutcome:
+        raise PromotedOperationalAllocationError(_ERR_TYPE)
+    outcome.verify_content_identity()
+    ceilings = _compute_allocation_ceilings(
+        outcome.quote_outcome,
+        outcome.portfolio_context,
+        outcome.allocation_policy,
+        outcome.state_before,
+    )
+    return PromotedOperationalAllocationEvidence(
+        allocation_outcome_id=outcome.allocation_outcome_id,
+        outcome=outcome,
+        research_quantity_ceiling=ceilings.research_quantity,
+        per_trade_risk_quantity_ceiling=ceilings.per_trade_risk_quantity,
+        total_open_risk_quantity_ceiling=ceilings.total_open_risk_quantity,
+        position_notional_quantity_ceiling=ceilings.position_notional_quantity,
+        gross_exposure_quantity_ceiling=ceilings.gross_exposure_quantity,
+        cash_quantity_ceiling=ceilings.cash_quantity,
+        ask_depth_quantity_ceiling=ceilings.ask_depth_quantity,
+        feasible_quantity=ceilings.feasible_quantity,
+        operational_quantity=outcome.operational_quantity,
+        loss_per_share=ceilings.loss_per_share,
+        reward_per_share=ceilings.reward_per_share,
+        operational_net_reward_risk=ceilings.net_reward_risk,
+        binding_ceiling_codes=_binding_ceiling_codes(ceilings),
+    )
 
 
 @dataclass(frozen=True, slots=True)
