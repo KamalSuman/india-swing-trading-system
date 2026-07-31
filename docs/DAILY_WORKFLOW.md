@@ -119,7 +119,16 @@ proposal-independent quote-quality checks the legacy Swing quote gate uses,
 plus promoted-intent-native limit/stop/target/tick checks. It still only
 evaluates quotes -- it does not acquire a quote, rank a candidate, size a
 position, produce a BUY decision, notify, register a paper trade, or
-execute. The next bounded milestone is the operational runner that acquires
-Kite quotes, reads portfolio state, applies ranking/sizing/risk, persists
-terminal state, and sends paper notifications -- that runner does not exist
-yet.
+execute. The next increment is now implemented too:
+`assemble_promoted_operational_allocation_batch` (see
+docs/PROMOTED_OPERATIONAL_ALLOCATION.md) consumes one exact quote-gate
+batch plus an exact, evidence-bound portfolio context and deterministically
+allocates only PASS candidates under current cash, risk, exposure,
+position, research-liquidity, and top-of-book constraints, reusing the
+accepted `SwingPortfolioSnapshot`/`SwingPortfolioSizingPolicy` types
+unchanged; operational quantity can only stay equal to or shrink from the
+retained research quantity, and it still produces no BUY decision,
+notification, persistence, or execution authority. The next bounded
+milestone is the operational runner that acquires Kite quotes, reads real
+portfolio state, persists terminal state, and sends paper notifications --
+that runner does not exist yet.

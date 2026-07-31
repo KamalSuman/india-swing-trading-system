@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import decimal
 import io
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -706,6 +707,25 @@ class KiteFullQuoteAdapterTests(unittest.TestCase):
 
         batch.verify_content_identity()
         batch.verify_content_identity()
+
+    def test_mid_and_spread_are_ambient_decimal_context_independent(self) -> None:
+        client = FakeKiteClient(quotes={NSE_INFY: quote_row()})
+        batch = adapter(client).fetch_full_quotes((NSE_INFY,))
+        quote = batch.quotes[0]
+
+        normal_mid = quote.mid_price
+        normal_spread = quote.spread_bps
+        self.assertIsNotNone(normal_mid)
+        self.assertIsNotNone(normal_spread)
+
+        original_precision = decimal.getcontext().prec
+        decimal.getcontext().prec = 1
+        try:
+            self.assertEqual(quote.mid_price, normal_mid)
+            self.assertEqual(quote.spread_bps, normal_spread)
+        finally:
+            decimal.getcontext().prec = original_precision
+        self.assertEqual(decimal.getcontext().prec, original_precision)
 
     def test_captures_request_and_observed_clocks_in_order_and_utc_normalized(
         self,

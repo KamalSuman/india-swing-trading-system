@@ -375,6 +375,26 @@ class PromotedOperationalQuoteGateTests(unittest.TestCase):
         self.assertFalse(gate_batch.execution_eligible)
         gate_batch.verify_content_identity()
 
+    def test_quote_gate_identity_replay_is_ambient_decimal_context_independent(
+        self,
+    ) -> None:
+        preparation = self._preparation()
+        spec = self._spec(preparation)
+        quote_batch = self._happy_quote_batch(preparation)
+        gate_batch = evaluate_promoted_operational_quote_gate(
+            spec=spec, quote_batch=quote_batch, evaluated_at=_EVALUATED_AT
+        )
+        gate_batch.verify_content_identity()
+
+        original_precision = decimal.getcontext().prec
+        decimal.getcontext().prec = 1
+        try:
+            gate_batch.verify_content_identity()
+        finally:
+            decimal.getcontext().prec = original_precision
+        self.assertEqual(decimal.getcontext().prec, original_precision)
+        gate_batch.verify_content_identity()
+
     def test_quality_and_intent_native_vetoes_accumulate_deterministically(self) -> None:
         preparation = self._preparation()
         spec = self._spec(preparation)

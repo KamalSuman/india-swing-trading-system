@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import decimal
 import re
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, time, timezone
@@ -679,7 +680,10 @@ class KiteFullQuote:
         best_ask = self.best_ask
         if best_bid is None or best_ask is None:
             return None
-        return (best_bid + best_ask) / Decimal("2")
+        with decimal.localcontext() as ctx:
+            ctx.prec = 28
+            ctx.rounding = decimal.ROUND_HALF_EVEN
+            return (best_bid + best_ask) / Decimal("2")
 
     @property
     def spread_bps(self) -> Decimal | None:
@@ -688,7 +692,10 @@ class KiteFullQuote:
         mid = self.mid_price
         if best_bid is None or best_ask is None or mid is None:
             return None
-        return (best_ask - best_bid) / mid * Decimal("10000")
+        with decimal.localcontext() as ctx:
+            ctx.prec = 28
+            ctx.rounding = decimal.ROUND_HALF_EVEN
+            return (best_ask - best_bid) / mid * Decimal("10000")
 
     @property
     def at_lower_circuit(self) -> bool:
