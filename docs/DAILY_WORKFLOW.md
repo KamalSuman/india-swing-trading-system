@@ -103,7 +103,14 @@ from an already-published graph's two exact roots; and
 those roots directly from one exact `graph_manifest_id` and durably binds
 both terminal manifests together, so a single restart-safe command chain now
 runs end to end from published graph evidence to a bound paper research
-result. The next bounded milestone is turning one durable
-`PromotedResearchRunManifest`'s selected research intents into the
-already-built paper-only operational quote/decision job at the next
-session's entry window -- that translation does not exist yet.
+result. The first research-to-paper-operation seam is now implemented too:
+`prepare_and_publish`/`india-swing-promoted-operational-prepare` replays one
+exact `PromotedResearchRunManifest` and materializes a durable, restart-safe
+`PromotedOperationalPreparationManifest` whose candidate coverage exactly
+matches the selected research intents (see
+docs/PROMOTED_OPERATIONAL_PREPARATION.md). It deliberately stops at exact
+quote keys and lineage -- it does not acquire a quote, create a
+`SwingProposalBatch`, or grant actionability. The next bounded milestone is
+turning that operational preparation into the already-built paper-only
+operational quote/decision job at the next session's entry window -- that
+translation does not exist yet.
