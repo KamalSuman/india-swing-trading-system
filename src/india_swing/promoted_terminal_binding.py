@@ -18,7 +18,6 @@ from datetime import date, datetime, timedelta
 
 from india_swing.identity import content_id
 from india_swing.promoted_operational_persistence import (
-    PromotedOperationalPersistenceError,
     PromotedOperationalTerminalRecord,
     _verify_terminal_matches_spec,
 )
@@ -125,16 +124,16 @@ def build_promoted_operational_terminal_binding_record(
 
     if type(terminal) is not PromotedOperationalTerminalRecord:
         raise PromotedTerminalBindingError(_ERR_TYPE)
-    terminal.verify_content_identity()
     if type(spec) is not PromotedOperationalRunSpec:
         raise PromotedTerminalBindingError(_ERR_TYPE)
-    spec.verify_content_identity()
-    match_failed = False
+    verify_failed = False
     try:
+        terminal.verify_content_identity()
+        spec.verify_content_identity()
         _verify_terminal_matches_spec(terminal, spec)
-    except PromotedOperationalPersistenceError:
-        match_failed = True
-    if match_failed:
+    except Exception:
+        verify_failed = True
+    if verify_failed:
         raise PromotedTerminalBindingError(_ERR_RECORD)
 
     manifest = spec.quote_gate_spec.preparation.manifest
@@ -160,8 +159,15 @@ def promoted_operational_terminal_binding_object_name(
 
     if type(spec) is not PromotedOperationalRunSpec:
         raise PromotedTerminalBindingError(_ERR_TYPE)
-    spec.verify_content_identity()
-    target_session = spec.quote_gate_spec.preparation.manifest.target_session
+    verify_failed = False
+    target_session: date | None = None
+    try:
+        spec.verify_content_identity()
+        target_session = spec.quote_gate_spec.preparation.manifest.target_session
+    except Exception:
+        verify_failed = True
+    if verify_failed or type(target_session) is not date:
+        raise PromotedTerminalBindingError(_ERR_RECORD)
     return f"{_OBJECT_NAME_PREFIX}/{target_session.isoformat()}/{spec.spec_id}.json"
 
 
@@ -171,11 +177,18 @@ def trusted_binding_from_record(
 ) -> TrustedPromotedOperationalTerminalBinding:
     if type(record) is not PromotedOperationalTerminalBindingRecord:
         raise PromotedTerminalBindingError(_ERR_TYPE)
-    record.verify_content_identity()
     if type(spec) is not PromotedOperationalRunSpec:
         raise PromotedTerminalBindingError(_ERR_TYPE)
-    spec.verify_content_identity()
-    manifest = spec.quote_gate_spec.preparation.manifest
+    verify_failed = False
+    manifest: object = None
+    try:
+        record.verify_content_identity()
+        spec.verify_content_identity()
+        manifest = spec.quote_gate_spec.preparation.manifest
+    except Exception:
+        verify_failed = True
+    if verify_failed or manifest is None:
+        raise PromotedTerminalBindingError(_ERR_RECORD)
     if (
         record.spec_id != spec.spec_id
         or record.target_session != manifest.target_session

@@ -109,6 +109,19 @@ class PromotedTerminalBindingObjectReader(Protocol):
         ...
 
 
+class PromotedTerminalBindingControlPlanePreflight(Protocol):
+    """Asks one BUCKET-level question -- is this bucket reachable at all --
+    and nothing else. Returns ``None`` on success and raises on any
+    failure. Never lists objects, never reads or writes any object, and
+    never touches the binding path. A bucket-level not-found is
+    unambiguous by construction, unlike an object-level not-found (which
+    GCS reports identically whether the bucket or the object is missing),
+    so this port exists specifically to answer the question the object
+    read path structurally cannot."""
+
+    def verify_bucket_reachable(self, *, bucket: str) -> None: ...
+
+
 class GoogleCloudStorageTerminalBindingReader:
     """Production PromotedTerminalBindingObjectReader backed by
     google-cloud-storage.
@@ -124,6 +137,34 @@ class GoogleCloudStorageTerminalBindingReader:
         if client is None:
             raise PromotedTerminalBindingControlPlaneError(_ERR_CONTROL_PLANE)
         self._client = client
+
+    def verify_bucket_reachable(self, *, bucket: str) -> None:
+        """Ask exactly one BUCKET-level question: ``client.get_bucket(bucket)``.
+        Never calls ``blob()``, ``download_as_bytes``, ``upload_from_string``,
+        ``reload`` on a blob, or any listing method. A bucket-level
+        not-found is unambiguous by construction, so no message text is
+        ever inspected -- any exception, a missing/non-string ``name``, or
+        a ``name`` mismatch all collapse into the same sanitized error."""
+
+        bucket = _validate_bucket(bucket)
+
+        get_failed = False
+        fetched: object = None
+        try:
+            fetched = self._client.get_bucket(bucket)
+        except Exception:
+            get_failed = True
+        if get_failed:
+            raise PromotedTerminalBindingControlPlaneError(_ERR_CONTROL_PLANE)
+
+        name_failed = False
+        fetched_name: object = None
+        try:
+            fetched_name = fetched.name
+        except Exception:
+            name_failed = True
+        if name_failed or type(fetched_name) is not str or fetched_name != bucket:
+            raise PromotedTerminalBindingControlPlaneError(_ERR_CONTROL_PLANE)
 
     def _validated_read_request(
         self, *, bucket: str, object_name: str, maximum_bytes: int

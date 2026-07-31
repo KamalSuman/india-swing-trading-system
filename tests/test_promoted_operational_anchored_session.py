@@ -13,6 +13,9 @@ from india_swing.paper_trades.store import LocalPaperTradeLedger
 from india_swing.promoted_operational_anchored_session import (
     AnchoredPromotedOperationalSessionState,
     PromotedOperationalAnchoredSessionError,
+    PromotedOperationalBindingUnreadableError,
+    PromotedOperationalControlPlaneUnreachableError,
+    PromotedOperationalManualRecoveryRequiredError,
     run_publish_and_anchor_promoted_operational_session,
 )
 from india_swing.promoted_operational_persistence import (
@@ -46,6 +49,18 @@ def _exploding_sources():
         _runner_tests._FakePortfolioSource(responder=_explode),
         _explode_clock,
     )
+
+
+class _PermissiveRecordingPreflight:
+    """A permissive fake PromotedTerminalBindingControlPlanePreflight:
+    always succeeds and records every call. Used by every test that is not
+    specifically exercising preflight failure."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def verify_bucket_reachable(self, *, bucket: str) -> None:
+        self.calls.append(bucket)
 
 
 class _FakeBindingBackend:
@@ -145,6 +160,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
             _runner_tests._STARTED_AT, _runner_tests._RUN_EVALUATED_AT, _runner_tests._COMPLETED_AT
         )
         backend = _FakeBindingBackend()
+        preflight = _PermissiveRecordingPreflight()
 
         call_order: list[str] = []
         original_terminal_put = self.terminal_store.put
@@ -175,6 +191,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
             binding_bucket="test-bucket",
             binding_writer=backend,
             binding_reader=backend,
+            binding_preflight=preflight,
         )
         self.assertIs(type(result), AnchoredPromotedOperationalSessionState)
         self.assertFalse(result.reused_existing_terminal)
@@ -186,6 +203,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
         self.assertEqual(result.binding_record.expected_terminal_id, result.published.terminal.terminal_id)
         self.assertEqual(result.binding_record.spec_id, spec.spec_id)
         self.assertEqual(result.binding_generation, backend.generations[object_name])
+        self.assertEqual(preflight.calls, ["test-bucket"])
 
     def test_restart_with_sealed_binding_replays_without_clock_source_or_reseal(
         self,
@@ -199,6 +217,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
             _runner_tests._STARTED_AT, _runner_tests._RUN_EVALUATED_AT, _runner_tests._COMPLETED_AT
         )
         backend = _FakeBindingBackend()
+        preflight = _PermissiveRecordingPreflight()
 
         first = run_publish_and_anchor_promoted_operational_session(
             spec=spec,
@@ -211,6 +230,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
             binding_bucket="test-bucket",
             binding_writer=backend,
             binding_reader=backend,
+            binding_preflight=preflight,
         )
         self.assertFalse(first.reused_existing_terminal)
         self.assertEqual(len(backend.writer_calls), 1)
@@ -227,6 +247,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
             binding_bucket="test-bucket",
             binding_writer=backend,
             binding_reader=backend,
+            binding_preflight=preflight,
         )
         self.assertTrue(second.reused_existing_terminal)
         self.assertEqual(second.published.terminal, first.published.terminal)
@@ -249,6 +270,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
             paper_ledger=self.paper_ledger,
         )
         backend = _FakeBindingBackend()
+        preflight = _PermissiveRecordingPreflight()
         exploding_quote_source, exploding_portfolio_source, exploding_clock = _exploding_sources()
         with self.assertRaises(PromotedOperationalAnchoredSessionError):
             run_publish_and_anchor_promoted_operational_session(
@@ -262,6 +284,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
                 binding_bucket="test-bucket",
                 binding_writer=backend,
                 binding_reader=backend,
+                binding_preflight=preflight,
             )
         self.assertEqual(exploding_quote_source.calls, [])
         self.assertEqual(exploding_portfolio_source.calls, 0)
@@ -277,6 +300,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
             other_result, other_advisory, other_registration
         )
         backend = _FakeBindingBackend()
+        preflight = _PermissiveRecordingPreflight()
         record = build_promoted_operational_terminal_binding_record(other_terminal, other_result.spec)
         payload = encode_promoted_operational_terminal_binding_record(record)
         object_name = promoted_operational_terminal_binding_object_name(other_result.spec)
@@ -296,6 +320,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
                 binding_bucket="test-bucket",
                 binding_writer=backend,
                 binding_reader=backend,
+                binding_preflight=preflight,
             )
         self.assertEqual(exploding_quote_source.calls, [])
         self.assertEqual(exploding_portfolio_source.calls, 0)
@@ -304,6 +329,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
         self,
     ) -> None:
         preparation, spec = _runner_tests._run_spec(chunk_size=500)
+        preflight = _PermissiveRecordingPreflight()
 
         class _RaisingReader:
             def read_current(self, **_kwargs):
@@ -326,6 +352,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
                 binding_bucket="test-bucket",
                 binding_writer=backend_writer,
                 binding_reader=_RaisingReader(),
+                binding_preflight=preflight,
             )
             self.fail("expected PromotedOperationalAnchoredSessionError")
         except PromotedOperationalAnchoredSessionError as exc:
@@ -349,6 +376,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
             _runner_tests._STARTED_AT, _runner_tests._RUN_EVALUATED_AT, _runner_tests._COMPLETED_AT
         )
         backend = _FakeBindingBackend(seal_should_fail=True)
+        preflight = _PermissiveRecordingPreflight()
 
         with self.assertRaises(PromotedOperationalAnchoredSessionError):
             run_publish_and_anchor_promoted_operational_session(
@@ -362,6 +390,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
                 binding_bucket="test-bucket",
                 binding_writer=backend,
                 binding_reader=backend,
+                binding_preflight=preflight,
             )
 
         stored_terminal = self.terminal_store.get(spec.spec_id)
@@ -384,6 +413,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
                 binding_bucket="test-bucket",
                 binding_writer=backend,
                 binding_reader=backend,
+                binding_preflight=preflight,
             )
         self.assertEqual(exploding_quote_source.calls, [])
         self.assertEqual(exploding_portfolio_source.calls, 0)
@@ -395,6 +425,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
     ) -> None:
         preparation, spec = _runner_tests._run_spec(chunk_size=500)
         object_name = promoted_operational_terminal_binding_object_name(spec)
+        preflight = _PermissiveRecordingPreflight()
 
         priming_quote_source = _runner_tests._FakeQuoteSource(
             responder=_runner_tests._sorted_quote_responder(preparation)
@@ -443,8 +474,393 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
                 binding_bucket="test-bucket",
                 binding_writer=backend,
                 binding_reader=backend,
+                binding_preflight=preflight,
             )
         self.assertEqual(backend.objects[object_name], conflicting_payload)
+
+    def test_preflight_runs_before_the_binding_load_and_before_any_source_clock_or_local_write(
+        self,
+    ) -> None:
+        preparation, spec = _runner_tests._run_spec(chunk_size=500)
+        call_order: list[str] = []
+
+        class _OrderingPreflight:
+            def verify_bucket_reachable(self, *, bucket: str) -> None:
+                call_order.append("preflight")
+
+        backend = _FakeBindingBackend()
+        original_read_current_optional = backend.read_current_optional
+
+        def _tracking_read_current_optional(**kwargs):
+            call_order.append("binding_load")
+            return original_read_current_optional(**kwargs)
+
+        backend.read_current_optional = _tracking_read_current_optional
+
+        quote_source = _runner_tests._FakeQuoteSource(
+            responder=_runner_tests._sorted_quote_responder(preparation)
+        )
+        portfolio_source = _runner_tests._happy_portfolio_source()
+        clock = _runner_tests._clock(
+            _runner_tests._STARTED_AT, _runner_tests._RUN_EVALUATED_AT, _runner_tests._COMPLETED_AT
+        )
+        run_publish_and_anchor_promoted_operational_session(
+            spec=spec,
+            quote_source=quote_source,
+            portfolio_source=portfolio_source,
+            clock=clock,
+            advisory_outbox=self.advisory_outbox,
+            terminal_store=self.terminal_store,
+            paper_ledger=self.paper_ledger,
+            binding_bucket="test-bucket",
+            binding_writer=backend,
+            binding_reader=backend,
+            binding_preflight=_OrderingPreflight(),
+        )
+        self.assertEqual(call_order, ["preflight", "binding_load"])
+
+        class _FailingPreflight:
+            def verify_bucket_reachable(self, *, bucket: str) -> None:
+                raise RuntimeError("SECRET-PREFLIGHT-ORDER-DO-NOT-LEAK")
+
+        class _AssertingReader:
+            def read_current(self, **_kwargs):
+                raise AssertionError("read_current must not be called when preflight fails")
+
+            def read_current_optional(self, **_kwargs):
+                raise AssertionError(
+                    "read_current_optional must not be called when preflight fails"
+                )
+
+        exploding_quote_source, exploding_portfolio_source, exploding_clock = _exploding_sources()
+        with self.assertRaises(PromotedOperationalControlPlaneUnreachableError):
+            run_publish_and_anchor_promoted_operational_session(
+                spec=spec,
+                quote_source=exploding_quote_source,
+                portfolio_source=exploding_portfolio_source,
+                clock=exploding_clock,
+                advisory_outbox=self.advisory_outbox,
+                terminal_store=self.terminal_store,
+                paper_ledger=self.paper_ledger,
+                binding_bucket="test-bucket",
+                binding_writer=backend,
+                binding_reader=_AssertingReader(),
+                binding_preflight=_FailingPreflight(),
+            )
+        self.assertEqual(exploding_quote_source.calls, [])
+        self.assertEqual(exploding_portfolio_source.calls, 0)
+
+    def test_unreachable_bucket_fails_closed_before_any_market_run_or_local_publication(
+        self,
+    ) -> None:
+        preparation, spec = _runner_tests._run_spec(chunk_size=500)
+
+        class _FailingPreflight:
+            def verify_bucket_reachable(self, *, bucket: str) -> None:
+                raise RuntimeError("SECRET-UNREACHABLE-DO-NOT-LEAK-6e2a")
+
+        backend = _FakeBindingBackend()
+        exploding_quote_source, exploding_portfolio_source, exploding_clock = _exploding_sources()
+        with self.assertRaises(PromotedOperationalControlPlaneUnreachableError):
+            run_publish_and_anchor_promoted_operational_session(
+                spec=spec,
+                quote_source=exploding_quote_source,
+                portfolio_source=exploding_portfolio_source,
+                clock=exploding_clock,
+                advisory_outbox=self.advisory_outbox,
+                terminal_store=self.terminal_store,
+                paper_ledger=self.paper_ledger,
+                binding_bucket="test-bucket",
+                binding_writer=backend,
+                binding_reader=backend,
+                binding_preflight=_FailingPreflight(),
+            )
+        self.assertEqual(exploding_quote_source.calls, [])
+        self.assertEqual(exploding_portfolio_source.calls, 0)
+        self.assertIsNone(self.terminal_store.get_optional(spec.spec_id))
+        self.assertEqual(len(backend.writer_calls), 0)
+        self.assertEqual(len(backend.reader_calls), 0)
+
+    def test_seal_failure_after_publish_raises_the_typed_manual_recovery_error_without_rollback(
+        self,
+    ) -> None:
+        preparation, spec = _runner_tests._run_spec(chunk_size=500)
+        quote_source = _runner_tests._FakeQuoteSource(
+            responder=_runner_tests._sorted_quote_responder(preparation)
+        )
+        portfolio_source = _runner_tests._happy_portfolio_source()
+        clock = _runner_tests._clock(
+            _runner_tests._STARTED_AT, _runner_tests._RUN_EVALUATED_AT, _runner_tests._COMPLETED_AT
+        )
+        backend = _FakeBindingBackend(seal_should_fail=True)
+        preflight = _PermissiveRecordingPreflight()
+
+        with self.assertRaises(PromotedOperationalManualRecoveryRequiredError) as ctx:
+            run_publish_and_anchor_promoted_operational_session(
+                spec=spec,
+                quote_source=quote_source,
+                portfolio_source=portfolio_source,
+                clock=clock,
+                advisory_outbox=self.advisory_outbox,
+                terminal_store=self.terminal_store,
+                paper_ledger=self.paper_ledger,
+                binding_bucket="test-bucket",
+                binding_writer=backend,
+                binding_reader=backend,
+                binding_preflight=preflight,
+            )
+        self.assertIsInstance(ctx.exception, PromotedOperationalAnchoredSessionError)
+        self.assertIsNone(ctx.exception.__cause__)
+        self.assertIsNone(ctx.exception.__context__)
+
+        stored_terminal = self.terminal_store.get(spec.spec_id)
+        stored_terminal.verify_content_identity()
+        self.advisory_outbox.get(stored_terminal.advisory_id)
+        if stored_terminal.paper_registration_id is not None:
+            self.paper_ledger.get_registration(stored_terminal.paper_registration_id)
+        self.assertEqual(len(backend.objects), 0)
+
+        exploding_quote_source, exploding_portfolio_source, exploding_clock = _exploding_sources()
+        with self.assertRaises(PromotedOperationalAnchoredSessionError):
+            run_publish_and_anchor_promoted_operational_session(
+                spec=spec,
+                quote_source=exploding_quote_source,
+                portfolio_source=exploding_portfolio_source,
+                clock=exploding_clock,
+                advisory_outbox=self.advisory_outbox,
+                terminal_store=self.terminal_store,
+                paper_ledger=self.paper_ledger,
+                binding_bucket="test-bucket",
+                binding_writer=backend,
+                binding_reader=backend,
+                binding_preflight=preflight,
+            )
+        self.assertEqual(exploding_quote_source.calls, [])
+        self.assertEqual(exploding_portfolio_source.calls, 0)
+        self.assertEqual(self.terminal_store.get(spec.spec_id).terminal_id, stored_terminal.terminal_id)
+        self.assertEqual(len(backend.objects), 0)
+
+    def test_unreadable_binding_raises_the_typed_control_plane_error_and_never_the_manual_recovery_error(
+        self,
+    ) -> None:
+        preparation, spec = _runner_tests._run_spec(chunk_size=500)
+        preflight = _PermissiveRecordingPreflight()
+
+        class _RaisingReader:
+            def read_current(self, **_kwargs):
+                raise AssertionError("read_current must not be called")
+
+            def read_current_optional(self, **_kwargs):
+                raise RuntimeError("SECRET-CORRUPT-TYPED-DO-NOT-LEAK-1d4f")
+
+        backend_writer = _FakeBindingBackend()
+        exploding_quote_source, exploding_portfolio_source, exploding_clock = _exploding_sources()
+        try:
+            run_publish_and_anchor_promoted_operational_session(
+                spec=spec,
+                quote_source=exploding_quote_source,
+                portfolio_source=exploding_portfolio_source,
+                clock=exploding_clock,
+                advisory_outbox=self.advisory_outbox,
+                terminal_store=self.terminal_store,
+                paper_ledger=self.paper_ledger,
+                binding_bucket="test-bucket",
+                binding_writer=backend_writer,
+                binding_reader=_RaisingReader(),
+                binding_preflight=preflight,
+            )
+            self.fail("expected PromotedOperationalBindingUnreadableError")
+        except PromotedOperationalBindingUnreadableError as exc:
+            self.assertIsInstance(exc, PromotedOperationalAnchoredSessionError)
+            self.assertNotIsInstance(exc, PromotedOperationalManualRecoveryRequiredError)
+            self.assertIsNone(exc.__cause__)
+            self.assertIsNone(exc.__context__)
+
+        # A proven-absent binding still routes normally (fresh run succeeds).
+        backend = _FakeBindingBackend()
+        quote_source = _runner_tests._FakeQuoteSource(
+            responder=_runner_tests._sorted_quote_responder(preparation)
+        )
+        portfolio_source = _runner_tests._happy_portfolio_source()
+        clock = _runner_tests._clock(
+            _runner_tests._STARTED_AT, _runner_tests._RUN_EVALUATED_AT, _runner_tests._COMPLETED_AT
+        )
+        result = run_publish_and_anchor_promoted_operational_session(
+            spec=spec,
+            quote_source=quote_source,
+            portfolio_source=portfolio_source,
+            clock=clock,
+            advisory_outbox=self.advisory_outbox,
+            terminal_store=self.terminal_store,
+            paper_ledger=self.paper_ledger,
+            binding_bucket="test-bucket",
+            binding_writer=backend,
+            binding_reader=backend,
+            binding_preflight=preflight,
+        )
+        self.assertFalse(result.reused_existing_terminal)
+
+    def test_typed_errors_are_sanitized_subclasses_that_leak_no_bucket_object_name_or_nested_text(
+        self,
+    ) -> None:
+        self.assertTrue(
+            issubclass(
+                PromotedOperationalControlPlaneUnreachableError, PromotedOperationalAnchoredSessionError
+            )
+        )
+        self.assertTrue(
+            issubclass(
+                PromotedOperationalBindingUnreadableError, PromotedOperationalAnchoredSessionError
+            )
+        )
+        self.assertTrue(
+            issubclass(
+                PromotedOperationalManualRecoveryRequiredError, PromotedOperationalAnchoredSessionError
+            )
+        )
+
+        preparation, spec = _runner_tests._run_spec(chunk_size=500)
+        object_name = promoted_operational_terminal_binding_object_name(spec)
+        preflight = _PermissiveRecordingPreflight()
+
+        # A service-raised failure stays the plain base type -- never any
+        # of the three typed subclasses.
+        with self.subTest(case="service_raised_failure_stays_base_type"):
+            # A deliberately distinct spec (different chunk_size), so this
+            # subtest's local terminal write never collides with the
+            # shared `spec` object used by the later subtests below.
+            other_preparation, other_spec = _runner_tests._run_spec(chunk_size=1)
+            self.assertNotEqual(other_spec.spec_id, spec.spec_id)
+            other_quote_source = _runner_tests._FakeQuoteSource(
+                responder=_runner_tests._sorted_quote_responder(other_preparation)
+            )
+            base_result = _persistence_tests._run(
+                other_spec, other_quote_source, _runner_tests._happy_portfolio_source()
+            )
+            publish_promoted_operational_result(
+                result=base_result,
+                advisory_outbox=self.advisory_outbox,
+                terminal_store=self.terminal_store,
+                paper_ledger=self.paper_ledger,
+            )
+            backend = _FakeBindingBackend()
+            exploding_quote_source, exploding_portfolio_source, exploding_clock = _exploding_sources()
+            try:
+                run_publish_and_anchor_promoted_operational_session(
+                    spec=base_result.spec,
+                    quote_source=exploding_quote_source,
+                    portfolio_source=exploding_portfolio_source,
+                    clock=exploding_clock,
+                    advisory_outbox=self.advisory_outbox,
+                    terminal_store=self.terminal_store,
+                    paper_ledger=self.paper_ledger,
+                    binding_bucket="test-bucket",
+                    binding_writer=backend,
+                    binding_reader=backend,
+                    binding_preflight=preflight,
+                )
+                self.fail("expected PromotedOperationalAnchoredSessionError")
+            except PromotedOperationalAnchoredSessionError as exc:
+                self.assertIs(type(exc), PromotedOperationalAnchoredSessionError)
+                self.assertNotIsInstance(exc, PromotedOperationalControlPlaneUnreachableError)
+                self.assertNotIsInstance(exc, PromotedOperationalBindingUnreadableError)
+                self.assertNotIsInstance(exc, PromotedOperationalManualRecoveryRequiredError)
+
+        with self.subTest(case="unreachable_control_plane_sanitized"):
+
+            class _FailingPreflight:
+                def verify_bucket_reachable(self, *, bucket: str) -> None:
+                    raise RuntimeError("SECRET-PREFLIGHT-9f1a-" + bucket)
+
+            backend = _FakeBindingBackend()
+            exploding_quote_source, exploding_portfolio_source, exploding_clock = _exploding_sources()
+            try:
+                run_publish_and_anchor_promoted_operational_session(
+                    spec=spec,
+                    quote_source=exploding_quote_source,
+                    portfolio_source=exploding_portfolio_source,
+                    clock=exploding_clock,
+                    advisory_outbox=self.advisory_outbox,
+                    terminal_store=self.terminal_store,
+                    paper_ledger=self.paper_ledger,
+                    binding_bucket="test-bucket",
+                    binding_writer=backend,
+                    binding_reader=backend,
+                    binding_preflight=_FailingPreflight(),
+                )
+                self.fail("expected PromotedOperationalControlPlaneUnreachableError")
+            except PromotedOperationalControlPlaneUnreachableError as exc:
+                self.assertIsInstance(exc, PromotedOperationalAnchoredSessionError)
+                self.assertNotIn("SECRET-PREFLIGHT-9f1a", str(exc))
+                self.assertNotIn("test-bucket", str(exc))
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+        with self.subTest(case="unreadable_binding_sanitized"):
+
+            class _RaisingReader:
+                def read_current(self, **_kwargs):
+                    raise AssertionError("must not be called")
+
+                def read_current_optional(self, **_kwargs):
+                    raise RuntimeError("SECRET-BINDING-READ-2b7c-" + object_name)
+
+            backend = _FakeBindingBackend()
+            exploding_quote_source, exploding_portfolio_source, exploding_clock = _exploding_sources()
+            try:
+                run_publish_and_anchor_promoted_operational_session(
+                    spec=spec,
+                    quote_source=exploding_quote_source,
+                    portfolio_source=exploding_portfolio_source,
+                    clock=exploding_clock,
+                    advisory_outbox=self.advisory_outbox,
+                    terminal_store=self.terminal_store,
+                    paper_ledger=self.paper_ledger,
+                    binding_bucket="test-bucket",
+                    binding_writer=backend,
+                    binding_reader=_RaisingReader(),
+                    binding_preflight=preflight,
+                )
+                self.fail("expected PromotedOperationalBindingUnreadableError")
+            except PromotedOperationalBindingUnreadableError as exc:
+                self.assertIsInstance(exc, PromotedOperationalAnchoredSessionError)
+                self.assertNotIn("SECRET-BINDING-READ-2b7c", str(exc))
+                self.assertNotIn(object_name, str(exc))
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+        with self.subTest(case="manual_recovery_sanitized"):
+            seal_fail_backend = _FakeBindingBackend(seal_should_fail=True)
+            quote_source = _runner_tests._FakeQuoteSource(
+                responder=_runner_tests._sorted_quote_responder(preparation)
+            )
+            portfolio_source = _runner_tests._happy_portfolio_source()
+            clock = _runner_tests._clock(
+                _runner_tests._STARTED_AT,
+                _runner_tests._RUN_EVALUATED_AT,
+                _runner_tests._COMPLETED_AT,
+            )
+            try:
+                run_publish_and_anchor_promoted_operational_session(
+                    spec=spec,
+                    quote_source=quote_source,
+                    portfolio_source=portfolio_source,
+                    clock=clock,
+                    advisory_outbox=self.advisory_outbox,
+                    terminal_store=self.terminal_store,
+                    paper_ledger=self.paper_ledger,
+                    binding_bucket="test-bucket",
+                    binding_writer=seal_fail_backend,
+                    binding_reader=seal_fail_backend,
+                    binding_preflight=preflight,
+                )
+                self.fail("expected PromotedOperationalManualRecoveryRequiredError")
+            except PromotedOperationalManualRecoveryRequiredError as exc:
+                self.assertIsInstance(exc, PromotedOperationalAnchoredSessionError)
+                self.assertNotIn("SECRET-SEAL-FAILURE-DO-NOT-LEAK-4d7f", str(exc))
+                self.assertNotIn(object_name, str(exc))
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
 
     def test_anchored_session_public_contract_adds_no_environment_credential_network_telegram_broker_or_current_time_capability(
         self,
@@ -489,6 +905,7 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
                 "binding_bucket",
                 "binding_writer",
                 "binding_reader",
+                "binding_preflight",
             },
         )
 

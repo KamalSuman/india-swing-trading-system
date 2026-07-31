@@ -136,6 +136,7 @@ Absence is never treated as a benign case.
 | Binding sealed for spec X, a *different* terminal later attempted for the same spec X | The writer conflict check rejects it; the originally sealed binding is never overwritten. This includes the race where a concurrent seal becomes visible between this session's own absence-proving read and its own seal attempt -- the conflict is still caught at write time. |
 | Binding object exists remotely but is corrupted, truncated, or oversized | `load_trusted_promoted_operational_terminal_binding`/`load_optional_trusted_promoted_operational_terminal_binding` fail closed with a sanitized error; neither attempts to reconstruct or repair the object, and corruption is never treated as absence. |
 | Binding sealed for spec X, but no local terminal exists for X in this store | `run_and_publish_promoted_operational_service` fails closed before any source, acquisition, clock, advisory, or ledger access (an anchored terminal that isn't locally present is itself an inconsistency). |
+| The `binding_bucket` is misconfigured or unreachable | The bucket-level preflight fails closed with `PromotedOperationalControlPlaneUnreachableError` before the binding load, before any market acquisition, and before any local write -- so a configuration mistake never produces a local terminal, never touches the market, and never reaches manual-recovery state. |
 
 ## Honest trust model
 
@@ -211,20 +212,81 @@ codebase's own tests through fake readers at the port level, never by
 pretending the adapter mapped a real `NotFound` it cannot currently
 construct.
 
+### Bucket-level preflight: why parsing the object-level NotFound was rejected
+
+GCS reports a missing bucket with the *exact same* `NotFound` exception as
+a missing object, and `read_current_optional` deliberately refuses to
+inspect exception message text to tell them apart (message text is not a
+stable, sanitizable signal). Left alone, that ambiguity meant a
+misconfigured `binding_bucket` read as proven absence: the anchored
+session would proceed to acquire real market data, publish local
+advisory/registration/terminal artifacts, and only then fail at the seal
+-- leaving that spec permanently in manual recovery for what was purely a
+configuration mistake.
+
+The fix is not to parse the error further; it is to ask a **bucket-level**
+question, whose not-found answer is unambiguous by construction (a bucket
+either exists or it doesn't -- there is no sibling "object inside a valid
+bucket" case to confuse it with). `PromotedTerminalBindingControlPlanePreflight.verify_bucket_reachable(
+*, bucket)` does exactly that: `GoogleCloudStorageTerminalBindingReader`
+implements it with exactly one call, `client.get_bucket(bucket)`,
+requiring the returned object's `name` to equal the requested bucket
+before returning. It never calls `blob()`, `download_as_bytes`,
+`upload_from_string`, `reload` on a blob, or any listing method -- it
+asks a bucket-level question and nothing else. Any exception, a
+missing/non-string `name`, or a `name` mismatch all collapse into the
+same sanitized `PromotedTerminalBindingControlPlaneError`, exactly like
+every other failure in this module.
+
+### Typed errors on the anchored session
+
+`run_publish_and_anchor_promoted_operational_session` classifies exactly
+the three outcomes this orchestration layer owns directly -- never by
+inspecting local terminal state, and never by inspecting exception message
+text:
+
+| Type | Signals |
+|---|---|
+| `PromotedOperationalControlPlaneUnreachableError` | The bucket-level preflight call itself failed. Raised before the binding load, before any market acquisition, and before any local write. |
+| `PromotedOperationalBindingUnreadableError` | `load_optional_trusted_promoted_operational_terminal_binding` failed for any non-absence reason (corruption, truncation, oversize, a generation change, or any other error). A proven-absent binding is not this error -- it routes normally as `terminal_binding=None`. |
+| `PromotedOperationalManualRecoveryRequiredError` | A genuinely fresh local terminal was published (`reused_existing_terminal is False`) but `seal_promoted_operational_terminal_binding` then failed. This is the one path the anchored session knows for certain has left a local terminal published with no sealed binding -- the deliberate manual-recovery state. Its existing behavior is unchanged: no delete, no overwrite, no retry, no repair. |
+
+All three are subclasses of the unchanged `PromotedOperationalAnchoredSessionError`,
+so existing callers and tests that catch the base type keep working. **A
+failure raised by `run_and_publish_promoted_operational_service` itself
+stays the plain, unclassified base type.** Distinguishing its internal
+causes (a local terminal exists but no binding was supplied; a binding
+exists but no local terminal does; a replay cross-check disagreed) would
+require this layer to start reading or inferring local terminal state
+itself -- which would break the routing rule that the remote anchor is the
+only routing input. None of the four typed classes -- base or the three
+subclasses -- ever includes a bucket name, an object name, a generation, a
+hash, a spec/terminal ID, payload bytes, or nested exception text; every
+raise uses a short static message and the established flag-then-raise-
+after-the-try-block pattern so `__cause__` and `__context__` are both
+`None` on every path.
+
 ### Exact call order
 
 1. Validate exact types and `binding_bucket` first.
-2. Call `load_optional_trusted_promoted_operational_terminal_binding`
+2. Call `binding_preflight.verify_bucket_reachable(bucket=binding_bucket)`
+   exactly once -- before anything else, including the binding load, any
+   market acquisition, any local write, and any seal. Any failure raises
+   `PromotedOperationalControlPlaneUnreachableError` immediately, with
+   nothing else attempted.
+3. Call `load_optional_trusted_promoted_operational_terminal_binding`
    exactly once. Its result -- and nothing else -- becomes the
-   `terminal_binding` argument below.
-3. Call `run_and_publish_promoted_operational_service` exactly once with
+   `terminal_binding` argument below. A non-absence failure here raises
+   `PromotedOperationalBindingUnreadableError`.
+4. Call `run_and_publish_promoted_operational_service` exactly once with
    the caller's exact `spec`, sources, clock, stores, ledger, and that
    binding.
-4. If and only if the returned state has `reused_existing_terminal is
+5. If and only if the returned state has `reused_existing_terminal is
    False`, call `seal_promoted_operational_terminal_binding` exactly once
    with `terminal=<the exact terminal the service just returned>` -- never
-   a value re-read from `terminal_store`.
-5. On replay (`reused_existing_terminal is True`), no seal call happens at
+   a value re-read from `terminal_store`. A seal failure here raises
+   `PromotedOperationalManualRecoveryRequiredError`.
+6. On replay (`reused_existing_terminal is True`), no seal call happens at
    all; instead the already-loaded binding's `expected_terminal_id` and
    `spec_id` are re-checked against the returned terminal at this
    boundary, failing closed on any disagreement even though the service

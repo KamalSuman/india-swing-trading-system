@@ -46,6 +46,7 @@ from india_swing.promoted_operational_service import (
 from india_swing.promoted_terminal_binding import PromotedOperationalTerminalBindingRecord
 from india_swing.promoted_terminal_binding_control_plane import (
     LoadedPromotedOperationalTerminalBinding,
+    PromotedTerminalBindingControlPlanePreflight,
     PromotedTerminalBindingObjectReader,
     SealedPromotedOperationalTerminalBinding,
     load_optional_trusted_promoted_operational_terminal_binding,
@@ -57,8 +58,34 @@ class PromotedOperationalAnchoredSessionError(ValueError):
     pass
 
 
+class PromotedOperationalControlPlaneUnreachableError(PromotedOperationalAnchoredSessionError):
+    """The bucket-level preflight failed: the control-plane bucket is
+    misconfigured or unreachable. Raised before any binding load, market
+    acquisition, or local publication is ever attempted."""
+
+
+class PromotedOperationalBindingUnreadableError(PromotedOperationalAnchoredSessionError):
+    """The binding load failed for a non-absence reason (corruption,
+    truncation, oversize, a generation change, or any other error). A
+    proven-absent binding is not this error -- it routes normally."""
+
+
+class PromotedOperationalManualRecoveryRequiredError(PromotedOperationalAnchoredSessionError):
+    """A genuinely fresh local terminal was published but its binding
+    could not be sealed. This is the deliberate manual-recovery state:
+    nothing is deleted, overwritten, retried, or repaired, and every
+    subsequent call with the same spec fails closed rather than rerunning
+    the market pipeline."""
+
+
 _BUCKET = re.compile(r"[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]\Z")
 _ERR_SESSION = "promoted operational anchored session call is invalid"
+_ERR_UNREACHABLE = "promoted operational anchored session control plane is unreachable"
+_ERR_UNREADABLE = "promoted operational anchored session binding is unreadable"
+_ERR_MANUAL_RECOVERY = (
+    "promoted operational anchored session requires manual recovery: "
+    "a local terminal is published but its binding could not be sealed"
+)
 
 
 def _validate_binding_bucket(value: object) -> str:
@@ -89,8 +116,7 @@ class AnchoredPromotedOperationalSessionState:
         if type(self.binding_record) is not PromotedOperationalTerminalBindingRecord:
             raise PromotedOperationalAnchoredSessionError(_ERR_SESSION)
         self.binding_record.verify_content_identity()
-        if type(self.binding_bucket) is not str or not self.binding_bucket:
-            raise PromotedOperationalAnchoredSessionError(_ERR_SESSION)
+        _validate_binding_bucket(self.binding_bucket)
         if type(self.binding_object_name) is not str or not self.binding_object_name:
             raise PromotedOperationalAnchoredSessionError(_ERR_SESSION)
         if (
@@ -122,10 +148,16 @@ def run_publish_and_anchor_promoted_operational_session(
     binding_bucket: str,
     binding_writer: StateObjectWriter,
     binding_reader: PromotedTerminalBindingObjectReader,
+    binding_preflight: PromotedTerminalBindingControlPlanePreflight,
 ) -> AnchoredPromotedOperationalSessionState:
     """Single schedulable entry point joining local publication to the
     independent binding control plane.
 
+    After exact-type and bucket validation, ``binding_preflight.-
+    verify_bucket_reachable`` is called exactly once -- before anything
+    else, including the binding load, any market acquisition, any local
+    write, and any seal -- so a misconfigured or unreachable control-plane
+    bucket fails closed immediately instead of surfacing only at the seal.
     Routes solely on the remote anchor: ``load_optional_trusted_promoted_-
     operational_terminal_binding`` is called exactly once, before
     ``run_and_publish_promoted_operational_service`` (which alone owns the
@@ -155,6 +187,14 @@ def run_publish_and_anchor_promoted_operational_session(
     if bucket_failed:
         raise PromotedOperationalAnchoredSessionError(_ERR_SESSION)
 
+    preflight_failed = False
+    try:
+        binding_preflight.verify_bucket_reachable(bucket=binding_bucket)
+    except Exception:
+        preflight_failed = True
+    if preflight_failed:
+        raise PromotedOperationalControlPlaneUnreachableError(_ERR_UNREACHABLE)
+
     load_failed = False
     loaded: LoadedPromotedOperationalTerminalBinding | None = None
     try:
@@ -164,7 +204,7 @@ def run_publish_and_anchor_promoted_operational_session(
     except Exception:
         load_failed = True
     if load_failed:
-        raise PromotedOperationalAnchoredSessionError(_ERR_SESSION)
+        raise PromotedOperationalBindingUnreadableError(_ERR_UNREADABLE)
 
     terminal_binding = None if loaded is None else loaded.binding
 
@@ -223,7 +263,7 @@ def run_publish_and_anchor_promoted_operational_session(
     except Exception:
         seal_failed = True
     if seal_failed or sealed is None:
-        raise PromotedOperationalAnchoredSessionError(_ERR_SESSION)
+        raise PromotedOperationalManualRecoveryRequiredError(_ERR_MANUAL_RECOVERY)
 
     fresh_construct_failed = False
     fresh_state: AnchoredPromotedOperationalSessionState | None = None

@@ -735,6 +735,105 @@ class PromotedTerminalBindingControlPlaneTests(unittest.TestCase):
                     maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
                 )
 
+    def test_bucket_preflight_asks_one_bucket_level_question_and_never_touches_an_object(
+        self,
+    ) -> None:
+        class _FakeBucketHandle:
+            def __init__(self, name) -> None:
+                self.name = name
+
+        class _RecordingClient:
+            def __init__(self) -> None:
+                self.get_bucket_calls: list[str] = []
+
+            def get_bucket(self, name):
+                self.get_bucket_calls.append(name)
+                return _FakeBucketHandle(name)
+
+            def bucket(self, name):
+                raise AssertionError(
+                    "bucket() must not be called by verify_bucket_reachable"
+                )
+
+        client = _RecordingClient()
+        reader = GoogleCloudStorageTerminalBindingReader(client)
+        result = reader.verify_bucket_reachable(bucket="test-bucket")
+        self.assertIsNone(result)
+        self.assertEqual(client.get_bucket_calls, ["test-bucket"])
+
+    def test_bucket_preflight_fails_closed_for_a_missing_bucket_a_name_mismatch_and_any_client_error(
+        self,
+    ) -> None:
+        with self.subTest(case="raising_get_bucket"):
+
+            class _RaisingClient:
+                def get_bucket(self, name):
+                    raise RuntimeError("SECRET-BUCKET-MISSING-DO-NOT-LEAK-2f6a")
+
+            reader = GoogleCloudStorageTerminalBindingReader(_RaisingClient())
+            try:
+                reader.verify_bucket_reachable(bucket="test-bucket")
+                self.fail("expected PromotedTerminalBindingControlPlaneError")
+            except PromotedTerminalBindingControlPlaneError as exc:
+                self.assertNotIn("SECRET-BUCKET-MISSING-DO-NOT-LEAK-2f6a", str(exc))
+                self.assertNotIn("test-bucket", str(exc))
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+        with self.subTest(case="name_mismatch"):
+
+            class _MismatchHandle:
+                name = "a-different-bucket"
+
+            class _MismatchClient:
+                def get_bucket(self, name):
+                    return _MismatchHandle()
+
+            reader = GoogleCloudStorageTerminalBindingReader(_MismatchClient())
+            with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+                reader.verify_bucket_reachable(bucket="test-bucket")
+
+        with self.subTest(case="missing_name_attribute"):
+
+            class _NoNameHandle:
+                pass
+
+            class _NoNameClient:
+                def get_bucket(self, name):
+                    return _NoNameHandle()
+
+            reader = GoogleCloudStorageTerminalBindingReader(_NoNameClient())
+            with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+                reader.verify_bucket_reachable(bucket="test-bucket")
+
+        with self.subTest(case="non_string_name"):
+
+            class _NonStringNameHandle:
+                name = 12345
+
+            class _NonStringNameClient:
+                def get_bucket(self, name):
+                    return _NonStringNameHandle()
+
+            reader = GoogleCloudStorageTerminalBindingReader(_NonStringNameClient())
+            with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+                reader.verify_bucket_reachable(bucket="test-bucket")
+
+        with self.subTest(case="arbitrary_client_error"):
+
+            class _ArbitraryErrorClient:
+                def get_bucket(self, name):
+                    raise ValueError("SECRET-ARBITRARY-DO-NOT-LEAK-9c1d")
+
+            reader = GoogleCloudStorageTerminalBindingReader(_ArbitraryErrorClient())
+            try:
+                reader.verify_bucket_reachable(bucket="test-bucket")
+                self.fail("expected PromotedTerminalBindingControlPlaneError")
+            except PromotedTerminalBindingControlPlaneError as exc:
+                self.assertNotIn("SECRET-ARBITRARY-DO-NOT-LEAK-9c1d", str(exc))
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
     def test_control_plane_never_reads_the_local_terminal_store_and_never_derives_the_binding_from_it(
         self,
     ) -> None:
