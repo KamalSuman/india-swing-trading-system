@@ -22,7 +22,9 @@ from india_swing.promoted_terminal_binding import (
 from india_swing.promoted_terminal_binding_control_plane import (
     GoogleCloudStorageTerminalBindingReader,
     LoadedPromotedOperationalTerminalBinding,
+    ObservedTerminalBindingObject,
     PromotedTerminalBindingControlPlaneError,
+    load_optional_trusted_promoted_operational_terminal_binding,
     load_trusted_promoted_operational_terminal_binding,
     seal_promoted_operational_terminal_binding,
 )
@@ -457,6 +459,280 @@ class PromotedTerminalBindingControlPlaneTests(unittest.TestCase):
             with self.assertRaises(PromotedTerminalBindingControlPlaneError):
                 load_trusted_promoted_operational_terminal_binding(
                     spec=spec, bucket="test-bucket", reader=reader
+                )
+
+    def test_read_current_optional_returns_none_only_for_proven_absence_and_raises_for_every_other_failure(
+        self,
+    ) -> None:
+        terminal, spec = _fixture()
+        object_name = promoted_operational_terminal_binding_object_name(spec)
+
+        class _FakeOptionalReader:
+            def __init__(self, *, observed=None, raise_exc=None) -> None:
+                self._observed = observed
+                self._raise_exc = raise_exc
+
+            def read_current(self, **_kwargs):
+                raise AssertionError(
+                    "read_current must not be called by the optional load path"
+                )
+
+            def read_current_optional(self, *, bucket, object_name, maximum_bytes):
+                if self._raise_exc is not None:
+                    raise self._raise_exc
+                return self._observed
+
+        with self.subTest(case="proven_absence"):
+            reader = _FakeOptionalReader(observed=None)
+            result = load_optional_trusted_promoted_operational_terminal_binding(
+                spec=spec, bucket="test-bucket", reader=reader
+            )
+            self.assertIsNone(result)
+
+        with self.subTest(case="corrupt_bytes"):
+            corrupt_bytes = b"not-json-at-all"
+            corrupt_observed = ObservedTerminalBindingObject(
+                object_name=object_name,
+                generation=1,
+                byte_count=len(corrupt_bytes),
+                sha256=hashlib.sha256(corrupt_bytes).hexdigest(),
+                content_bytes=corrupt_bytes,
+            )
+            reader = _FakeOptionalReader(observed=corrupt_observed)
+            try:
+                load_optional_trusted_promoted_operational_terminal_binding(
+                    spec=spec, bucket="test-bucket", reader=reader
+                )
+                self.fail("expected PromotedTerminalBindingControlPlaneError")
+            except PromotedTerminalBindingControlPlaneError as exc:
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+        with self.subTest(case="oversized_payload"):
+            reader = _FakeOptionalReader(
+                raise_exc=RuntimeError("SECRET-OVERSIZED-DO-NOT-LEAK-1a2b")
+            )
+            try:
+                load_optional_trusted_promoted_operational_terminal_binding(
+                    spec=spec, bucket="test-bucket", reader=reader
+                )
+                self.fail("expected PromotedTerminalBindingControlPlaneError")
+            except PromotedTerminalBindingControlPlaneError as exc:
+                self.assertNotIn("SECRET-OVERSIZED-DO-NOT-LEAK-1a2b", str(exc))
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+        with self.subTest(case="mid_read_generation_change"):
+            reader = _FakeOptionalReader(
+                raise_exc=RuntimeError("SECRET-GENERATION-CHANGE-DO-NOT-LEAK-3c4d")
+            )
+            try:
+                load_optional_trusted_promoted_operational_terminal_binding(
+                    spec=spec, bucket="test-bucket", reader=reader
+                )
+                self.fail("expected PromotedTerminalBindingControlPlaneError")
+            except PromotedTerminalBindingControlPlaneError as exc:
+                self.assertNotIn("SECRET-GENERATION-CHANGE-DO-NOT-LEAK-3c4d", str(exc))
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+        with self.subTest(case="foreign_spec_binding"):
+            foreign_result = _persistence_tests._complete_no_trade_result()
+            foreign_advisory = build_promoted_operational_advisory(foreign_result)
+            foreign_terminal = build_promoted_operational_terminal_record(
+                foreign_result, foreign_advisory, None
+            )
+            foreign_spec = foreign_result.spec
+            self.assertNotEqual(foreign_spec.spec_id, spec.spec_id)
+            foreign_record = build_promoted_operational_terminal_binding_record(
+                foreign_terminal, foreign_spec
+            )
+            foreign_payload = encode_promoted_operational_terminal_binding_record(foreign_record)
+            foreign_observed = ObservedTerminalBindingObject(
+                object_name=object_name,
+                generation=1,
+                byte_count=len(foreign_payload),
+                sha256=hashlib.sha256(foreign_payload).hexdigest(),
+                content_bytes=foreign_payload,
+            )
+            reader = _FakeOptionalReader(observed=foreign_observed)
+            try:
+                load_optional_trusted_promoted_operational_terminal_binding(
+                    spec=spec, bucket="test-bucket", reader=reader
+                )
+                self.fail("expected PromotedTerminalBindingControlPlaneError")
+            except PromotedTerminalBindingControlPlaneError as exc:
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+        with self.subTest(case="arbitrary_client_error"):
+            reader = _FakeOptionalReader(raise_exc=RuntimeError("SECRET-CLIENT-DO-NOT-LEAK-5e6f"))
+            try:
+                load_optional_trusted_promoted_operational_terminal_binding(
+                    spec=spec, bucket="test-bucket", reader=reader
+                )
+                self.fail("expected PromotedTerminalBindingControlPlaneError")
+            except PromotedTerminalBindingControlPlaneError as exc:
+                self.assertNotIn("SECRET-CLIENT-DO-NOT-LEAK-5e6f", str(exc))
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+    def test_adapter_never_infers_absence_when_the_sdk_not_found_type_is_unavailable(
+        self,
+    ) -> None:
+        import india_swing.promoted_terminal_binding_control_plane as control_plane_module
+
+        self.assertIsNone(control_plane_module.NotFound)
+
+        terminal, spec = _fixture()
+        object_name = promoted_operational_terminal_binding_object_name(spec)
+
+        with self.subTest(case="missing_object_via_reload_lookuperror"):
+
+            class _MissingBlob:
+                generation = None
+
+                def reload(self, *, retry) -> None:
+                    raise LookupError("not found")
+
+            class _Bucket:
+                def blob(self, name, generation=None):
+                    return _MissingBlob()
+
+            class _Client:
+                def bucket(self, name):
+                    return _Bucket()
+
+            reader = GoogleCloudStorageTerminalBindingReader(_Client())
+            with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+                reader.read_current_optional(
+                    bucket="test-bucket",
+                    object_name=object_name,
+                    maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
+                )
+
+        with self.subTest(case="empty_payload_not_absence"):
+
+            class _EmptyBlob:
+                generation = 5
+
+                def reload(self, *, retry) -> None:
+                    pass
+
+                def download_as_bytes(self, **_kwargs) -> bytes:
+                    return b""
+
+            class _Bucket:
+                def blob(self, name, generation=None):
+                    return _EmptyBlob()
+
+            class _Client:
+                def bucket(self, name):
+                    return _Bucket()
+
+            reader = GoogleCloudStorageTerminalBindingReader(_Client())
+            with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+                reader.read_current_optional(
+                    bucket="test-bucket",
+                    object_name=object_name,
+                    maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
+                )
+
+        with self.subTest(case="falsy_generation_not_absence"):
+
+            class _FalsyGenerationBlob:
+                generation = 0
+
+                def reload(self, *, retry) -> None:
+                    pass
+
+            class _Bucket:
+                def blob(self, name, generation=None):
+                    return _FalsyGenerationBlob()
+
+            class _Client:
+                def bucket(self, name):
+                    return _Bucket()
+
+            reader = GoogleCloudStorageTerminalBindingReader(_Client())
+            with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+                reader.read_current_optional(
+                    bucket="test-bucket",
+                    object_name=object_name,
+                    maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
+                )
+
+        with self.subTest(case="attribute_error_not_absence"):
+
+            class _NoGenerationAttrBlob:
+                def reload(self, *, retry) -> None:
+                    pass
+
+            class _Bucket:
+                def blob(self, name, generation=None):
+                    return _NoGenerationAttrBlob()
+
+            class _Client:
+                def bucket(self, name):
+                    return _Bucket()
+
+            reader = GoogleCloudStorageTerminalBindingReader(_Client())
+            with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+                reader.read_current_optional(
+                    bucket="test-bucket",
+                    object_name=object_name,
+                    maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
+                )
+
+        with self.subTest(case="key_error_not_absence"):
+
+            class _KeyErrorBlob:
+                generation = 5
+
+                def reload(self, *, retry) -> None:
+                    raise KeyError("missing")
+
+            class _Bucket:
+                def blob(self, name, generation=None):
+                    return _KeyErrorBlob()
+
+            class _Client:
+                def bucket(self, name):
+                    return _Bucket()
+
+            reader = GoogleCloudStorageTerminalBindingReader(_Client())
+            with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+                reader.read_current_optional(
+                    bucket="test-bucket",
+                    object_name=object_name,
+                    maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
+                )
+
+        with self.subTest(case="lookup_error_from_download_not_absence"):
+
+            class _DownloadLookupErrorBlob:
+                generation = 5
+
+                def reload(self, *, retry) -> None:
+                    pass
+
+                def download_as_bytes(self, **_kwargs) -> bytes:
+                    raise LookupError("generation mismatch")
+
+            class _Bucket:
+                def blob(self, name, generation=None):
+                    return _DownloadLookupErrorBlob()
+
+            class _Client:
+                def bucket(self, name):
+                    return _Bucket()
+
+            reader = GoogleCloudStorageTerminalBindingReader(_Client())
+            with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+                reader.read_current_optional(
+                    bucket="test-bucket",
+                    object_name=object_name,
+                    maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
                 )
 
     def test_control_plane_never_reads_the_local_terminal_store_and_never_derives_the_binding_from_it(

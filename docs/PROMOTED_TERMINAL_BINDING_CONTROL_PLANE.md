@@ -7,12 +7,13 @@ independent trusted-terminal-binding retention that
 `promoted_operational_service.py`) requires but deliberately does not
 provide on its own: a durable `spec_id -> expected_terminal_id` anchor,
 sealed to GCS through the existing write-side abstractions, and readable
-back at restart from nothing but the live run spec. This increment
-delivers the artifact, its codec, the read/write ports, and the seal/load
-functions only. It does **not** wire the control plane into
-`run_and_publish_promoted_operational_service`, construct a real storage
-client, or add any deployment, Cloud Run/Scheduler, or Telegram capability
--- those are later, separately authorized increments.
+back at restart from nothing but the live run spec.
+`src/india_swing/promoted_operational_anchored_session.py` (see
+[Anchored session](#anchored-session) below) now joins that control plane
+to the local publication service behind one schedulable entry point.
+Neither of these modules constructs a real storage client, and no
+deployment, Cloud Run/Scheduler, or Telegram capability exists anywhere
+here -- those remain later, separately authorized increments.
 
 ## Record schema
 
@@ -129,11 +130,12 @@ Absence is never treated as a benign case.
 
 | State | Behavior |
 |---|---|
-| No local terminal, no sealed binding | Normal starting state. |
-| Local terminal created, binding not yet sealed (crash in between) | **Deliberately fail-closed, manual-recovery.** Nothing in this task infers, backfills, or reconstructs a binding from the local terminal. The binding must be sealed from a fresh, independently-verified terminal/spec pair, or the state is repaired by a human operator. |
-| Binding sealed, local terminal present and matches | The intended steady state: a caller can later load the binding and pass it as revision 3's `terminal_binding` (not wired in this increment). |
-| Binding sealed for spec X, a *different* terminal later attempted for the same spec X | The writer conflict check rejects it; the originally sealed binding is never overwritten. |
-| Binding object exists remotely but is corrupted, truncated, or oversized | `load_trusted_promoted_operational_terminal_binding` fails closed with a sanitized error; it never attempts to reconstruct or repair the object. |
+| No local terminal, no sealed binding | Normal starting state; `run_publish_and_anchor_promoted_operational_session` runs the pipeline once and seals the binding after terminal-last publication. |
+| Local terminal created, binding not yet sealed (crash in between, or the seal write itself fails) | **Deliberately fail-closed, manual-recovery.** Nothing in this codebase infers, backfills, or reconstructs a binding from the local terminal. Every subsequent call with the same spec fails closed (the local terminal now demands a binding that still doesn't exist) rather than rerunning the market pipeline; the local advisory, paper registration, and terminal are never deleted, overwritten, or repaired. |
+| Binding sealed, local terminal present and matches | The intended steady state: `run_publish_and_anchor_promoted_operational_session` replays without touching the clock, either source, or the control plane's write path. |
+| Binding sealed for spec X, a *different* terminal later attempted for the same spec X | The writer conflict check rejects it; the originally sealed binding is never overwritten. This includes the race where a concurrent seal becomes visible between this session's own absence-proving read and its own seal attempt -- the conflict is still caught at write time. |
+| Binding object exists remotely but is corrupted, truncated, or oversized | `load_trusted_promoted_operational_terminal_binding`/`load_optional_trusted_promoted_operational_terminal_binding` fail closed with a sanitized error; neither attempts to reconstruct or repair the object, and corruption is never treated as absence. |
+| Binding sealed for spec X, but no local terminal exists for X in this store | `run_and_publish_promoted_operational_service` fails closed before any source, acquisition, clock, advisory, or ledger access (an anchored terminal that isn't locally present is itself an inconsistency). |
 
 ## Honest trust model
 
@@ -149,11 +151,87 @@ fails closed. Any party who can overwrite that object at a new generation
 model. Neither module claims cryptographic authentication or independent
 provenance anywhere in code, comments, or this document.
 
+## Anchored session
+
+`src/india_swing/promoted_operational_anchored_session.py` closes the
+restart gap end to end: `run_publish_and_anchor_promoted_operational_session(
+*, spec, quote_source, portfolio_source, clock, advisory_outbox,
+terminal_store, paper_ledger=None, binding_bucket, binding_writer,
+binding_reader)` is one thin orchestrator that routes solely on the
+**remote anchor** and delegates every local-terminal/binding decision to
+the already-accepted `run_and_publish_promoted_operational_service`, which
+alone implements that complete truth table. It never reads `terminal_store`
+itself, never branches on local terminal presence, never touches the clock
+or either source directly, and never constructs a
+`TrustedPromotedOperationalTerminalBinding` itself.
+
+### The optional read
+
+`PromotedTerminalBindingObjectReader` gained a second method,
+`read_current_optional(*, bucket, object_name, maximum_bytes) ->
+ObservedTerminalBindingObject | None`, alongside the existing (byte-for-byte
+unchanged in observable behavior) `read_current`. Both share the identical
+observe-then-pin-then-verify sequence via one private helper on
+`GoogleCloudStorageTerminalBindingReader`, so the two paths can never
+drift. `read_current_optional` returns `None` **only** when the exact
+object is proven not to exist; every other failure -- malformed content,
+an oversized payload, a permission failure, a generation change between
+observation and download, or any other error -- still raises the
+sanitized `PromotedTerminalBindingControlPlaneError`.
+
+`load_optional_trusted_promoted_operational_terminal_binding(*, spec,
+bucket, reader)` mirrors `load_trusted_promoted_operational_terminal_binding`
+exactly (both call one shared private verification helper so the two
+paths can never drift) except it returns `None` only when
+`reader.read_current_optional` itself proved absence.
+
+### Proven-absence rule
+
+*Absence is a safety boundary, not a convenience.* `load_trusted_...`
+already has no optional variant because absence and corruption must never
+be conflated -- "no anchor sealed yet" is the normal first-run case, while
+"anchor unreadable" must never be allowed to start a fresh market run.
+Absence is therefore proven **only** by the storage layer's own exact
+not-found signal (an `isinstance` match against `google.api_core.exceptions.NotFound`)
+and by nothing else -- never an empty payload, a falsy/`None` generation,
+an `AttributeError`, a `KeyError`, a `LookupError`, or any message text.
+
+### Environment consequence: the SDK is absent here
+
+`google-cloud-storage` and `google.api_core` are both uninstalled in this
+environment, verified this session. `promoted_terminal_binding_control_plane.py`
+follows the exact pattern `state_publication.py` already establishes:
+import the SDK exception type inside `try/except ImportError`, bind `None`
+on failure, and guard every use with `if NotFound is not None and
+isinstance(error, NotFound)`. The consequence is deliberate and preserved
+here: when the not-found type is unavailable, `read_current_optional` can
+never report absence and fails closed for every error instead, including
+an exact missing-object condition. Absence is therefore exercised in this
+codebase's own tests through fake readers at the port level, never by
+pretending the adapter mapped a real `NotFound` it cannot currently
+construct.
+
+### Exact call order
+
+1. Validate exact types and `binding_bucket` first.
+2. Call `load_optional_trusted_promoted_operational_terminal_binding`
+   exactly once. Its result -- and nothing else -- becomes the
+   `terminal_binding` argument below.
+3. Call `run_and_publish_promoted_operational_service` exactly once with
+   the caller's exact `spec`, sources, clock, stores, ledger, and that
+   binding.
+4. If and only if the returned state has `reused_existing_terminal is
+   False`, call `seal_promoted_operational_terminal_binding` exactly once
+   with `terminal=<the exact terminal the service just returned>` -- never
+   a value re-read from `terminal_store`.
+5. On replay (`reused_existing_terminal is True`), no seal call happens at
+   all; instead the already-loaded binding's `expected_terminal_id` and
+   `spec_id` are re-checked against the returned terminal at this
+   boundary, failing closed on any disagreement even though the service
+   already enforced it.
+
 ## Non-goals
 
-- `run_and_publish_promoted_operational_service` is not modified and does
-  not call any function in this module -- wiring the control plane into
-  the service is a later, separately authorized increment.
 - No real storage client is constructed anywhere; `GoogleCloudStorageTerminalBindingReader`
   requires an already-constructed client injected by its caller.
 - No deployment, Cloud Run, Cloud Scheduler, or job configuration exists
@@ -161,4 +239,7 @@ provenance anywhere in code, comments, or this document.
 - No Telegram, notification, or execution capability exists here.
 - No automatic recovery, repair, backfill, or local-terminal-derived
   binding exists here -- a local terminal without a sealed binding stays
-  fail-closed and manual-recovery, by design.
+  fail-closed and manual-recovery, by design, and a seal failure after a
+  fresh publication never deletes, overwrites, retries, or repairs the
+  local advisory, paper registration, or terminal record that was already
+  published.

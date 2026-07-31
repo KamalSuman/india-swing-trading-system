@@ -159,6 +159,20 @@ idempotently (advisory, then registration, then terminal record last), and
 replay an existing sealed terminal without ever touching the clock, either
 source property, or either acquisition method again. Local advisory
 creation is not Telegram delivery and grants no notification or execution
-authority. The next bounded milestone is explicitly authorized Telegram
-delivery and GCP job wiring around an accepted terminal result -- that
-wiring does not exist yet.
+authority. The independent trust anchor that sealed-terminal replay
+requires is now implemented too: `promoted_terminal_binding.py`/
+`promoted_terminal_binding_control_plane.py` (see
+docs/PROMOTED_TERMINAL_BINDING_CONTROL_PLANE.md) seal one durable
+`spec_id -> expected_terminal_id` binding through the existing
+`StateObjectWriter` and read it back at restart through a new
+generation-observe-then-pin port, with a proven-absence read path that can
+never conflate corruption with a genuinely first run. The anchored session
+now joins that control plane to local publication behind one schedulable
+entry point too: `run_publish_and_anchor_promoted_operational_session`
+routes solely on the remote anchor, delegates every local-terminal/binding
+decision to the already-accepted publication service, and seals the
+binding only after a fresh terminal-last publication -- never before, and
+never on replay. The remaining milestone is explicitly authorized Telegram
+delivery plus real storage-client construction and deployment wiring
+around this now-complete restart-safe chain -- that wiring does not exist
+yet.
