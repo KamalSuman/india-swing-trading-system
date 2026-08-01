@@ -132,6 +132,9 @@ class AnchoredPromotedOperationalSessionState:
         if (
             self.binding_record.spec_id != self.published.terminal.spec_id
             or self.binding_record.expected_terminal_id != self.published.terminal.terminal_id
+            or self.binding_record.target_session != self.published.terminal.target_session
+            or self.binding_record.preparation_id != self.published.terminal.preparation_id
+            or self.binding_record.terminal_completed_at != self.published.terminal.completed_at
         ):
             raise PromotedOperationalAnchoredSessionError(_ERR_SESSION)
 

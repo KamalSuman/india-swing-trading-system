@@ -176,17 +176,24 @@ class GoogleCloudStorageTerminalBindingReader:
             raise PromotedTerminalBindingControlPlaneError(_ERR_CONTROL_PLANE)
         return bucket
 
-    def _observe_then_pin(
-        self, *, bucket: str, object_name: str, maximum_bytes: int
-    ) -> ObservedTerminalBindingObject:
-        """The exact observe-then-pin-then-verify sequence shared by
-        ``read_current`` and ``read_current_optional``. Raises the SDK's
-        own exception unmodified (never wrapped) so a caller can inspect
-        its exact type -- ``read_current`` collapses any failure here into
-        one sanitized error, while ``read_current_optional`` additionally
-        distinguishes an exact NotFound from every other failure."""
+    def _construct_blob(self, *, bucket: str, object_name: str) -> object:
+        """Acquire the exact-object blob handle only. Raises the SDK's own
+        exception unmodified so a caller can tell a construction failure
+        apart from a reload failure -- a NotFound here is never proven
+        object absence, only an exact NotFound from ``reload`` itself
+        proves that."""
 
-        blob = self._client.bucket(bucket).blob(object_name)
+        return self._client.bucket(bucket).blob(object_name)
+
+    def _reload_and_observe_generation(self, *, blob: object) -> int:
+        """The exact initial metadata-reload phase for one already-
+        constructed blob handle. Raises the SDK's own exception unmodified
+        when ``blob.reload`` itself raises, so a caller can distinguish an
+        exact NotFound proving object absence from every other failure. A
+        malformed or missing generation observed after a successful reload
+        is not a proven-absence outcome and raises the sanitized
+        control-plane error directly."""
+
         blob.reload(retry=None)
         observed_generation = blob.generation
         if (
@@ -195,6 +202,22 @@ class GoogleCloudStorageTerminalBindingReader:
             or not (1 <= observed_generation <= _MAXIMUM_GENERATION)
         ):
             raise PromotedTerminalBindingControlPlaneError(_ERR_CONTROL_PLANE)
+        return observed_generation
+
+    def _pin_and_verify(
+        self,
+        *,
+        bucket: str,
+        object_name: str,
+        maximum_bytes: int,
+        observed_generation: int,
+    ) -> ObservedTerminalBindingObject:
+        """The exact generation-pinned download-and-verify phase. Once a
+        valid generation has been observed, object absence is no longer
+        provable: any failure here, including the SDK's own NotFound, must
+        never be treated as absence by a caller -- both ``read_current``
+        and ``read_current_optional`` collapse every failure from this
+        phase into the same sanitized control-plane error."""
 
         pinned_blob = self._client.bucket(bucket).blob(
             object_name, generation=observed_generation
@@ -230,15 +253,36 @@ class GoogleCloudStorageTerminalBindingReader:
             bucket=bucket, object_name=object_name, maximum_bytes=maximum_bytes
         )
 
-        failed = False
+        construct_failed = False
+        blob: object = None
+        try:
+            blob = self._construct_blob(bucket=bucket, object_name=object_name)
+        except Exception:
+            construct_failed = True
+        if construct_failed or blob is None:
+            raise PromotedTerminalBindingControlPlaneError(_ERR_CONTROL_PLANE)
+
+        observe_failed = False
+        observed_generation: int | None = None
+        try:
+            observed_generation = self._reload_and_observe_generation(blob=blob)
+        except Exception:
+            observe_failed = True
+        if observe_failed or observed_generation is None:
+            raise PromotedTerminalBindingControlPlaneError(_ERR_CONTROL_PLANE)
+
+        pin_failed = False
         observed_object: ObservedTerminalBindingObject | None = None
         try:
-            observed_object = self._observe_then_pin(
-                bucket=bucket, object_name=object_name, maximum_bytes=maximum_bytes
+            observed_object = self._pin_and_verify(
+                bucket=bucket,
+                object_name=object_name,
+                maximum_bytes=maximum_bytes,
+                observed_generation=observed_generation,
             )
         except Exception:
-            failed = True
-        if failed or observed_object is None:
+            pin_failed = True
+        if pin_failed or observed_object is None:
             raise PromotedTerminalBindingControlPlaneError(_ERR_CONTROL_PLANE)
         return observed_object
 
@@ -249,21 +293,42 @@ class GoogleCloudStorageTerminalBindingReader:
             bucket=bucket, object_name=object_name, maximum_bytes=maximum_bytes
         )
 
-        not_found = False
-        failed = False
-        observed_object: ObservedTerminalBindingObject | None = None
+        construct_failed = False
+        blob: object = None
         try:
-            observed_object = self._observe_then_pin(
-                bucket=bucket, object_name=object_name, maximum_bytes=maximum_bytes
-            )
+            blob = self._construct_blob(bucket=bucket, object_name=object_name)
+        except Exception:
+            construct_failed = True
+        if construct_failed or blob is None:
+            raise PromotedTerminalBindingControlPlaneError(_ERR_CONTROL_PLANE)
+
+        not_found = False
+        observe_failed = False
+        observed_generation: int | None = None
+        try:
+            observed_generation = self._reload_and_observe_generation(blob=blob)
         except Exception as error:
             if NotFound is not None and isinstance(error, NotFound):
                 not_found = True
             else:
-                failed = True
+                observe_failed = True
         if not_found:
             return None
-        if failed or observed_object is None:
+        if observe_failed or observed_generation is None:
+            raise PromotedTerminalBindingControlPlaneError(_ERR_CONTROL_PLANE)
+
+        pin_failed = False
+        observed_object: ObservedTerminalBindingObject | None = None
+        try:
+            observed_object = self._pin_and_verify(
+                bucket=bucket,
+                object_name=object_name,
+                maximum_bytes=maximum_bytes,
+                observed_generation=observed_generation,
+            )
+        except Exception:
+            pin_failed = True
+        if pin_failed or observed_object is None:
             raise PromotedTerminalBindingControlPlaneError(_ERR_CONTROL_PLANE)
         return observed_object
 

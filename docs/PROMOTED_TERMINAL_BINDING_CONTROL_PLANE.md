@@ -137,6 +137,7 @@ Absence is never treated as a benign case.
 | Binding object exists remotely but is corrupted, truncated, or oversized | `load_trusted_promoted_operational_terminal_binding`/`load_optional_trusted_promoted_operational_terminal_binding` fail closed with a sanitized error; neither attempts to reconstruct or repair the object, and corruption is never treated as absence. |
 | Binding sealed for spec X, but no local terminal exists for X in this store | `run_and_publish_promoted_operational_service` fails closed before any source, acquisition, clock, advisory, or ledger access (an anchored terminal that isn't locally present is itself an inconsistency). |
 | The `binding_bucket` is misconfigured or unreachable | The bucket-level preflight fails closed with `PromotedOperationalControlPlaneUnreachableError` before the binding load, before any market acquisition, and before any local write -- so a configuration mistake never produces a local terminal, never touches the market, and never reaches manual-recovery state. |
+| A previously-sealed binding object is deleted, changed, or otherwise fails during the generation-pinned download -- after its generation was already observed | `read_current_optional` never converts this into absence: any failure in the pinned-read phase, including the exact `NotFound` type, raises the sanitized `PromotedTerminalBindingControlPlaneError`. The anchored session surfaces this as `PromotedOperationalBindingUnreadableError` before any market acquisition or local write is attempted. |
 
 ## Honest trust model
 
@@ -172,13 +173,17 @@ or either source directly, and never constructs a
 `read_current_optional(*, bucket, object_name, maximum_bytes) ->
 ObservedTerminalBindingObject | None`, alongside the existing (byte-for-byte
 unchanged in observable behavior) `read_current`. Both share the identical
-observe-then-pin-then-verify sequence via one private helper on
-`GoogleCloudStorageTerminalBindingReader`, so the two paths can never
-drift. `read_current_optional` returns `None` **only** when the exact
-object is proven not to exist; every other failure -- malformed content,
-an oversized payload, a permission failure, a generation change between
-observation and download, or any other error -- still raises the
-sanitized `PromotedTerminalBindingControlPlaneError`.
+construct-blob / reload-and-observe-generation / pin-and-verify sequence
+via three private helpers on `GoogleCloudStorageTerminalBindingReader`, so
+the two paths can never drift on validation. They differ only in **which
+phase's exception each is allowed to translate into absence** -- see
+[Proven-absence rule](#proven-absence-rule) below. `read_current_optional`
+returns `None` **only** when the exact object is proven not to exist by
+the initial metadata reload; every other failure -- malformed content, an
+oversized payload, a permission failure, a generation change between
+observation and download, a `NotFound` raised anywhere other than that
+initial reload, or any other error -- still raises the sanitized
+`PromotedTerminalBindingControlPlaneError`.
 
 `load_optional_trusted_promoted_operational_terminal_binding(*, spec,
 bucket, reader)` mirrors `load_trusted_promoted_operational_terminal_binding`
@@ -196,6 +201,30 @@ Absence is therefore proven **only** by the storage layer's own exact
 not-found signal (an `isinstance` match against `google.api_core.exceptions.NotFound`)
 and by nothing else -- never an empty payload, a falsy/`None` generation,
 an `AttributeError`, a `KeyError`, a `LookupError`, or any message text.
+
+**Phase boundary, corrected.** A `NotFound` proves absence **only** when it
+is raised by the initial exact-object metadata reload
+(`blob.reload()`) -- the single moment before any generation has been
+observed. `GoogleCloudStorageTerminalBindingReader` structures this as
+three private phases: `_construct_blob` (acquire the blob handle),
+`_reload_and_observe_generation` (call `blob.reload()` and read the
+resulting generation), and `_pin_and_verify` (construct the
+generation-pinned handle, download, and independently verify). Only
+`read_current_optional`'s own try/except around
+`_reload_and_observe_generation` distinguishes an exact `NotFound` there
+from every other outcome, and only that one distinguishes call returns
+`None`. Once `_reload_and_observe_generation` has returned a valid
+observed generation, object absence is **no longer provable**: a
+`NotFound` from `_construct_blob`, or **any** exception from
+`_pin_and_verify` (including the exact same `NotFound` type -- covering
+deletion, a race, or an unrelated storage failure between observation and
+the pinned download) always raises the sanitized
+`PromotedTerminalBindingControlPlaneError` and is never converted back
+into `None`. `read_current` never distinguishes any phase at all: every
+exception, from either helper, in either phase, fails closed identically.
+This means `read_current_optional` can never fall through into a fresh
+market run merely because a previously-sealed binding became transiently
+unreadable after its generation was already observed.
 
 ### Environment consequence: the SDK is absent here
 
@@ -291,6 +320,24 @@ after-the-try-block pattern so `__cause__` and `__context__` are both
    `spec_id` are re-checked against the returned terminal at this
    boundary, failing closed on any disagreement even though the service
    already enforced it.
+
+### Redundant audit cross-check on the returned result
+
+`AnchoredPromotedOperationalSessionState.__post_init__` independently
+compares `binding_record` against `published.terminal` on every field
+mutually available on both: `spec_id`/`expected_terminal_id`-vs-
+`terminal_id` (already enforced before this task), and now also
+`target_session`, `preparation_id`, and `terminal_completed_at`-vs-
+`completed_at`. Any disagreement raises the plain
+`PromotedOperationalAnchoredSessionError`. This does not close a distinct
+trading-safety gap by itself -- `target_session` and `preparation_id` are
+already transitively protected because `build_promoted_operational_terminal_binding_record`
+derives them from the same verified spec/terminal pair the service
+returns, and `expected_terminal_id` already protects the terminal's
+content identity -- but it prevents the returned result from ever
+exposing contradictory redundant audit metadata to a caller, even if a
+future change to either side's construction path introduced a
+divergence.
 
 ## Non-goals
 

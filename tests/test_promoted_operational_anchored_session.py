@@ -478,6 +478,113 @@ class PromotedOperationalAnchoredSessionTests(unittest.TestCase):
             )
         self.assertEqual(backend.objects[object_name], conflicting_payload)
 
+    def test_anchored_result_rejects_a_binding_record_that_disagrees_with_the_published_terminal_on_redundant_audit_fields(
+        self,
+    ) -> None:
+        preparation, spec = _runner_tests._run_spec(chunk_size=500)
+        quote_source = _runner_tests._FakeQuoteSource(
+            responder=_runner_tests._sorted_quote_responder(preparation)
+        )
+        portfolio_source = _runner_tests._happy_portfolio_source()
+        clock = _runner_tests._clock(
+            _runner_tests._STARTED_AT, _runner_tests._RUN_EVALUATED_AT, _runner_tests._COMPLETED_AT
+        )
+        backend = _FakeBindingBackend()
+        preflight = _PermissiveRecordingPreflight()
+
+        result = run_publish_and_anchor_promoted_operational_session(
+            spec=spec,
+            quote_source=quote_source,
+            portfolio_source=portfolio_source,
+            clock=clock,
+            advisory_outbox=self.advisory_outbox,
+            terminal_store=self.terminal_store,
+            paper_ledger=self.paper_ledger,
+            binding_bucket="test-bucket",
+            binding_writer=backend,
+            binding_reader=backend,
+            binding_preflight=preflight,
+        )
+
+        # The accepted fresh-run result stays accepted: this proves the new
+        # cross-check does not weaken any existing valid construction.
+        reaccepted = AnchoredPromotedOperationalSessionState(
+            published=result.published,
+            binding_record=result.binding_record,
+            binding_bucket=result.binding_bucket,
+            binding_object_name=result.binding_object_name,
+            binding_generation=result.binding_generation,
+            reused_existing_terminal=result.reused_existing_terminal,
+        )
+        self.assertEqual(reaccepted, result)
+
+        def _flip_hex(value: str) -> str:
+            replacement = "1" if value[0] == "0" else "0"
+            return replacement + value[1:]
+
+        with self.subTest(case="terminal_completed_at_mismatch"):
+            mismatched_record = _dc_replace(
+                result.binding_record,
+                terminal_completed_at=(
+                    result.binding_record.terminal_completed_at + timedelta(seconds=1)
+                ),
+            )
+            mismatched_record.verify_content_identity()
+            self.assertEqual(mismatched_record.spec_id, result.published.terminal.spec_id)
+            self.assertEqual(
+                mismatched_record.expected_terminal_id, result.published.terminal.terminal_id
+            )
+            self.assertNotEqual(
+                mismatched_record.terminal_completed_at, result.published.terminal.completed_at
+            )
+            with self.assertRaises(PromotedOperationalAnchoredSessionError):
+                AnchoredPromotedOperationalSessionState(
+                    published=result.published,
+                    binding_record=mismatched_record,
+                    binding_bucket=result.binding_bucket,
+                    binding_object_name=result.binding_object_name,
+                    binding_generation=result.binding_generation,
+                    reused_existing_terminal=result.reused_existing_terminal,
+                )
+
+        with self.subTest(case="target_session_mismatch"):
+            mismatched_record = _dc_replace(
+                result.binding_record,
+                target_session=result.binding_record.target_session + timedelta(days=1),
+            )
+            mismatched_record.verify_content_identity()
+            self.assertNotEqual(
+                mismatched_record.target_session, result.published.terminal.target_session
+            )
+            with self.assertRaises(PromotedOperationalAnchoredSessionError):
+                AnchoredPromotedOperationalSessionState(
+                    published=result.published,
+                    binding_record=mismatched_record,
+                    binding_bucket=result.binding_bucket,
+                    binding_object_name=result.binding_object_name,
+                    binding_generation=result.binding_generation,
+                    reused_existing_terminal=result.reused_existing_terminal,
+                )
+
+        with self.subTest(case="preparation_id_mismatch"):
+            mismatched_record = _dc_replace(
+                result.binding_record,
+                preparation_id=_flip_hex(result.binding_record.preparation_id),
+            )
+            mismatched_record.verify_content_identity()
+            self.assertNotEqual(
+                mismatched_record.preparation_id, result.published.terminal.preparation_id
+            )
+            with self.assertRaises(PromotedOperationalAnchoredSessionError):
+                AnchoredPromotedOperationalSessionState(
+                    published=result.published,
+                    binding_record=mismatched_record,
+                    binding_bucket=result.binding_bucket,
+                    binding_object_name=result.binding_object_name,
+                    binding_generation=result.binding_generation,
+                    reused_existing_terminal=result.reused_existing_terminal,
+                )
+
     def test_preflight_runs_before_the_binding_load_and_before_any_source_clock_or_local_write(
         self,
     ) -> None:

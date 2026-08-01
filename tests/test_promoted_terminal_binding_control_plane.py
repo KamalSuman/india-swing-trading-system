@@ -735,6 +735,240 @@ class PromotedTerminalBindingControlPlaneTests(unittest.TestCase):
                     maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
                 )
 
+    def test_initial_reload_not_found_returns_none_and_never_attempts_pinned_download(
+        self,
+    ) -> None:
+        import india_swing.promoted_terminal_binding_control_plane as control_plane_module
+
+        class _FakeNotFound(Exception):
+            pass
+
+        original_not_found = control_plane_module.NotFound
+        control_plane_module.NotFound = _FakeNotFound
+        self.addCleanup(setattr, control_plane_module, "NotFound", original_not_found)
+
+        terminal, spec = _fixture()
+        object_name = promoted_operational_terminal_binding_object_name(spec)
+
+        class _InitialBlob:
+            generation = None
+
+            def reload(self, *, retry) -> None:
+                raise _FakeNotFound("object not found")
+
+        class _RejectPinnedBucket:
+            def __init__(self) -> None:
+                self.blob_calls: list[tuple[str, object]] = []
+
+            def blob(self, name, generation=None):
+                self.blob_calls.append((name, generation))
+                if generation is not None:
+                    raise AssertionError(
+                        "pinned blob must not be constructed after a reload NotFound"
+                    )
+                return _InitialBlob()
+
+        class _Client:
+            def __init__(self, bucket) -> None:
+                self._bucket = bucket
+
+            def bucket(self, name):
+                return self._bucket
+
+        bucket = _RejectPinnedBucket()
+        reader = GoogleCloudStorageTerminalBindingReader(_Client(bucket))
+        result = reader.read_current_optional(
+            bucket="test-bucket", object_name=object_name, maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES
+        )
+        self.assertIsNone(result)
+        self.assertEqual(bucket.blob_calls, [(object_name, None)])
+
+    def test_pinned_download_not_found_after_valid_observed_generation_never_becomes_absence(
+        self,
+    ) -> None:
+        import india_swing.promoted_terminal_binding_control_plane as control_plane_module
+
+        class _FakeNotFound(Exception):
+            pass
+
+        original_not_found = control_plane_module.NotFound
+        control_plane_module.NotFound = _FakeNotFound
+        self.addCleanup(setattr, control_plane_module, "NotFound", original_not_found)
+
+        terminal, spec = _fixture()
+        object_name = promoted_operational_terminal_binding_object_name(spec)
+
+        class _InitialBlob:
+            generation = 7
+
+            def reload(self, *, retry) -> None:
+                pass
+
+        class _PinnedBlob:
+            generation = 7
+
+            def download_as_bytes(self, **_kwargs) -> bytes:
+                raise _FakeNotFound("SECRET-PINNED-DOWNLOAD-DO-NOT-LEAK-4d5e")
+
+        class _Bucket:
+            def blob(self, name, generation=None):
+                if generation is None:
+                    return _InitialBlob()
+                return _PinnedBlob()
+
+        class _Client:
+            def bucket(self, name):
+                return _Bucket()
+
+        reader = GoogleCloudStorageTerminalBindingReader(_Client())
+
+        try:
+            reader.read_current_optional(
+                bucket="test-bucket",
+                object_name=object_name,
+                maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
+            )
+            self.fail("expected PromotedTerminalBindingControlPlaneError")
+        except PromotedTerminalBindingControlPlaneError as exc:
+            self.assertNotIn("SECRET-PINNED-DOWNLOAD-DO-NOT-LEAK-4d5e", str(exc))
+            self.assertIsNone(exc.__cause__)
+            self.assertIsNone(exc.__context__)
+
+        with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+            reader.read_current(
+                bucket="test-bucket",
+                object_name=object_name,
+                maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
+            )
+
+    def test_not_found_from_pre_reload_construction_is_not_treated_as_absence(
+        self,
+    ) -> None:
+        import india_swing.promoted_terminal_binding_control_plane as control_plane_module
+
+        class _FakeNotFound(Exception):
+            pass
+
+        original_not_found = control_plane_module.NotFound
+        control_plane_module.NotFound = _FakeNotFound
+        self.addCleanup(setattr, control_plane_module, "NotFound", original_not_found)
+
+        terminal, spec = _fixture()
+        object_name = promoted_operational_terminal_binding_object_name(spec)
+
+        with self.subTest(case="client_bucket_raises_not_found"):
+
+            class _RaisingClient:
+                def bucket(self, name):
+                    raise _FakeNotFound("SECRET-BUCKET-CONSTRUCT-DO-NOT-LEAK-7a8b")
+
+            reader = GoogleCloudStorageTerminalBindingReader(_RaisingClient())
+            try:
+                reader.read_current_optional(
+                    bucket="test-bucket",
+                    object_name=object_name,
+                    maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
+                )
+                self.fail("expected PromotedTerminalBindingControlPlaneError")
+            except PromotedTerminalBindingControlPlaneError as exc:
+                self.assertNotIn("SECRET-BUCKET-CONSTRUCT-DO-NOT-LEAK-7a8b", str(exc))
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+        with self.subTest(case="bucket_blob_raises_not_found"):
+
+            class _RaisingBucket:
+                def blob(self, name, generation=None):
+                    raise _FakeNotFound("SECRET-BLOB-CONSTRUCT-DO-NOT-LEAK-9c1d")
+
+            class _Client:
+                def bucket(self, name):
+                    return _RaisingBucket()
+
+            reader = GoogleCloudStorageTerminalBindingReader(_Client())
+            try:
+                reader.read_current_optional(
+                    bucket="test-bucket",
+                    object_name=object_name,
+                    maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
+                )
+                self.fail("expected PromotedTerminalBindingControlPlaneError")
+            except PromotedTerminalBindingControlPlaneError as exc:
+                self.assertNotIn("SECRET-BLOB-CONSTRUCT-DO-NOT-LEAK-9c1d", str(exc))
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+    def test_read_current_raises_for_not_found_in_both_observation_and_pinned_read_phases(
+        self,
+    ) -> None:
+        import india_swing.promoted_terminal_binding_control_plane as control_plane_module
+
+        class _FakeNotFound(Exception):
+            pass
+
+        original_not_found = control_plane_module.NotFound
+        control_plane_module.NotFound = _FakeNotFound
+        self.addCleanup(setattr, control_plane_module, "NotFound", original_not_found)
+
+        terminal, spec = _fixture()
+        object_name = promoted_operational_terminal_binding_object_name(spec)
+
+        with self.subTest(case="observation_phase"):
+
+            class _InitialBlob:
+                generation = None
+
+                def reload(self, *, retry) -> None:
+                    raise _FakeNotFound("not found")
+
+            class _Bucket:
+                def blob(self, name, generation=None):
+                    return _InitialBlob()
+
+            class _Client:
+                def bucket(self, name):
+                    return _Bucket()
+
+            reader = GoogleCloudStorageTerminalBindingReader(_Client())
+            with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+                reader.read_current(
+                    bucket="test-bucket",
+                    object_name=object_name,
+                    maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
+                )
+
+        with self.subTest(case="pinned_read_phase"):
+
+            class _InitialBlob2:
+                generation = 3
+
+                def reload(self, *, retry) -> None:
+                    pass
+
+            class _PinnedBlob:
+                generation = 3
+
+                def download_as_bytes(self, **_kwargs) -> bytes:
+                    raise _FakeNotFound("not found")
+
+            class _Bucket2:
+                def blob(self, name, generation=None):
+                    if generation is None:
+                        return _InitialBlob2()
+                    return _PinnedBlob()
+
+            class _Client2:
+                def bucket(self, name):
+                    return _Bucket2()
+
+            reader2 = GoogleCloudStorageTerminalBindingReader(_Client2())
+            with self.assertRaises(PromotedTerminalBindingControlPlaneError):
+                reader2.read_current(
+                    bucket="test-bucket",
+                    object_name=object_name,
+                    maximum_bytes=MAXIMUM_TERMINAL_BINDING_BYTES,
+                )
+
     def test_bucket_preflight_asks_one_bucket_level_question_and_never_touches_an_object(
         self,
     ) -> None:
