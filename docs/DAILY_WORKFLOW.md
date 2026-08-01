@@ -85,6 +85,46 @@ does not list GCS objects, select a latest artifact, download unspecified NSE
 data, or place an order. The scheduler must supply the exact daily run and
 derived evidence IDs produced by the preceding collection job.
 
+## Manual NSE historical archive import
+
+The historical cash-equity importer consumes only an exact four-file NSE
+Archive session: full bhavcopy/delivery, UDiFF bhavcopy, REG1 surveillance,
+and the NSE-only CM MII security master. It validates and reconciles only the
+declared `EQ` lane, preserves non-EQ exclusions, joins same-session identity
+evidence, and writes create-once market snapshots plus one immutable range
+index. Source disagreements are retained as blocking identity issues; they are
+never dropped or guessed. Imported snapshots remain collection-only,
+non-actionable, and training-ineligible.
+
+The immutable range index reports both `identity_issue_count` and
+`identity_quarantined_session_count`. These counts are operational alarms, not
+permission to repair history from a later session. A later NSE file may explain
+an identifier transition, but only separately bound point-in-time evidence can
+make a quarantined row eligible for research or trading.
+
+An archive that fails ordinary-session cross-field validation is not silently
+skipped or coerced. Preserve its official outer ZIP outside the canonical
+snapshot set and quarantine the staged session for explicit review. Special
+sessions such as Muhurat trading require separately bound calendar evidence and
+a dedicated policy before their price rows can enter research.
+
+```powershell
+python -m india_swing.market_data.nse_archive_cli import-range `
+  --staging-root C:\project\india-swing-data\staging `
+  --archive-root C:\project\india-swing-data\source-archives `
+  --store-root C:\project\india-swing-data\canonical-market-data `
+  --start 2026-01-01 `
+  --end 2026-07-31 `
+  --observed-at 2026-08-02T00:00:00+00:00 `
+  --workers 4
+```
+
+`--observed-at` is mandatory and must describe the explicit historical-import
+knowledge time; the importer never reads the ambient clock. An official outer
+ZIP is preferred. A previously validated exact extracted entry set is accepted
+only when the original ZIP is unavailable, and that weaker provenance mode is
+recorded in the content-addressed payload.
+
 ## Deliberate boundary
 
 This workflow closes the automated **EOD paper-outcome leg**. It does not yet

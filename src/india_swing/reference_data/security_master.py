@@ -15,6 +15,7 @@ from india_swing.identity import content_id
 from .models import (
     NSE_CM_SECURITY_DATASET,
     NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION,
+    NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION_V2,
     MarketEligibility,
     NseCmSecurityRecord,
     ParsedNseCmSecurityMaster,
@@ -154,6 +155,33 @@ NSE_CM_MII_SECURITY_HEADER_SHA256 = hashlib.sha256(
     ",".join(NSE_CM_MII_SECURITY_HEADER).encode("utf-8")
 ).hexdigest()
 
+# NSE changed two positions in the 120-column file on 31-Jul-2026.  The
+# closing-auction eligibility field is not semantically interchangeable with
+# the removed RETDBT eligibility field, so it is recognized as a separate
+# source schema and normalized conservatively below rather than silently
+# renamed.
+_v2_header = list(NSE_CM_MII_SECURITY_HEADER)
+_v2_header[NSE_CM_MII_SECURITY_HEADER_INDEX["ElgbltyRETDBTMkt"]] = (
+    "ElgbltyClsgAuctnSsn"
+)
+_v2_header[NSE_CM_MII_SECURITY_HEADER_INDEX["Rsvd01"]] = "XchgExclsv"
+NSE_CM_MII_SECURITY_HEADER_V2 = tuple(_v2_header)
+del _v2_header
+NSE_CM_MII_SECURITY_HEADER_V2_SHA256 = hashlib.sha256(
+    ",".join(NSE_CM_MII_SECURITY_HEADER_V2).encode("utf-8")
+).hexdigest()
+
+_SUPPORTED_HEADERS = {
+    NSE_CM_MII_SECURITY_HEADER: (
+        NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION,
+        NSE_CM_MII_SECURITY_HEADER_SHA256,
+    ),
+    NSE_CM_MII_SECURITY_HEADER_V2: (
+        NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION_V2,
+        NSE_CM_MII_SECURITY_HEADER_V2_SHA256,
+    ),
+}
+
 _FILENAME = re.compile(r"NSE_CM_security_(\d{8})\.csv\.gz\Z")
 _TICKER = re.compile(r"[A-Z0-9&-]{1,10}\Z")
 _SERIES = re.compile(r"[A-Z0-9]{1,2}\Z")
@@ -212,6 +240,37 @@ def _canonical_row_bytes(row: tuple[str, ...]) -> bytes:
         allow_nan=False,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _logical_v1_row(
+    row: tuple[str, ...],
+    source_schema_version: str,
+) -> tuple[str, ...]:
+    if source_schema_version == NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION:
+        return row
+    if source_schema_version != NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION_V2:
+        raise ReferenceArtifactIntegrityError(
+            "unsupported NSE CM MII security-master schema"
+        )
+    closing_auction_index = NSE_CM_MII_SECURITY_HEADER_INDEX[
+        "ElgbltyRETDBTMkt"
+    ]
+    exchange_exclusive_index = NSE_CM_MII_SECURITY_HEADER_INDEX["Rsvd01"]
+    if row[closing_auction_index] not in ("0", "1"):
+        raise ReferenceArtifactIntegrityError(
+            "invalid closing-auction eligibility flag"
+        )
+    if row[exchange_exclusive_index]:
+        raise ReferenceArtifactIntegrityError(
+            "unexpected exchange-exclusive scope value"
+        )
+    normalized = list(row)
+    # RETDBT eligibility is absent in v2.  False is a conservative, fail-closed
+    # normalization and the distinct source_schema_version preserves that the
+    # value was unavailable rather than reported false.
+    normalized[closing_auction_index] = "0"
+    normalized[exchange_exclusive_index] = ""
+    return tuple(normalized)
 
 
 def _bounded_gzip_decompress(payload: bytes, *, maximum_output_bytes: int) -> bytes:
@@ -334,10 +393,12 @@ class NseCmSecurityMasterParser:
             raise ReferenceArtifactIntegrityError(
                 "security master has no readable header"
             ) from exc
-        if header != NSE_CM_MII_SECURITY_HEADER:
+        header_spec = _SUPPORTED_HEADERS.get(header)
+        if header_spec is None:
             raise ReferenceArtifactIntegrityError(
                 "unsupported NSE CM MII security-master header"
             )
+        source_schema_version, header_sha256 = header_spec
 
         records: list[NseCmSecurityRecord] = []
         instrument_ids: set[int] = set()
@@ -350,7 +411,7 @@ class NseCmSecurityMasterParser:
                         "security master exceeds the row limit"
                     )
                 row = tuple(raw_row)
-                if len(row) != len(NSE_CM_MII_SECURITY_HEADER):
+                if len(row) != len(header):
                     raise ReferenceArtifactIntegrityError(
                         "security-master row field count does not match its header"
                     )
@@ -366,9 +427,10 @@ class NseCmSecurityMasterParser:
                         "security-master field contains a control character"
                     )
                 record = self._record(
-                    row,
+                    _logical_v1_row(row, source_schema_version),
                     source_row_number,
                     claimed_report_date,
+                    raw_row=row,
                 )
                 listing_key = (record.ticker_symbol, record.security_series)
                 if record.financial_instrument_id in instrument_ids:
@@ -393,9 +455,9 @@ class NseCmSecurityMasterParser:
         return ParsedNseCmSecurityMaster(
             original_filename=original_filename,
             claimed_report_date=claimed_report_date,
-            source_schema_version=NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION,
-            header=NSE_CM_MII_SECURITY_HEADER,
-            header_sha256=NSE_CM_MII_SECURITY_HEADER_SHA256,
+            source_schema_version=source_schema_version,
+            header=header,
+            header_sha256=header_sha256,
             raw_sha256=_sha256(payload),
             uncompressed_sha256=_sha256(uncompressed),
             compressed_byte_count=len(payload),
@@ -421,7 +483,11 @@ class NseCmSecurityMasterParser:
         row: tuple[str, ...],
         source_row_number: int,
         claimed_report_date: date,
+        *,
+        raw_row: tuple[str, ...] | None = None,
     ) -> NseCmSecurityRecord:
+        if raw_row is None:
+            raw_row = row
         financial_instrument_id = _integer_field(
             row,
             "FinInstrmId",
@@ -475,7 +541,7 @@ class NseCmSecurityMasterParser:
         if delete_flag not in ("N", "Y"):
             raise ReferenceArtifactIntegrityError("invalid delete flag")
 
-        normalized_row_sha256 = _sha256(_canonical_row_bytes(row))
+        normalized_row_sha256 = _sha256(_canonical_row_bytes(raw_row))
         source_record_id = content_id(
             {
                 "dataset": NSE_CM_SECURITY_DATASET,
@@ -514,5 +580,5 @@ class NseCmSecurityMasterParser:
             readmission_timestamp=readmission_timestamp,
             delete_flag=delete_flag,
             disposition=disposition,
-            raw_fields=row,
+            raw_fields=raw_row,
         )

@@ -12,8 +12,15 @@ from india_swing.reference.models import ReferenceReadiness
 NSE_CM_SECURITY_DATASET = "nse-cm-mii-security"
 REFERENCE_ARTIFACT_SCHEMA_VERSION = "reference-artifact/v2"
 REFERENCE_NORMALIZED_CODEC_VERSION = "nse-cm-mii-security-json/v2"
-NSE_CM_SECURITY_PARSER_VERSION = "nse-cm-mii-security-parser/v2"
-NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION = "nse-cm-mii-security/iso-tags-120/v1"
+NSE_CM_SECURITY_PARSER_VERSION = "nse-cm-mii-security-parser/v3"
+NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION_V1 = (
+    "nse-cm-mii-security/iso-tags-120/v1"
+)
+NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION_V2 = (
+    "nse-cm-mii-security/closing-auction-exchange-exclusive-120/v2"
+)
+# Backwards-compatible public name for callers that build pinned v1 fixtures.
+NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION = NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION_V1
 NSE_CM_SECURITY_SCOPE_POLICY_VERSION = "nse-cm-equity-scope/collection-only-v2"
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")

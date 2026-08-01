@@ -19,6 +19,7 @@ from india_swing.reference_data.cli import main as reference_data_main
 from india_swing.reference_data.models import (
     AcquisitionMode,
     NSE_CM_SECURITY_DATASET,
+    NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION_V2,
     ReferenceArtifactConflict,
     ReferenceArtifactIntegrityError,
     ReferenceArtifactNotFound,
@@ -28,6 +29,7 @@ from india_swing.reference_data.models import (
 )
 from india_swing.reference_data.security_master import (
     NSE_CM_MII_SECURITY_HEADER,
+    NSE_CM_MII_SECURITY_HEADER_V2,
     NseCmSecurityMasterParser,
 )
 
@@ -87,6 +89,24 @@ def security_master_bytes(
     writer.writerow(list(NSE_CM_MII_SECURITY_HEADER) if header is None else header)
     writer.writerows(rows or [security_row()])
     return gzip.compress(stream.getvalue().encode("utf-8"), mtime=0)
+
+
+def security_master_v2_bytes(
+    *,
+    closing_auction_eligible: str = "1",
+    exchange_exclusive: str = "",
+) -> bytes:
+    legacy_values = dict(zip(NSE_CM_MII_SECURITY_HEADER, security_row(), strict=True))
+    values = {
+        **legacy_values,
+        "ElgbltyClsgAuctnSsn": closing_auction_eligible,
+        "XchgExclsv": exchange_exclusive,
+    }
+    row = [values[name] for name in NSE_CM_MII_SECURITY_HEADER_V2]
+    return security_master_bytes(
+        [row],
+        header=list(NSE_CM_MII_SECURITY_HEADER_V2),
+    )
 
 
 def clock_sequence(*values: datetime):
@@ -149,6 +169,35 @@ class NseCmSecurityMasterParserTests(unittest.TestCase):
         self.assertEqual(parsed.records[0].validated_isin, "INE009A01021")
         self.assertEqual(parsed.records[2].raw_source_identifier, "DUMMYSAN005")
         self.assertIsNone(parsed.records[2].validated_isin)
+
+    def test_v2_schema_is_explicit_and_missing_retdbt_eligibility_fails_closed(self) -> None:
+        parsed = NseCmSecurityMasterParser().parse_bytes(
+            security_master_v2_bytes(),
+            original_filename="NSE_CM_security_31072026.csv.gz",
+        )
+
+        self.assertEqual(
+            parsed.source_schema_version,
+            NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION_V2,
+        )
+        self.assertEqual(parsed.header, NSE_CM_MII_SECURITY_HEADER_V2)
+        self.assertEqual(parsed.header[23], "ElgbltyClsgAuctnSsn")
+        self.assertEqual(parsed.header[58], "XchgExclsv")
+        self.assertEqual(parsed.records[0].raw_fields[23], "1")
+        self.assertFalse(parsed.records[0].market_eligibility[2].eligible)
+        self.assertTrue(parsed.records[0].market_eligibility[0].eligible)
+
+    def test_v2_schema_rejects_invalid_new_scope_fields(self) -> None:
+        cases = (
+            security_master_v2_bytes(closing_auction_eligible="2"),
+            security_master_v2_bytes(exchange_exclusive="BSE"),
+        )
+        for payload in cases:
+            with self.subTest(), self.assertRaises(ReferenceArtifactIntegrityError):
+                NseCmSecurityMasterParser().parse_bytes(
+                    payload,
+                    original_filename="NSE_CM_security_31072026.csv.gz",
+                )
 
     def test_currently_blank_scope_fields_fail_closed_when_populated(self) -> None:
         for field_name in ("Xchg", "Sgmt", "SctyTp", "FinInstrmTp", "InstrmTp"):
