@@ -125,6 +125,21 @@ ZIP is preferred. A previously validated exact extracted entry set is accepted
 only when the original ZIP is unavailable, and that weaker provenance mode is
 recorded in the content-addressed payload.
 
+Before an archive range is handed to an identity or research job, replay its
+exact immutable index and every pinned session snapshot:
+
+```powershell
+python -m india_swing.market_data.nse_archive_cli verify-range `
+  --store-root C:\project\india-swing-data\canonical-market-data `
+  --index-snapshot-id <exact-index-snapshot-id>
+```
+
+The verifier never lists or selects a latest index. It rechecks index/session
+lineage, byte-exact payload replay, collection-only safety flags, record lanes,
+and identity-issue accounting. This complete replay is intentionally an
+offline trust-boundary operation; recurring jobs should pin its accepted index
+ID and process only newly appended immutable sessions.
+
 ## Deliberate boundary
 
 This workflow closes the automated **EOD paper-outcome leg**. It does not yet

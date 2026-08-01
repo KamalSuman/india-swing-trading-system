@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import zipfile
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -18,6 +19,10 @@ from india_swing.market_data.nse_archive import (
     parse_nse_historical_archive_bytes,
 )
 from india_swing.market_data.snapshot_store import LocalMarketSnapshotStore
+from india_swing.market_data.nse_archive_range import (
+    NseHistoricalArchiveRangeError,
+    load_verified_nse_historical_archive_range,
+)
 from india_swing.reference_data.models import (
     NSE_CM_SECURITY_SOURCE_SCHEMA_VERSION_V2,
 )
@@ -289,6 +294,62 @@ class NseHistoricalArchiveStoreTests(unittest.TestCase):
                 ],
                 1,
             )
+
+            verified = load_verified_nse_historical_archive_range(
+                store,
+                index_snapshot_id=first_index.manifest.snapshot_id,
+            )
+            self.assertEqual(verified.range_start, SESSION)
+            self.assertEqual(verified.range_end, SESSION)
+            self.assertEqual(verified.record_count, 1)
+            self.assertEqual(verified.identity_issue_count, 1)
+            self.assertEqual(verified.identity_quarantined_session_count, 1)
+
+    def test_range_verifier_rejects_mutated_session_record_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staging = root / "staging" / SESSION.isoformat()
+            archives = root / "source-archives" / SESSION.isoformat()
+            staging.mkdir(parents=True)
+            archives.mkdir(parents=True)
+            archive_path = archives / "Reports-Archives-Multiple-15072026.zip"
+            archive_path.write_bytes(archive_bytes())
+            with zipfile.ZipFile(archive_path) as archive:
+                for name in archive.namelist():
+                    (staging / name).write_bytes(archive.read(name))
+            store = LocalMarketSnapshotStore(root / "canonical")
+            sessions, index = import_nse_historical_range(
+                staging_root=root / "staging",
+                archive_root=root / "source-archives",
+                store=store,
+                start=SESSION,
+                end=SESSION,
+                observed_at=OBSERVED_AT,
+            )
+            session = store.get(
+                NSE_HISTORICAL_ARCHIVE_EQ_DATASET,
+                sessions[0].snapshot_id,
+            )
+            payload = dict(session.normalized_payload)
+            record = dict(payload["records"][0])
+            record["close"] = record["open"]
+            payload["records"] = (record,)
+            mutated = replace(session, normalized_payload=payload)
+
+            class Reader:
+                def get(self, dataset: str, snapshot_id: str):
+                    if dataset == NSE_HISTORICAL_ARCHIVE_EQ_DATASET:
+                        return mutated
+                    return index
+
+            with self.assertRaisesRegex(
+                NseHistoricalArchiveRangeError,
+                "archive range session payload bytes are invalid",
+            ):
+                load_verified_nse_historical_archive_range(
+                    Reader(),
+                    index_snapshot_id=index.manifest.snapshot_id,
+                )
 
 
 if __name__ == "__main__":

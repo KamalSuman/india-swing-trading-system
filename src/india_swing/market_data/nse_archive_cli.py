@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from .nse_archive import import_nse_historical_range
+from .nse_archive_range import load_verified_nse_historical_archive_range
 from .snapshot_store import LocalMarketSnapshotStore
 
 
@@ -39,21 +40,30 @@ def build_parser() -> argparse.ArgumentParser:
     import_range.add_argument("--end", type=_date, required=True)
     import_range.add_argument("--observed-at", type=_aware_datetime, required=True)
     import_range.add_argument("--workers", type=int, default=4)
+    verify_range = subparsers.add_parser("verify-range")
+    verify_range.add_argument("--store-root", type=Path, required=True)
+    verify_range.add_argument("--index-snapshot-id", required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     try:
-        sessions, index = import_nse_historical_range(
-            staging_root=arguments.staging_root,
-            archive_root=arguments.archive_root,
-            store=LocalMarketSnapshotStore(arguments.store_root),
-            start=arguments.start,
-            end=arguments.end,
-            observed_at=arguments.observed_at,
-            workers=arguments.workers,
-        )
+        if arguments.command == "verify-range":
+            verified = load_verified_nse_historical_archive_range(
+                LocalMarketSnapshotStore(arguments.store_root),
+                index_snapshot_id=arguments.index_snapshot_id,
+            )
+        else:
+            sessions, index = import_nse_historical_range(
+                staging_root=arguments.staging_root,
+                archive_root=arguments.archive_root,
+                store=LocalMarketSnapshotStore(arguments.store_root),
+                start=arguments.start,
+                end=arguments.end,
+                observed_at=arguments.observed_at,
+                workers=arguments.workers,
+            )
     except Exception as error:
         print(
             json.dumps(
@@ -65,6 +75,29 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 1
+    if arguments.command == "verify-range":
+        print(
+            json.dumps(
+                {
+                    "status": "NSE_HISTORICAL_ARCHIVE_RANGE_VERIFIED",
+                    "collection_only": True,
+                    "actionable": False,
+                    "training_eligible": False,
+                    "index_snapshot_id": verified.index_snapshot_id,
+                    "coverage_start": verified.range_start.isoformat(),
+                    "coverage_end": verified.range_end.isoformat(),
+                    "session_count": len(verified.sessions),
+                    "record_count": verified.record_count,
+                    "identity_issue_count": verified.identity_issue_count,
+                    "identity_quarantined_session_count": (
+                        verified.identity_quarantined_session_count
+                    ),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(
         json.dumps(
             {
