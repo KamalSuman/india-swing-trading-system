@@ -49,6 +49,7 @@ india-swing-promoted-engine = "india_swing.promoted_engine_cli:main"
 india-swing-promoted-graph-publish = "india_swing.promoted_graph_publisher_cli:main"
 india-swing-promoted-research-run = "india_swing.promoted_research_run_cli:main"
 india-swing-promoted-operational-prepare = "india_swing.promoted_operational_preparation_cli:main"
+india-swing-promoted-operational-job = "india_swing.promoted_operational_job:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
