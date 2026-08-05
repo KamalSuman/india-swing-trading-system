@@ -92,6 +92,12 @@ def main(argv: list[str] | None = None) -> int:
                     "identity_quarantined_session_count": (
                         verified.identity_quarantined_session_count
                     ),
+                    "incomplete_evidence_session_count": (
+                        verified.incomplete_evidence_session_count
+                    ),
+                    "evidence_profile_counts": dict(
+                        verified.evidence_profile_counts
+                    ),
                 },
                 indent=2,
                 sort_keys=True,
@@ -113,6 +119,12 @@ def main(argv: list[str] | None = None) -> int:
                 "identity_quarantined_session_count": sum(
                     value.identity_issue_count > 0 for value in sessions
                 ),
+                "incomplete_evidence_session_count": index.normalized_payload[
+                    "incomplete_evidence_session_count"
+                ],
+                "evidence_profile_counts": index.normalized_payload[
+                    "evidence_profile_counts"
+                ],
                 "coverage_start": sessions[0].session.isoformat(),
                 "coverage_end": sessions[-1].session.isoformat(),
                 "index_snapshot_id": index.manifest.snapshot_id,

@@ -9,11 +9,18 @@ from typing import Mapping, Protocol
 from india_swing.identity import content_id
 
 from .nse_archive import (
+    EVIDENCE_PROFILE_COMPLETE,
+    EVIDENCE_PROFILE_PRICE_UDIFF,
+    EVIDENCE_PROFILE_PRICE_UDIFF_SECURITY,
+    EVIDENCE_PROFILE_UNRECONCILED,
+    IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE,
     NSE_HISTORICAL_ARCHIVE_EQ_DATASET,
     NSE_HISTORICAL_ARCHIVE_INDEX_DATASET,
     NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION,
+    NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2,
     NSE_HISTORICAL_ARCHIVE_PROVIDER,
     NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION,
+    NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1,
 )
 from .codec import decode_market_payload
 from .snapshot_store import StoredMarketSnapshot
@@ -23,10 +30,12 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTITY_STATUSES = {
     "MATCHED_SAME_SESSION",
     "SECURITY_MASTER_MISSING",
+    "SECURITY_MASTER_EVIDENCE_UNAVAILABLE",
     "FINANCIAL_INSTRUMENT_ID_MISMATCH",
     "SOURCE_IDENTIFIER_MISMATCH",
+    IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE,
 }
-_INDEX_KEYS = {
+_INDEX_KEYS_V2 = {
     "schema_version",
     "range_start",
     "range_end",
@@ -37,14 +46,19 @@ _INDEX_KEYS = {
     "identity_quarantined_session_count",
     "records",
 }
-_INDEX_RECORD_KEYS = {
+_INDEX_KEYS_V3 = _INDEX_KEYS_V2 | {
+    "incomplete_evidence_session_count",
+    "evidence_profile_counts",
+}
+_INDEX_RECORD_KEYS_V2 = {
     "session",
     "snapshot_id",
     "record_count",
     "source_container_sha256",
     "identity_issue_count",
 }
-_SESSION_KEYS = {
+_INDEX_RECORD_KEYS_V3 = _INDEX_RECORD_KEYS_V2 | {"evidence_profile"}
+_SESSION_KEYS_V1 = {
     "schema_version",
     "session",
     "exchange",
@@ -63,6 +77,23 @@ _SESSION_KEYS = {
     "training_eligible",
     "knowledge_time_status",
     "records",
+}
+_SESSION_KEYS_V2 = _SESSION_KEYS_V1 | {
+    "evidence_profile",
+    "missing_evidence",
+}
+_EVIDENCE_PROFILE_MISSING = {
+    EVIDENCE_PROFILE_PRICE_UDIFF: (
+        "REG1_SURVEILLANCE",
+        "NSE_CM_SECURITY_MASTER",
+    ),
+    EVIDENCE_PROFILE_PRICE_UDIFF_SECURITY: ("REG1_SURVEILLANCE",),
+    EVIDENCE_PROFILE_COMPLETE: (),
+    EVIDENCE_PROFILE_UNRECONCILED: (
+        "UDIFF_BHAVCOPY",
+        "NSE_CM_SECURITY_MASTER",
+        "REG1_SURVEILLANCE",
+    ),
 }
 _RECORD_KEYS = {
     "session",
@@ -126,6 +157,8 @@ class VerifiedNseHistoricalArchiveRange:
     record_count: int
     identity_issue_count: int
     identity_quarantined_session_count: int
+    incomplete_evidence_session_count: int
+    evidence_profile_counts: Mapping[str, int]
 
 
 def _fail(message: str) -> None:
@@ -142,6 +175,84 @@ def _sha256(value: object, message: str) -> str:
     if type(value) is not str or _SHA256.fullmatch(value) is None:
         _fail(message)
     return value
+
+
+def _replay_record_id(record: Mapping[str, object]) -> str:
+    payload = {key: value for key, value in record.items() if key != "record_id"}
+    return content_id(
+        {"schema": "nse-historical-archive-eq-record/v1", **payload},
+        length=64,
+    )
+
+
+def _replay_issue_id(issue: Mapping[str, object]) -> str:
+    payload = {key: value for key, value in issue.items() if key != "issue_id"}
+    return content_id(
+        {"schema": "nse-historical-archive-identity-issue/v1", **payload},
+        length=64,
+    )
+
+
+_UNRECONCILED_NULL_RECORD_FIELDS = (
+    "financial_instrument_id",
+    "security_master_financial_instrument_id",
+    "security_source_record_id",
+    "security_master_source_identifier",
+    "udiff_source_identifier",
+    "normal_market_status",
+    "normal_market_eligible",
+    "permitted_to_trade",
+    "delete_flag",
+)
+_UNRECONCILED_NULL_ISSUE_FIELDS = (
+    "udiff_financial_instrument_id",
+    "security_master_financial_instrument_id",
+    "security_master_source_identifier",
+    "udiff_source_identifier",
+)
+
+
+def _verify_source_entries(
+    value: object,
+    *,
+    session: date,
+    evidence_profile: str,
+) -> None:
+    expected = (
+        f"sec_bhavdata_full_{session:%d%m%Y}.csv",
+        f"BhavCopy_NSE_CM_0_0_0_{session:%Y%m%d}_F_0000.csv.zip",
+        f"REG1_IND{session:%d%m%y}.csv",
+        f"NSE_CM_security_{session:%d%m%Y}.csv.gz",
+    )
+    names_by_profile = {
+        EVIDENCE_PROFILE_UNRECONCILED: expected[:1],
+        EVIDENCE_PROFILE_PRICE_UDIFF: expected[:2],
+        EVIDENCE_PROFILE_PRICE_UDIFF_SECURITY: (
+            expected[0],
+            expected[1],
+            expected[3],
+        ),
+        EVIDENCE_PROFILE_COMPLETE: expected,
+    }
+    if type(value) is not tuple:
+        _fail("archive range source entries are invalid")
+    pairs = value
+    if any(
+        type(pair) is not tuple
+        or len(pair) != 2
+        or type(pair[0]) is not str
+        or pair[0] not in names_by_profile[evidence_profile]
+        for pair in pairs
+    ):
+        _fail("archive range source entries are invalid")
+    if (
+        len(pairs) != len(names_by_profile[evidence_profile])
+        or pairs != tuple(sorted(pairs))
+        or {pair[0] for pair in pairs} != set(names_by_profile[evidence_profile])
+    ):
+        _fail("archive range source entries are invalid")
+    for _, digest in pairs:
+        _sha256(digest, "archive range source entry identity is invalid")
 
 
 def _verify_record(value: object, session: date) -> Mapping[str, object]:
@@ -179,7 +290,7 @@ def _verify_session(
     stored: StoredMarketSnapshot,
     index_record: Mapping[str, object],
     index_observed_at: object,
-) -> None:
+) -> str:
     if type(stored) is not StoredMarketSnapshot:
         _fail("archive range session snapshot type is invalid")
     manifest = stored.manifest
@@ -222,16 +333,28 @@ def _verify_session(
         or manifest.record_count != index_record["record_count"]
     ):
         _fail("archive range session manifest is invalid")
+    if not isinstance(stored.normalized_payload, Mapping):
+        _fail("archive range session payload is invalid")
+    session_schema = stored.normalized_payload.get("schema_version")
+    if session_schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1:
+        session_keys = _SESSION_KEYS_V1
+        evidence_profile = EVIDENCE_PROFILE_COMPLETE
+    elif session_schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION:
+        session_keys = _SESSION_KEYS_V2
+        evidence_profile = stored.normalized_payload.get("evidence_profile")
+        if evidence_profile not in _EVIDENCE_PROFILE_MISSING:
+            _fail("archive range session evidence profile is invalid")
+    else:
+        _fail("archive range session schema is invalid")
     payload = _mapping(
         stored.normalized_payload,
-        _SESSION_KEYS,
+        session_keys,
         "archive range session payload is invalid",
     )
     records = payload["records"]
     issues = payload["identity_issues"]
     if (
-        payload["schema_version"] != NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION
-        or payload["session"] != session
+        payload["session"] != session
         or payload["exchange"] != "NSE"
         or payload["series_scope"] != ("EQ",)
         or payload["collection_only"] is not True
@@ -246,6 +369,44 @@ def _verify_session(
         or len(issues) != payload["identity_issue_count"]
     ):
         _fail("archive range session payload is invalid")
+    if session_schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION:
+        if payload["missing_evidence"] != _EVIDENCE_PROFILE_MISSING[evidence_profile]:
+            _fail("archive range session missing-evidence accounting is invalid")
+    _verify_source_entries(
+        payload["source_entry_sha256"],
+        session=session,
+        evidence_profile=evidence_profile,
+    )
+    security_available = evidence_profile not in {
+        EVIDENCE_PROFILE_PRICE_UDIFF,
+        EVIDENCE_PROFILE_UNRECONCILED,
+    }
+    surveillance_available = evidence_profile == EVIDENCE_PROFILE_COMPLETE
+    if (
+        security_available
+        and (
+            type(payload["security_master_source_schema_version"]) is not str
+            or _SHA256.fullmatch(payload["security_master_header_sha256"] or "")
+            is None
+        )
+    ) or (
+        not security_available
+        and (
+            payload["security_master_source_schema_version"] is not None
+            or payload["security_master_header_sha256"] is not None
+        )
+    ):
+        _fail("archive range security-master evidence is invalid")
+    if (
+        surveillance_available
+        and (
+            type(payload["reg1_row_count"]) is not int
+            or payload["reg1_row_count"] < 0
+        )
+    ) or (
+        not surveillance_available and payload["reg1_row_count"] is not None
+    ):
+        _fail("archive range surveillance evidence is invalid")
     verified_records = tuple(_verify_record(value, session) for value in records)
     lanes = tuple((value["listing_key"], value["series"]) for value in verified_records)
     if len(set(lanes)) != len(lanes):
@@ -262,6 +423,50 @@ def _verify_session(
     }
     if unresolved != issue_keys:
         _fail("archive range identity issue accounting is invalid")
+    if evidence_profile == EVIDENCE_PROFILE_UNRECONCILED:
+        if any(
+            value["identity_status"]
+            != IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE
+            or any(
+                value[field] is not None
+                for field in _UNRECONCILED_NULL_RECORD_FIELDS
+            )
+            or value["record_id"] != _replay_record_id(value)
+            for value in verified_records
+        ):
+            _fail("archive range record evidence profile is inconsistent")
+        if (
+            len(verified_issues) != len(verified_records)
+            or len(
+                {
+                    (value["listing_key"], value["series"])
+                    for value in verified_issues
+                }
+            )
+            != len(verified_issues)
+            or any(
+                value["status"]
+                != IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE
+                or any(
+                    value[field] is not None
+                    for field in _UNRECONCILED_NULL_ISSUE_FIELDS
+                )
+                or value["issue_id"] != _replay_issue_id(value)
+                for value in verified_issues
+            )
+        ):
+            _fail("archive range identity issue accounting is invalid")
+    elif any(
+        (value["identity_status"] == "SECURITY_MASTER_EVIDENCE_UNAVAILABLE")
+        != (not security_available)
+        for value in verified_records
+    ):
+        _fail("archive range record evidence profile is inconsistent")
+    if not surveillance_available and any(
+        value["surveillance_indicators"] != {} for value in verified_records
+    ):
+        _fail("archive range record surveillance evidence is inconsistent")
+    return evidence_profile
 
 
 def load_verified_nse_historical_archive_range(
@@ -279,9 +484,20 @@ def load_verified_nse_historical_archive_range(
     if type(index) is not StoredMarketSnapshot:
         _fail("archive range index snapshot type is invalid")
     manifest = index.manifest
+    if not isinstance(index.normalized_payload, Mapping):
+        _fail("archive range index payload is invalid")
+    index_schema = index.normalized_payload.get("schema_version")
+    if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2:
+        index_keys = _INDEX_KEYS_V2
+        index_record_keys = _INDEX_RECORD_KEYS_V2
+    elif index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION:
+        index_keys = _INDEX_KEYS_V3
+        index_record_keys = _INDEX_RECORD_KEYS_V3
+    else:
+        _fail("archive range index schema is invalid")
     payload = _mapping(
         index.normalized_payload,
-        _INDEX_KEYS,
+        index_keys,
         "archive range index payload is invalid",
     )
     records = payload["records"]
@@ -289,7 +505,6 @@ def load_verified_nse_historical_archive_range(
         manifest.dataset != NSE_HISTORICAL_ARCHIVE_INDEX_DATASET
         or manifest.snapshot_id != index_snapshot_id
         or manifest.provider != NSE_HISTORICAL_ARCHIVE_PROVIDER
-        or payload["schema_version"] != NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION
         or type(payload["range_start"]) is not date
         or type(payload["range_end"]) is not date
         or payload["range_start"] > payload["range_end"]
@@ -304,7 +519,7 @@ def load_verified_nse_historical_archive_range(
     ):
         _fail("archive range index payload is invalid")
     index_records = tuple(
-        _mapping(value, _INDEX_RECORD_KEYS, "archive range index record is invalid")
+        _mapping(value, index_record_keys, "archive range index record is invalid")
         for value in records
     )
     sessions = tuple(value["session"] for value in index_records)
@@ -327,6 +542,7 @@ def load_verified_nse_historical_archive_range(
     ):
         _fail("archive range identity accounting is invalid")
     loaded: list[StoredMarketSnapshot] = []
+    loaded_profiles: list[str] = []
     for value in index_records:
         try:
             stored = reader.get(
@@ -337,8 +553,32 @@ def load_verified_nse_historical_archive_range(
             raise NseHistoricalArchiveRangeError(
                 "archive range session snapshot could not be loaded"
             ) from None
-        _verify_session(stored, value, manifest.observed_at)
+        evidence_profile = _verify_session(stored, value, manifest.observed_at)
+        if (
+            index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION
+            and value["evidence_profile"] != evidence_profile
+        ):
+            _fail("archive range index evidence profile is inconsistent")
         loaded.append(stored)
+        loaded_profiles.append(evidence_profile)
+    evidence_profile_counts = {
+        profile: loaded_profiles.count(profile)
+        for profile in _EVIDENCE_PROFILE_MISSING
+    }
+    incomplete_evidence_session_count = sum(
+        profile != EVIDENCE_PROFILE_COMPLETE for profile in loaded_profiles
+    )
+    if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION:
+        claimed_counts = payload["evidence_profile_counts"]
+        if (
+            not isinstance(claimed_counts, Mapping)
+            or set(claimed_counts) != set(_EVIDENCE_PROFILE_MISSING)
+            or any(type(value) is not int or value < 0 for value in claimed_counts.values())
+            or dict(claimed_counts) != evidence_profile_counts
+            or payload["incomplete_evidence_session_count"]
+            != incomplete_evidence_session_count
+        ):
+            _fail("archive range evidence-profile accounting is invalid")
     return VerifiedNseHistoricalArchiveRange(
         index_snapshot_id=index_snapshot_id,
         range_start=payload["range_start"],
@@ -350,4 +590,6 @@ def load_verified_nse_historical_archive_range(
         identity_quarantined_session_count=payload[
             "identity_quarantined_session_count"
         ],
+        incomplete_evidence_session_count=incomplete_evidence_session_count,
+        evidence_profile_counts=evidence_profile_counts,
     )

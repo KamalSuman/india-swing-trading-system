@@ -87,14 +87,37 @@ derived evidence IDs produced by the preceding collection job.
 
 ## Manual NSE historical archive import
 
-The historical cash-equity importer consumes only an exact four-file NSE
-Archive session: full bhavcopy/delivery, UDiFF bhavcopy, REG1 surveillance,
-and the NSE-only CM MII security master. It validates and reconciles only the
-declared `EQ` lane, preserves non-EQ exclusions, joins same-session identity
-evidence, and writes create-once market snapshots plus one immutable range
-index. Source disagreements are retained as blocking identity issues; they are
-never dropped or guessed. Imported snapshots remain collection-only,
+The historical cash-equity importer accepts only three exact NSE Archive
+evidence profiles observed in the official archive portal:
+
+- full bhavcopy/delivery plus UDiFF bhavcopy;
+- those two reports plus the NSE-only CM MII security master; or
+- those three reports plus REG1 surveillance.
+
+Every session records its exact profile and missing-evidence codes. Missing
+REG1 is never interpreted as an empty surveillance set, and a missing security
+master makes every row's same-session identity unresolved. The importer still
+validates and reconciles only the declared `EQ` lane, preserves non-EQ
+exclusions, and writes create-once market snapshots plus one immutable range
+index. Source disagreements and unavailable identity evidence are retained as
+blocking identity issues; they are never dropped, guessed, or repaired from a
+later instrument list. Imported snapshots remain collection-only,
 non-actionable, and training-ineligible.
+
+A fourth, weaker `PRICE_DELIVERY_UNRECONCILED` lane exists for archives (for
+example NSE's 2022 downloads) whose ZIP contains only the same-session full
+bhavcopy/delivery report, with no UDiFF bhavcopy, NSE-only CM MII security
+master, or REG1 surveillance file present. It preserves the full report's
+observed OHLC, volume, turnover, trade count, and delivery values exactly as
+published, but every row's missing evidence is recorded explicitly as
+`UDIFF_BHAVCOPY`, `NSE_CM_SECURITY_MASTER`, and `REG1_SURVEILLANCE`, and every
+row's identity status is `UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE`: no
+UDiFF financial-instrument ID, no NSE-only security-master ISIN, and no REG1
+surveillance indicator is ever present, and none of those may be filled in
+from a later or current instrument list. Like every other profile it remains
+collection-only, non-actionable, and training-ineligible, and it is
+permanently ineligible for promotion until a separately reviewed, independent
+same-session evidence process exists to reconcile it.
 
 The immutable range index reports both `identity_issue_count` and
 `identity_quarantined_session_count`. These counts are operational alarms, not
@@ -102,11 +125,14 @@ permission to repair history from a later session. A later NSE file may explain
 an identifier transition, but only separately bound point-in-time evidence can
 make a quarantined row eligible for research or trading.
 
-An archive that fails ordinary-session cross-field validation is not silently
-skipped or coerced. Preserve its official outer ZIP outside the canonical
-snapshot set and quarantine the staged session for explicit review. Special
-sessions such as Muhurat trading require separately bound calendar evidence and
-a dedicated policy before their price rows can enter research.
+An archive that fails session-date or cross-field validation is not silently
+skipped or coerced. NSE can publish a holiday-dated wrapper whose only entry
+contains the preceding session's full bhavcopy; that wrapper must be
+quarantined rather than counted as another session. Preserve its official
+outer ZIP outside the canonical snapshot set. Weekend special sessions and
+Muhurat trading require separately bound calendar evidence before their price
+rows can enter research; a weekday-only downloader is not a complete trading
+calendar.
 
 ```powershell
 python -m india_swing.market_data.nse_archive_cli import-range `
