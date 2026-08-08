@@ -108,6 +108,32 @@ never implies production identity resolution, corporate-action adjustment,
 or any training/feature/label/alert/paper/execution authority -- those
 remain separate, not-yet-built stages.
 
+### Identity-bound raw price stream
+
+`india_swing.evaluation.nse_archive_research_identity` also exposes
+`iter_nse_archive_research_paired_sessions`, which pairs each replayed
+session with its exact admission grade in one single pass over the archive
+-- prices and identity decisions are never produced by two separate
+traversals of the multi-year corpus. `iter_nse_archive_research_identity_admission_sessions`
+now projects from this same paired stream, so it still performs exactly one
+upstream replay traversal per call.
+
+`india_swing.evaluation.nse_archive_research_price_stream` builds on the
+paired stream: it binds every replayed EQ record to its exact identity
+decision as one immutable observation per session, in replay-record order,
+with raw OHLCV/delivery fields untouched -- never copied, recalculated, or
+adjusted. Every record is retained, including `BLOCKED_UNRESOLVED` and
+`BLOCKED_SAME_SESSION_ISIN_COLLISION` rows (with `research_identity_id`
+left `None`); none are ever silently dropped. Admission transitions are
+carried through byte-for-byte, exactly as the identity layer emitted them.
+
+This stream is the lossless input a future cutoff-aware corporate-action
+adjustment and feature stage will consume. It is not itself valid backtest
+or model input: prices remain `RAW_UNADJUSTED`, `collection_only=True`, and
+every actionable/training/feature/label/alert/execution flag stays false;
+production identity resolution and corporate-action adjustment remain
+false.
+
 ## Cross-session promoted history panel
 
 `india_swing.historical_prices.promoted_history` assembles multiple verified

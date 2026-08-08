@@ -69,6 +69,9 @@ RESEARCH_IDENTITY_TRANSITION_SCHEMA_VERSION = (
 RESEARCH_IDENTITY_ADMISSION_SESSION_SCHEMA_VERSION = (
     "nse-archive-research-identity-admission-session/v1"
 )
+RESEARCH_IDENTITY_PAIRED_SESSION_SCHEMA_VERSION = (
+    "nse-archive-research-paired-session/v1"
+)
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 # Canonical ISIN shape only -- deliberately narrower than the replay layer's
@@ -561,6 +564,100 @@ class NseArchiveResearchIdentityAdmissionSession:
             _fail("research identity admission session identity failed")
 
 
+@dataclass(frozen=True, slots=True)
+class NseArchiveResearchPairedSession:
+    """One immutable pairing of a verified replay session with its exact admission grade.
+
+    Both nested objects are independently re-verified; the paired identity is
+    derived only from the two already-verified nested content identities and
+    the existing policy/schema constants -- never from raw bytes or object
+    ``repr``.
+    """
+
+    replay_session: NseArchiveResearchReplaySession
+    admission_session: NseArchiveResearchIdentityAdmissionSession
+    paired_session_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self._validate()
+        object.__setattr__(self, "paired_session_id", self._calculated_id())
+
+    def _validate(self) -> None:
+        if type(self.replay_session) is not NseArchiveResearchReplaySession:
+            _fail("research identity paired session replay session type is invalid")
+        if type(self.admission_session) is not NseArchiveResearchIdentityAdmissionSession:
+            _fail("research identity paired session admission session type is invalid")
+        self.replay_session.verify_content_identity()
+        self.admission_session.verify_content_identity()
+        if (
+            self.replay_session.dataset_id != self.admission_session.dataset_id
+            or self.replay_session.replay_session_id
+            != self.admission_session.replay_session_id
+            or self.replay_session.session_snapshot_id
+            != self.admission_session.session_snapshot_id
+            or self.replay_session.market_session != self.admission_session.market_session
+            or self.replay_session.partition_id != self.admission_session.partition_id
+            or self.replay_session.partition_role != self.admission_session.partition_role
+        ):
+            _fail("research identity paired session lineage is invalid")
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                "schema": RESEARCH_IDENTITY_PAIRED_SESSION_SCHEMA_VERSION,
+                "policy_version": RESEARCH_IDENTITY_ADMISSION_POLICY_VERSION,
+                "replay_session_id": self.replay_session.replay_session_id,
+                "admission_session_id": self.admission_session.admission_session_id,
+            },
+            length=64,
+        )
+
+    def verify_content_identity(self) -> None:
+        self._validate()
+        if self.paired_session_id != self._calculated_id():
+            _fail("research identity paired session identity failed")
+
+    # Read-only, fixed fail-closed posture. These are not dataclass fields --
+    # no per-instance state exists for them, and they never enter
+    # paired_session_id, since the posture is a constant of this type, not a
+    # verified fact about either nested object.
+    @property
+    def collection_only(self) -> bool:
+        return True
+
+    @property
+    def actionable(self) -> bool:
+        return False
+
+    @property
+    def training_eligible(self) -> bool:
+        return False
+
+    @property
+    def feature_eligible(self) -> bool:
+        return False
+
+    @property
+    def label_eligible(self) -> bool:
+        return False
+
+    @property
+    def alert_eligible(self) -> bool:
+        return False
+
+    @property
+    def execution_eligible(self) -> bool:
+        return False
+
+    @property
+    def production_identity_resolution_complete(self) -> bool:
+        return False
+
+    @property
+    def corporate_action_adjustment_complete(self) -> bool:
+        return False
+
+
 def _verify_admission_dataset_safety_posture(dataset: NseArchiveResearchDataset) -> None:
     if (
         dataset.collection_only is not True
@@ -820,10 +917,10 @@ def _build_admission_session(
     )
 
 
-def _iter_admission_sessions(
+def _iter_paired_sessions(
     dataset: NseArchiveResearchDataset,
     reader: NseHistoricalArchiveSnapshotReader,
-) -> Iterator[NseArchiveResearchIdentityAdmissionSession]:
+) -> Iterator[NseArchiveResearchPairedSession]:
     latest_by_listing_key: dict[str, _PriorObservation] = {}
     latest_by_identity: dict[str, _PriorObservation] = {}
     replay_iterator = iter(iter_verified_nse_archive_research_sessions(dataset, reader))
@@ -868,21 +965,38 @@ def _iter_admission_sessions(
                     decision.market_session,
                 )
 
-        yield admission_session
+        pair_failed = False
+        paired: NseArchiveResearchPairedSession | None = None
+        try:
+            paired = NseArchiveResearchPairedSession(
+                replay_session=session, admission_session=admission_session
+            )
+        except NseArchiveResearchIdentityError:
+            raise
+        except Exception:
+            pair_failed = True
+        if pair_failed or paired is None:
+            _fail("research identity paired session could not be reconstructed")
+
+        yield paired
 
 
-def iter_nse_archive_research_identity_admission_sessions(
+def iter_nse_archive_research_paired_sessions(
     dataset: NseArchiveResearchDataset,
     reader: NseHistoricalArchiveSnapshotReader,
-) -> Iterator[NseArchiveResearchIdentityAdmissionSession]:
-    """Admit one already sealed research dataset's replayed sessions into research identities.
+) -> Iterator[NseArchiveResearchPairedSession]:
+    """Pair one already sealed research dataset's replayed sessions with their admission grade.
 
     Calls only the public ``iter_verified_nse_archive_research_sessions``,
-    in stored order, one session at a time. Only the session currently being
-    admitted, plus two bounded latest-observation dictionaries keyed by
-    listing key and by research identity, are ever held in memory. Stopping
-    iteration early never advances past the next unread session and never
-    constitutes a completed or publishable research artifact.
+    in stored order, one session at a time, exactly once per invocation of
+    this iterator. Only the session currently being paired, plus two bounded
+    latest-observation dictionaries keyed by listing key and by research
+    identity, are ever held in memory. This is the single-pass source both
+    :func:`iter_nse_archive_research_identity_admission_sessions` and the
+    price-stream module project from, so the multi-year corpus is never
+    reopened or reparsed more than once per traversal. Stopping iteration
+    early never advances past the next unread session and never constitutes
+    a completed or publishable research artifact.
     """
 
     if type(dataset) is not NseArchiveResearchDataset:
@@ -899,4 +1013,31 @@ def iter_nse_archive_research_identity_admission_sessions(
         _fail("research identity admission dataset identity failed")
     _verify_admission_dataset_safety_posture(dataset)
 
-    return _iter_admission_sessions(dataset, reader)
+    return _iter_paired_sessions(dataset, reader)
+
+
+def _project_admission_sessions(
+    paired_iterator: Iterator[NseArchiveResearchPairedSession],
+) -> Iterator[NseArchiveResearchIdentityAdmissionSession]:
+    for paired in paired_iterator:
+        yield paired.admission_session
+
+
+def iter_nse_archive_research_identity_admission_sessions(
+    dataset: NseArchiveResearchDataset,
+    reader: NseHistoricalArchiveSnapshotReader,
+) -> Iterator[NseArchiveResearchIdentityAdmissionSession]:
+    """Admit one already sealed research dataset's replayed sessions into research identities.
+
+    Projects admission sessions from :func:`iter_nse_archive_research_paired_sessions`,
+    so there is exactly one upstream replay traversal per invocation of this
+    iterator -- calling this function never triggers a second, independent
+    pass over the archive. Only the session currently being admitted, plus
+    two bounded latest-observation dictionaries keyed by listing key and by
+    research identity, are ever held in memory. Stopping iteration early
+    never advances past the next unread session and never constitutes a
+    completed or publishable research artifact.
+    """
+
+    paired_iterator = iter_nse_archive_research_paired_sessions(dataset, reader)
+    return _project_admission_sessions(paired_iterator)

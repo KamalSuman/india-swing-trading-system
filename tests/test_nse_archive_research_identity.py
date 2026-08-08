@@ -63,13 +63,29 @@ def _unresolved_record(session: date, *, symbol: str = "CCC", **overrides: objec
 
 
 class _FixedSessionsIterator:
-    """A public replay-seam stand-in that tracks how many sessions were pulled."""
+    """A public replay-seam stand-in.
+
+    ``invocation_count`` counts how many times the seam itself was called
+    (i.e. how many separate upstream iterator constructions occurred) --
+    this increments eagerly, the instant ``iter_verified_nse_archive_research_sessions(...)``
+    is called, regardless of whether the resulting generator is ever
+    iterated. ``calls`` counts how many sessions were actually pulled from
+    the resulting generator via ``next()``. These are deliberately distinct:
+    a caller that constructs the seam's generator once but only partially
+    consumes it must show ``invocation_count == 1`` with ``calls`` possibly
+    less than ``len(sessions)``.
+    """
 
     def __init__(self, sessions: tuple) -> None:
         self._sessions = sessions
+        self.invocation_count = 0
         self.calls = 0
 
     def __call__(self, dataset, reader):
+        self.invocation_count += 1
+        return self._generate()
+
+    def _generate(self):
         for session in self._sessions:
             self.calls += 1
             yield session
@@ -1081,9 +1097,277 @@ class NseArchiveResearchIdentityStructuralTests(unittest.TestCase):
         self.assertEqual(reader_attribute_accesses, set())
 
 
+class NseArchiveResearchPairedSessionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dataset = _baseline_dataset()
+
+    def test_paired_iterator_invokes_upstream_seam_exactly_once_per_session(self) -> None:
+        session1 = _session(date(2024, 1, 1), (_record(date(2024, 1, 1), symbol="INFY"),))
+        session2 = _session(date(2024, 1, 2), (_record(date(2024, 1, 2), symbol="OTHERCO"),))
+        seam = _FixedSessionsIterator((session1, session2))
+        with patch.object(
+            identity_module, "iter_verified_nse_archive_research_sessions", seam
+        ):
+            results = list(
+                identity_module.iter_nse_archive_research_paired_sessions(
+                    self.dataset, object()
+                )
+            )
+        # Exactly one upstream iterator construction for this one call to the
+        # public iterator, regardless of how many sessions it yields.
+        self.assertEqual(seam.invocation_count, 1)
+        self.assertEqual(seam.calls, 2)
+        self.assertEqual(len(results), 2)
+        self.assertIs(results[0].replay_session, session1)
+        self.assertIs(results[1].replay_session, session2)
+        self.assertEqual(results[0].admission_session.market_session, date(2024, 1, 1))
+        self.assertEqual(results[1].admission_session.market_session, date(2024, 1, 2))
+
+    def test_paired_and_admission_iterators_each_construct_upstream_iterator_exactly_once(
+        self,
+    ) -> None:
+        # A stricter regression than counting sessions consumed: separately
+        # prove the upstream seam FUNCTION itself (not just its yielded
+        # sessions) is invoked exactly once per public iterator call, for
+        # both the paired iterator and the admission iterator it now
+        # projects from.
+        record = _record(date(2024, 1, 1), symbol="INFY")
+        session = _session(date(2024, 1, 1), (record,))
+
+        paired_seam = _FixedSessionsIterator((session,))
+        with patch.object(
+            identity_module, "iter_verified_nse_archive_research_sessions", paired_seam
+        ):
+            paired_results = list(
+                identity_module.iter_nse_archive_research_paired_sessions(
+                    self.dataset, object()
+                )
+            )
+        self.assertEqual(paired_seam.invocation_count, 1)
+        self.assertEqual(paired_seam.calls, 1)
+        self.assertEqual(len(paired_results), 1)
+
+        admission_seam = _FixedSessionsIterator((session,))
+        with patch.object(
+            identity_module, "iter_verified_nse_archive_research_sessions", admission_seam
+        ):
+            admission_results = list(
+                iter_nse_archive_research_identity_admission_sessions(
+                    self.dataset, object()
+                )
+            )
+        self.assertEqual(admission_seam.invocation_count, 1)
+        self.assertEqual(admission_seam.calls, 1)
+        self.assertEqual(len(admission_results), 1)
+
+    def test_paired_iterator_is_lazy_and_only_retains_bounded_prior_state(self) -> None:
+        session1 = _session(date(2024, 1, 1), (_record(date(2024, 1, 1), symbol="INFY"),))
+        session2 = _session(date(2024, 1, 2), (_record(date(2024, 1, 2), symbol="OTHERCO"),))
+        seam = _FixedSessionsIterator((session1, session2))
+        with patch.object(
+            identity_module, "iter_verified_nse_archive_research_sessions", seam
+        ):
+            iterator = identity_module.iter_nse_archive_research_paired_sessions(
+                self.dataset, object()
+            )
+            first = next(iterator)
+        self.assertEqual(seam.invocation_count, 1)
+        self.assertEqual(seam.calls, 1)
+        self.assertEqual(first.replay_session.market_session, date(2024, 1, 1))
+
+    def test_admission_iterator_still_works_via_single_upstream_traversal(self) -> None:
+        # Refactoring the admission iterator to project from the paired
+        # iterator must still call the upstream replay seam exactly once
+        # per session and preserve every existing admission output.
+        record = _record(date(2024, 1, 1), symbol="INFY")
+        session = _session(date(2024, 1, 1), (record,))
+        seam = _FixedSessionsIterator((session,))
+        with patch.object(
+            identity_module, "iter_verified_nse_archive_research_sessions", seam
+        ):
+            admission_results = list(
+                iter_nse_archive_research_identity_admission_sessions(
+                    self.dataset, object()
+                )
+            )
+        self.assertEqual(seam.calls, 1)
+        [result] = admission_results
+        self.assertIs(
+            result.decisions[0].admission_status,
+            NseArchiveResearchIdentityAdmissionStatus.ADMITTED_VALIDATED,
+        )
+
+    def test_paired_type_recomputed_id_matches_source_and_is_deterministic(self) -> None:
+        record = _record(date(2024, 1, 1), symbol="INFY")
+        session = _session(date(2024, 1, 1), (record,))
+        seam = _FixedSessionsIterator((session,))
+        with patch.object(
+            identity_module, "iter_verified_nse_archive_research_sessions", seam
+        ):
+            [paired] = list(
+                identity_module.iter_nse_archive_research_paired_sessions(
+                    self.dataset, object()
+                )
+            )
+        paired.verify_content_identity()
+        again = identity_module.NseArchiveResearchPairedSession(
+            replay_session=paired.replay_session, admission_session=paired.admission_session
+        )
+        self.assertEqual(paired.paired_session_id, again.paired_session_id)
+
+    def test_paired_session_from_seam_rejects_tampered_replay_content(self) -> None:
+        record = _record(date(2024, 1, 1), symbol="INFY")
+        session = _session(date(2024, 1, 1), (record,))
+        other_record = _record(date(2024, 1, 2), symbol="OTHERCO")
+        # Post-construction tamper bypassing __post_init__: the session's own
+        # verify_content_identity() must catch the session/record mismatch.
+        object.__setattr__(session, "records", (other_record,))
+        seam = _FixedSessionsIterator((session,))
+        with patch.object(
+            identity_module, "iter_verified_nse_archive_research_sessions", seam
+        ):
+            with self.assertRaises(NseArchiveResearchIdentityError) as context:
+                list(
+                    identity_module.iter_nse_archive_research_paired_sessions(
+                        self.dataset, object()
+                    )
+                )
+        exc = context.exception
+        self.assertIsNone(exc.__cause__)
+        self.assertIsNone(exc.__context__)
+
+    def _real_paired_session(self, replay_session: NseArchiveResearchReplaySession):
+        with patch.object(
+            identity_module,
+            "iter_verified_nse_archive_research_sessions",
+            _FixedSessionsIterator((replay_session,)),
+        ):
+            [paired] = list(
+                identity_module.iter_nse_archive_research_paired_sessions(
+                    self.dataset, object()
+                )
+            )
+        return paired
+
+    def test_paired_direct_construction_rejects_mismatched_lineage_fields(self) -> None:
+        record = _record(date(2024, 1, 1), symbol="INFY")
+        session_a = _session(date(2024, 1, 1), (record,))
+        session_b_kwargs = _direct_session_kwargs(
+            market_session=date(2024, 1, 1), records=(record,)
+        )
+        session_b_kwargs["dataset_id"] = _fake_sha256("different-dataset")
+        session_b = NseArchiveResearchReplaySession(**session_b_kwargs)
+
+        paired_a = self._real_paired_session(session_a)
+        paired_b = self._real_paired_session(session_b)
+        with self.assertRaises(NseArchiveResearchIdentityError) as context:
+            identity_module.NseArchiveResearchPairedSession(
+                replay_session=paired_b.replay_session,
+                admission_session=paired_a.admission_session,
+            )
+        exc = context.exception
+        self.assertIsNone(exc.__cause__)
+        self.assertIsNone(exc.__context__)
+
+    def test_paired_type_rejects_each_shared_lineage_mismatch_independently(self) -> None:
+        # Table-driven: each of the six shared-lineage fields must be able,
+        # on its own, to trigger the paired-lineage rejection.
+        def variant_admission_session(**overrides: object):
+            record = overrides.pop("record", None) or _record(
+                date(2024, 1, 1), symbol="INFY"
+            )
+            kwargs = _direct_session_kwargs(
+                market_session=overrides.pop("market_session", date(2024, 1, 1)),
+                records=(record,),
+            )
+            kwargs.update(overrides)
+            session = NseArchiveResearchReplaySession(**kwargs)
+            return self._real_paired_session(session).admission_session
+
+        baseline_replay = _session(date(2024, 1, 1), (_record(date(2024, 1, 1), symbol="INFY"),))
+
+        cases = {
+            "dataset_id": variant_admission_session(dataset_id=_fake_sha256("other-dataset")),
+            "session_snapshot_id": variant_admission_session(
+                session_snapshot_id=_fake_sha256("other-snapshot")
+            ),
+            "partition_id": variant_admission_session(
+                partition_id=_fake_sha256("other-partition")
+            ),
+            "partition_role": variant_admission_session(
+                partition_role=identity_module.ResearchSplitRole.VALIDATION
+            ),
+            "market_session": variant_admission_session(
+                record=_record(date(2024, 1, 2), symbol="INFY"),
+                market_session=date(2024, 1, 2),
+            ),
+            "replay_session_id": variant_admission_session(
+                record=_record(date(2024, 1, 1), symbol="INFY", delivery_quantity=999),
+            ),
+        }
+        for label, mismatched_admission_session in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(NseArchiveResearchIdentityError) as context:
+                    identity_module.NseArchiveResearchPairedSession(
+                        replay_session=baseline_replay,
+                        admission_session=mismatched_admission_session,
+                    )
+                exc = context.exception
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+    def test_paired_type_rejects_wrong_nested_types(self) -> None:
+        record = _record(date(2024, 1, 1), symbol="INFY")
+        session = _session(date(2024, 1, 1), (record,))
+        with patch.object(
+            identity_module,
+            "iter_verified_nse_archive_research_sessions",
+            _FixedSessionsIterator((session,)),
+        ):
+            [paired] = list(
+                identity_module.iter_nse_archive_research_paired_sessions(
+                    self.dataset, object()
+                )
+            )
+        with self.assertRaises(NseArchiveResearchIdentityError):
+            identity_module.NseArchiveResearchPairedSession(
+                replay_session=object(), admission_session=paired.admission_session
+            )
+        with self.assertRaises(NseArchiveResearchIdentityError):
+            identity_module.NseArchiveResearchPairedSession(
+                replay_session=paired.replay_session, admission_session=object()
+            )
+
+    def test_paired_session_reports_fail_closed_posture(self) -> None:
+        record = _record(date(2024, 1, 1), symbol="INFY")
+        session = _session(date(2024, 1, 1), (record,))
+        paired = self._real_paired_session(session)
+        self.assertTrue(paired.collection_only)
+        self.assertFalse(paired.actionable)
+        self.assertFalse(paired.training_eligible)
+        self.assertFalse(paired.feature_eligible)
+        self.assertFalse(paired.label_eligible)
+        self.assertFalse(paired.alert_eligible)
+        self.assertFalse(paired.execution_eligible)
+        self.assertFalse(paired.production_identity_resolution_complete)
+        self.assertFalse(paired.corporate_action_adjustment_complete)
+        # The posture is a fixed constant of the type, not stored state, and
+        # never enters the paired identity.
+        again = identity_module.NseArchiveResearchPairedSession(
+            replay_session=paired.replay_session, admission_session=paired.admission_session
+        )
+        self.assertEqual(paired.paired_session_id, again.paired_session_id)
+
+
 class NseArchiveResearchIdentityRegressionTests(unittest.TestCase):
     def test_research_identity_schema_version_is_named_v1(self) -> None:
         self.assertEqual(RESEARCH_IDENTITY_SCHEMA_VERSION, "nse-archive-research-identity/v1")
+
+    def test_research_identity_paired_session_schema_version_is_named_v1(self) -> None:
+        self.assertEqual(
+            identity_module.RESEARCH_IDENTITY_PAIRED_SESSION_SCHEMA_VERSION,
+            "nse-archive-research-paired-session/v1",
+        )
 
 
 if __name__ == "__main__":
