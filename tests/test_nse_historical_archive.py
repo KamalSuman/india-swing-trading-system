@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import decimal
+import hashlib
 import io
 import tempfile
 import unittest
 import zipfile
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Mapping
@@ -28,6 +29,11 @@ from india_swing.market_data.nse_archive import (
     NSE_HISTORICAL_ARCHIVE_INDEX_DATASET,
     NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION,
     NSE_HISTORICAL_ARCHIVE_PROVIDER,
+    NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION,
+    NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1,
+    NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2,
+    SOURCE_IDENTITY_CLAIM_KIND_LEGACY_BHAVCOPY_ISIN,
+    SOURCE_IDENTITY_CLAIM_STATUS_SOURCE_CLAIMED_UNVERIFIED,
     NseHistoricalArchiveIntegrityError,
     _LEGACY_FULL_BHAVCOPY_HEADER,
     _LEGACY_FULL_BHAVCOPY_HEADER_NAMES,
@@ -37,6 +43,7 @@ from india_swing.market_data.nse_archive import (
     _MTO_HEADER_RECORD,
     _MTO_TITLE_LINE,
     _REG1_HISTORICAL_HEADER,
+    _legacy_bhavcopy_stem,
     _expected_legacy_names,
     import_nse_historical_range,
     parse_nse_historical_archive_bytes,
@@ -44,6 +51,7 @@ from india_swing.market_data.nse_archive import (
 from india_swing.market_data.snapshot_store import LocalMarketSnapshotStore
 from india_swing.market_data.nse_archive_range import (
     NseHistoricalArchiveRangeError,
+    _replay_claim_id,
     _replay_issue_id,
     _replay_record_id,
     load_verified_nse_historical_archive_range,
@@ -234,6 +242,14 @@ def _recompute_issue_id(issue: dict[str, object]) -> None:
     without_id = {key: value for key, value in issue.items() if key != "issue_id"}
     issue["issue_id"] = content_id(
         {"schema": "nse-historical-archive-identity-issue/v1", **without_id},
+        length=64,
+    )
+
+
+def _recompute_claim_id(claim: dict[str, object]) -> None:
+    without_id = {key: value for key, value in claim.items() if key != "claim_id"}
+    claim["claim_id"] = content_id(
+        {"schema": "nse-historical-archive-source-identity-claim/v1", **without_id},
         length=64,
     )
 
@@ -1952,6 +1968,551 @@ class NseLegacyBhavcopyMtoProfileTests(unittest.TestCase):
 
         record = parsed.normalized_payload["records"][0]
         self.assertEqual(record["delivery_percent"], Decimal("67.90"))
+
+
+# ---------------------------------------------------------------------------
+# Legacy source-identity-claim sidecar (v3): parser-level construction.
+# ---------------------------------------------------------------------------
+
+
+def _two_row_legacy_outer_zip_bytes(
+    session: date = LEGACY_SESSION,
+) -> bytes:
+    rows = [
+        _legacy_bhavcopy_row(symbol="20MICRONS", isin="INE144J01027", session=session),
+        _legacy_bhavcopy_row(symbol="OTHERCO", isin="INE467B01029", session=session),
+    ]
+    csv_bytes = _csv(_LEGACY_FULL_BHAVCOPY_HEADER, rows)
+    legacy_zip_payload = _legacy_zip_bytes(session=session, csv_bytes=csv_bytes)
+    mto_payload = _mto_bytes(
+        [
+            _mto_row(serial=1, symbol="20MICRONS"),
+            _mto_row(serial=2, symbol="OTHERCO"),
+        ],
+        session=session,
+    )
+    return _legacy_outer_zip_bytes(
+        session, legacy_zip_payload=legacy_zip_payload, mto_payload=mto_payload
+    )
+
+
+class NseLegacySourceIdentityClaimParserTests(unittest.TestCase):
+    def test_legacy_claims_retain_official_isin_row_number_and_inner_csv_lineage(
+        self,
+    ) -> None:
+        parsed = parse_nse_historical_archive_bytes(
+            _two_row_legacy_outer_zip_bytes(),
+            original_filename=f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip",
+        )
+        payload = parsed.normalized_payload
+        claims = payload["source_identity_claims"]
+        records = payload["records"]
+        self.assertEqual(len(claims), 2)
+        self.assertEqual(len(records), 2)
+        # Both records and claims are ordered by sorted (symbol, series) key.
+        self.assertEqual([c["symbol"] for c in claims], ["20MICRONS", "OTHERCO"])
+        self.assertEqual([r["symbol"] for r in records], ["20MICRONS", "OTHERCO"])
+        # Header is row 1; the first and second data rows are rows 2 and 3.
+        self.assertEqual(claims[0]["source_row_number"], 2)
+        self.assertEqual(claims[1]["source_row_number"], 3)
+        self.assertEqual(claims[0]["claimed_isin"], "INE144J01027")
+        self.assertEqual(claims[1]["claimed_isin"], "INE467B01029")
+
+        legacy_zip_name, _ = _expected_legacy_names(LEGACY_SESSION)
+        expected_inner_name = f"{_legacy_bhavcopy_stem(LEGACY_SESSION)}.csv"
+        outer_zip_sha256_by_name = dict(payload["source_entry_sha256"])
+        for claim, record in zip(claims, records, strict=True):
+            self.assertEqual(claim["session"], LEGACY_SESSION)
+            self.assertEqual(claim["listing_key"], record["listing_key"])
+            self.assertEqual(claim["symbol"], record["symbol"])
+            self.assertEqual(claim["series"], record["series"])
+            self.assertEqual(claim["source_kind"], SOURCE_IDENTITY_CLAIM_KIND_LEGACY_BHAVCOPY_ISIN)
+            self.assertEqual(
+                claim["status"], SOURCE_IDENTITY_CLAIM_STATUS_SOURCE_CLAIMED_UNVERIFIED
+            )
+            self.assertEqual(claim["source_entry_name"], expected_inner_name)
+            self.assertEqual(claim["claim_id"], _replay_claim_id(claim))
+            # Non-actionable: a retained source claim never resolves identity.
+            self.assertIsNone(record["validated_isin"])
+            self.assertIsNone(record["financial_instrument_id"])
+            self.assertEqual(
+                record["identity_status"],
+                IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE,
+            )
+        # Inner-CSV bytes hash is shared across claims from the same file,
+        # and differs from the outer legacy ZIP's own entry hash.
+        self.assertEqual(claims[0]["source_entry_sha256"], claims[1]["source_entry_sha256"])
+        self.assertNotEqual(
+            claims[0]["source_entry_sha256"], outer_zip_sha256_by_name[legacy_zip_name]
+        )
+
+    def test_legacy_claim_ids_deterministic_under_hostile_decimal_context(self) -> None:
+        outer = _two_row_legacy_outer_zip_bytes()
+        original_prec = decimal.getcontext().prec
+        original_traps = dict(decimal.getcontext().traps)
+        try:
+            first = parse_nse_historical_archive_bytes(
+                outer,
+                original_filename=f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip",
+            )
+            decimal.getcontext().prec = 1
+            for trap in decimal.getcontext().traps:
+                decimal.getcontext().traps[trap] = False
+            second = parse_nse_historical_archive_bytes(
+                outer,
+                original_filename=f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip",
+            )
+        finally:
+            decimal.getcontext().prec = original_prec
+            for trap, value in original_traps.items():
+                decimal.getcontext().traps[trap] = value
+
+        first_ids = [claim["claim_id"] for claim in first.normalized_payload["source_identity_claims"]]
+        second_ids = [claim["claim_id"] for claim in second.normalized_payload["source_identity_claims"]]
+        self.assertEqual(first_ids, second_ids)
+
+    def test_modern_sessions_expose_empty_source_identity_claims(self) -> None:
+        one_file = parse_nse_historical_archive_bytes(
+            _one_file_archive_bytes(),
+            original_filename=f"Reports-Archives-Multiple-{SESSION:%d%m%Y}.zip",
+        )
+        self.assertEqual(one_file.normalized_payload["source_identity_claims"], ())
+
+        complete = parse_nse_historical_archive_bytes(
+            archive_bytes(), original_filename="Reports-Archives-Multiple-15072026.zip"
+        )
+        self.assertEqual(complete.normalized_payload["source_identity_claims"], ())
+
+
+# ---------------------------------------------------------------------------
+# Legacy source-identity-claim sidecar (v3): range-verifier re-verification.
+# ---------------------------------------------------------------------------
+
+
+def _legacy_normalized_payload(session: date = LEGACY_SESSION) -> dict[str, object]:
+    parsed = parse_nse_historical_archive_bytes(
+        _legacy_outer_zip_bytes(session),
+        original_filename=f"Reports-Archives-Multiple-{session:%d%m%Y}.zip",
+    )
+    payload = dict(parsed.normalized_payload)
+    payload["records"] = tuple(dict(record) for record in payload["records"])
+    payload["identity_issues"] = tuple(dict(issue) for issue in payload["identity_issues"])
+    payload["source_identity_claims"] = tuple(
+        dict(claim) for claim in payload["source_identity_claims"]
+    )
+    return payload
+
+
+def _store_session_and_index(
+    store: LocalMarketSnapshotStore,
+    payload: Mapping[str, object],
+    *,
+    session: date,
+    evidence_profile: str,
+    observed_at: datetime = OBSERVED_AT,
+):
+    session_snapshot = store.put(
+        dataset=NSE_HISTORICAL_ARCHIVE_EQ_DATASET,
+        selection_key=session.isoformat(),
+        provider=NSE_HISTORICAL_ARCHIVE_PROVIDER,
+        provider_version=NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION,
+        observed_at=observed_at,
+        normalized_payload=payload,
+    )
+    identity_issues = payload["identity_issues"]
+    index_payload = {
+        "schema_version": NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION,
+        "range_start": session,
+        "range_end": session,
+        "collection_only": True,
+        "actionable": False,
+        "training_eligible": False,
+        "identity_issue_count": len(identity_issues),
+        "identity_quarantined_session_count": 1 if identity_issues else 0,
+        "incomplete_evidence_session_count": (
+            0 if evidence_profile == EVIDENCE_PROFILE_COMPLETE else 1
+        ),
+        "evidence_profile_counts": {
+            EVIDENCE_PROFILE_PRICE_UDIFF: (
+                1 if evidence_profile == EVIDENCE_PROFILE_PRICE_UDIFF else 0
+            ),
+            EVIDENCE_PROFILE_PRICE_UDIFF_SECURITY: (
+                1 if evidence_profile == EVIDENCE_PROFILE_PRICE_UDIFF_SECURITY else 0
+            ),
+            EVIDENCE_PROFILE_COMPLETE: (
+                1 if evidence_profile == EVIDENCE_PROFILE_COMPLETE else 0
+            ),
+            EVIDENCE_PROFILE_UNRECONCILED: (
+                1 if evidence_profile == EVIDENCE_PROFILE_UNRECONCILED else 0
+            ),
+        },
+        "records": (
+            {
+                "session": session,
+                "snapshot_id": session_snapshot.manifest.snapshot_id,
+                "record_count": session_snapshot.manifest.record_count,
+                "source_container_sha256": payload["source_container_sha256"],
+                "identity_issue_count": len(identity_issues),
+                "evidence_profile": evidence_profile,
+            },
+        ),
+    }
+    index_snapshot = store.put(
+        dataset=NSE_HISTORICAL_ARCHIVE_INDEX_DATASET,
+        selection_key=f"{session.isoformat()}:{session.isoformat()}",
+        provider=NSE_HISTORICAL_ARCHIVE_PROVIDER,
+        provider_version=NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION,
+        observed_at=observed_at,
+        normalized_payload=index_payload,
+    )
+    return session_snapshot, index_snapshot
+
+
+class NseHistoricalArchiveSourceIdentityClaimRangeTests(unittest.TestCase):
+    def test_legacy_claims_survive_range_verification(self) -> None:
+        payload = _legacy_normalized_payload()
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalMarketSnapshotStore(Path(temporary))
+            _, index_snapshot = _store_session_and_index(
+                store,
+                payload,
+                session=LEGACY_SESSION,
+                evidence_profile=EVIDENCE_PROFILE_UNRECONCILED,
+            )
+            verified = load_verified_nse_historical_archive_range(
+                store, index_snapshot_id=index_snapshot.manifest.snapshot_id
+            )
+        self.assertEqual(verified.record_count, 1)
+
+    def test_v3_claim_field_tamper_cases_fail_closed(self) -> None:
+        def _run(mutate) -> None:
+            payload = _legacy_normalized_payload()
+            claims = list(payload["source_identity_claims"])
+            claim = dict(claims[0])
+            mutate(claim)
+            claims[0] = claim
+            payload["source_identity_claims"] = tuple(claims)
+            with tempfile.TemporaryDirectory() as temporary:
+                store = LocalMarketSnapshotStore(Path(temporary))
+                _, index_snapshot = _store_session_and_index(
+                    store,
+                    payload,
+                    session=LEGACY_SESSION,
+                    evidence_profile=EVIDENCE_PROFILE_UNRECONCILED,
+                )
+                with self.assertRaises(NseHistoricalArchiveRangeError):
+                    load_verified_nse_historical_archive_range(
+                        store, index_snapshot_id=index_snapshot.manifest.snapshot_id
+                    )
+
+        def _stale_claim_id(claim: dict[str, object]) -> None:
+            claim["claim_id"] = "0" * 64
+
+        def _bad_isin(claim: dict[str, object]) -> None:
+            claim["claimed_isin"] = "not-an-isin"
+            _recompute_claim_id(claim)
+
+        def _bad_source_kind(claim: dict[str, object]) -> None:
+            claim["source_kind"] = "OTHER"
+            _recompute_claim_id(claim)
+
+        def _bad_status(claim: dict[str, object]) -> None:
+            claim["status"] = "SOURCE_VALIDATED"
+            _recompute_claim_id(claim)
+
+        def _wrong_session(claim: dict[str, object]) -> None:
+            claim["session"] = claim["session"] + timedelta(days=1)
+            _recompute_claim_id(claim)
+
+        def _wrong_listing_key(claim: dict[str, object]) -> None:
+            claim["listing_key"] = "NSE:WRONGCO"
+            _recompute_claim_id(claim)
+
+        def _wrong_series(claim: dict[str, object]) -> None:
+            claim["series"] = "BE"
+            _recompute_claim_id(claim)
+
+        def _row_number_bool(claim: dict[str, object]) -> None:
+            claim["source_row_number"] = True
+            _recompute_claim_id(claim)
+
+        def _row_number_zero(claim: dict[str, object]) -> None:
+            claim["source_row_number"] = 0
+            _recompute_claim_id(claim)
+
+        def _bad_entry_sha256(claim: dict[str, object]) -> None:
+            claim["source_entry_sha256"] = "not-a-hash"
+            _recompute_claim_id(claim)
+
+        def _bad_entry_name(claim: dict[str, object]) -> None:
+            claim["source_entry_name"] = "wrong.csv"
+            _recompute_claim_id(claim)
+
+        cases = {
+            "stale_claim_id": _stale_claim_id,
+            "bad_isin": _bad_isin,
+            "bad_source_kind": _bad_source_kind,
+            "bad_status": _bad_status,
+            "wrong_session": _wrong_session,
+            "wrong_listing_key": _wrong_listing_key,
+            "wrong_series": _wrong_series,
+            "row_number_bool": _row_number_bool,
+            "row_number_zero": _row_number_zero,
+            "bad_entry_sha256": _bad_entry_sha256,
+            "bad_entry_name": _bad_entry_name,
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label):
+                _run(mutate)
+
+    def test_missing_and_duplicate_claims_fail_closed(self) -> None:
+        def _run(mutate) -> None:
+            payload = _legacy_normalized_payload()
+            claims = list(payload["source_identity_claims"])
+            mutate(claims)
+            payload["source_identity_claims"] = tuple(claims)
+            with tempfile.TemporaryDirectory() as temporary:
+                store = LocalMarketSnapshotStore(Path(temporary))
+                _, index_snapshot = _store_session_and_index(
+                    store,
+                    payload,
+                    session=LEGACY_SESSION,
+                    evidence_profile=EVIDENCE_PROFILE_UNRECONCILED,
+                )
+                with self.assertRaises(NseHistoricalArchiveRangeError):
+                    load_verified_nse_historical_archive_range(
+                        store, index_snapshot_id=index_snapshot.manifest.snapshot_id
+                    )
+
+        cases = {
+            "missing": lambda claims: claims.clear(),
+            "duplicate": lambda claims: claims.append(dict(claims[0])),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label):
+                _run(mutate)
+
+    def test_reordered_claims_fail_closed(self) -> None:
+        payload = dict(
+            parse_nse_historical_archive_bytes(
+                _two_row_legacy_outer_zip_bytes(),
+                original_filename=f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip",
+            ).normalized_payload
+        )
+        payload["records"] = tuple(dict(record) for record in payload["records"])
+        payload["identity_issues"] = tuple(
+            dict(issue) for issue in payload["identity_issues"]
+        )
+        claims = list(payload["source_identity_claims"])
+        claims[0], claims[1] = claims[1], claims[0]
+        payload["source_identity_claims"] = tuple(claims)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalMarketSnapshotStore(Path(temporary))
+            _, index_snapshot = _store_session_and_index(
+                store,
+                payload,
+                session=LEGACY_SESSION,
+                evidence_profile=EVIDENCE_PROFILE_UNRECONCILED,
+            )
+            with self.assertRaises(NseHistoricalArchiveRangeError):
+                load_verified_nse_historical_archive_range(
+                    store, index_snapshot_id=index_snapshot.manifest.snapshot_id
+                )
+
+    def test_coordinated_series_be_tamper_across_record_issue_and_claim_fails_closed(
+        self,
+    ) -> None:
+        # A correctly rehashed, internally self-consistent trio (record,
+        # matching identity issue, matching claim) all coordinately
+        # retargeted at series='BE' must still fail: the session declares
+        # series_scope=('EQ',), and the record boundary alone -- independent
+        # of whatever the issue/claim claim -- must reject any non-EQ series.
+        payload = _legacy_normalized_payload()
+        record = dict(payload["records"][0])
+        issue = dict(payload["identity_issues"][0])
+        claim = dict(payload["source_identity_claims"][0])
+        record["series"] = "BE"
+        issue["series"] = "BE"
+        claim["series"] = "BE"
+        _recompute_record_id(record)
+        _recompute_issue_id(issue)
+        _recompute_claim_id(claim)
+        payload["records"] = (record,)
+        payload["identity_issues"] = (issue,)
+        payload["source_identity_claims"] = (claim,)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalMarketSnapshotStore(Path(temporary))
+            _, index_snapshot = _store_session_and_index(
+                store,
+                payload,
+                session=LEGACY_SESSION,
+                evidence_profile=EVIDENCE_PROFILE_UNRECONCILED,
+            )
+            with self.assertRaises(NseHistoricalArchiveRangeError):
+                load_verified_nse_historical_archive_range(
+                    store, index_snapshot_id=index_snapshot.manifest.snapshot_id
+                )
+
+    def test_claim_noncanonical_symbol_listing_pair_fails_closed(self) -> None:
+        payload = _legacy_normalized_payload()
+        claims = list(payload["source_identity_claims"])
+        claim = dict(claims[0])
+        # A self-consistent but noncanonical (lowercase) symbol/listing pair
+        # -- listing_key still matches f"NSE:{symbol}" exactly, so only the
+        # independent canonical-symbol-shape check can catch this.
+        claim["symbol"] = "20microns"
+        claim["listing_key"] = "NSE:20microns"
+        _recompute_claim_id(claim)
+        claims[0] = claim
+        payload["source_identity_claims"] = tuple(claims)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalMarketSnapshotStore(Path(temporary))
+            _, index_snapshot = _store_session_and_index(
+                store,
+                payload,
+                session=LEGACY_SESSION,
+                evidence_profile=EVIDENCE_PROFILE_UNRECONCILED,
+            )
+            with self.assertRaises(NseHistoricalArchiveRangeError):
+                load_verified_nse_historical_archive_range(
+                    store, index_snapshot_id=index_snapshot.manifest.snapshot_id
+                )
+
+    def test_claim_noncanonical_inner_entry_name_fails_closed(self) -> None:
+        payload = _legacy_normalized_payload()
+        claims = list(payload["source_identity_claims"])
+        claim = dict(claims[0])
+        claim["source_entry_name"] = "not-the-canonical-legacy-stem.csv"
+        _recompute_claim_id(claim)
+        claims[0] = claim
+        payload["source_identity_claims"] = tuple(claims)
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalMarketSnapshotStore(Path(temporary))
+            _, index_snapshot = _store_session_and_index(
+                store,
+                payload,
+                session=LEGACY_SESSION,
+                evidence_profile=EVIDENCE_PROFILE_UNRECONCILED,
+            )
+            with self.assertRaises(NseHistoricalArchiveRangeError):
+                load_verified_nse_historical_archive_range(
+                    store, index_snapshot_id=index_snapshot.manifest.snapshot_id
+                )
+
+    def test_non_legacy_v3_session_with_forged_claims_fails_closed(self) -> None:
+        payload = dict(
+            parse_nse_historical_archive_bytes(
+                archive_bytes(), original_filename="Reports-Archives-Multiple-15072026.zip"
+            ).normalized_payload
+        )
+        payload["records"] = tuple(dict(record) for record in payload["records"])
+        payload["identity_issues"] = tuple(
+            dict(issue) for issue in payload["identity_issues"]
+        )
+        legacy_payload = _legacy_normalized_payload()
+        payload["source_identity_claims"] = legacy_payload["source_identity_claims"]
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalMarketSnapshotStore(Path(temporary))
+            _, index_snapshot = _store_session_and_index(
+                store,
+                payload,
+                session=SESSION,
+                evidence_profile=EVIDENCE_PROFILE_COMPLETE,
+            )
+            with self.assertRaises(NseHistoricalArchiveRangeError):
+                load_verified_nse_historical_archive_range(
+                    store, index_snapshot_id=index_snapshot.manifest.snapshot_id
+                )
+
+    def test_v1_and_v2_sessions_replay_without_inferring_claims(self) -> None:
+        payload = dict(
+            parse_nse_historical_archive_bytes(
+                archive_bytes(), original_filename="Reports-Archives-Multiple-15072026.zip"
+            ).normalized_payload
+        )
+        payload["records"] = tuple(dict(record) for record in payload["records"])
+        payload["identity_issues"] = tuple(
+            dict(issue) for issue in payload["identity_issues"]
+        )
+
+        v2_payload = dict(payload)
+        del v2_payload["source_identity_claims"]
+        v2_payload["schema_version"] = NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2
+
+        v1_keys = {
+            "schema_version", "session", "exchange", "series_scope", "source_mode",
+            "source_container_sha256", "source_entry_sha256",
+            "security_master_source_schema_version", "security_master_header_sha256",
+            "scope_exclusion_policy", "reg1_row_count", "identity_issue_count",
+            "identity_issues", "collection_only", "actionable", "training_eligible",
+            "knowledge_time_status", "records",
+        }
+        v1_payload = {key: value for key, value in payload.items() if key in v1_keys}
+        v1_payload["schema_version"] = NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1
+
+        for label, candidate in {"v1": v1_payload, "v2": v2_payload}.items():
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as temporary:
+                    store = LocalMarketSnapshotStore(Path(temporary))
+                    _, index_snapshot = _store_session_and_index(
+                        store,
+                        candidate,
+                        session=SESSION,
+                        evidence_profile=EVIDENCE_PROFILE_COMPLETE,
+                    )
+                    verified = load_verified_nse_historical_archive_range(
+                        store, index_snapshot_id=index_snapshot.manifest.snapshot_id
+                    )
+                self.assertEqual(verified.record_count, 1)
+
+    def test_v1_and_v2_sessions_also_reject_a_correctly_rehashed_non_eq_record(
+        self,
+    ) -> None:
+        # The canonical-EQ record boundary applies to every schema version,
+        # since every accepted session (v1/v2/v3 alike) declares
+        # series_scope=('EQ',).
+        payload = dict(
+            parse_nse_historical_archive_bytes(
+                archive_bytes(), original_filename="Reports-Archives-Multiple-15072026.zip"
+            ).normalized_payload
+        )
+        record = dict(payload["records"][0])
+        record["series"] = "BE"
+        _recompute_record_id(record)
+        payload["records"] = (record,)
+        payload["identity_issues"] = tuple(
+            dict(issue) for issue in payload["identity_issues"]
+        )
+
+        v2_payload = dict(payload)
+        del v2_payload["source_identity_claims"]
+        v2_payload["schema_version"] = NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2
+
+        v1_keys = {
+            "schema_version", "session", "exchange", "series_scope", "source_mode",
+            "source_container_sha256", "source_entry_sha256",
+            "security_master_source_schema_version", "security_master_header_sha256",
+            "scope_exclusion_policy", "reg1_row_count", "identity_issue_count",
+            "identity_issues", "collection_only", "actionable", "training_eligible",
+            "knowledge_time_status", "records",
+        }
+        v1_payload = {key: value for key, value in payload.items() if key in v1_keys}
+        v1_payload["schema_version"] = NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1
+
+        for label, candidate in {"v1": v1_payload, "v2": v2_payload}.items():
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as temporary:
+                    store = LocalMarketSnapshotStore(Path(temporary))
+                    _, index_snapshot = _store_session_and_index(
+                        store,
+                        candidate,
+                        session=SESSION,
+                        evidence_profile=EVIDENCE_PROFILE_COMPLETE,
+                    )
+                    with self.assertRaises(NseHistoricalArchiveRangeError):
+                        load_verified_nse_historical_archive_range(
+                            store, index_snapshot_id=index_snapshot.manifest.snapshot_id
+                        )
 
 
 if __name__ == "__main__":

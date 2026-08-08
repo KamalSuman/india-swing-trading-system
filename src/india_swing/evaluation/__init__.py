@@ -77,9 +77,11 @@ from .historical_corpus_adapter import (
 )
 from .nse_archive_research_replay import (
     REPLAY_SESSION_SCHEMA_VERSION,
+    REPLAY_SESSION_SCHEMA_VERSION_V1,
     NseArchiveResearchReplayError,
     NseArchiveResearchReplayRecord,
     NseArchiveResearchReplaySession,
+    NseArchiveResearchSourceIdentityClaim,
     iter_verified_nse_archive_research_sessions,
 )
 from .lifecycle import (
@@ -238,9 +240,11 @@ __all__ = [
     "MINIMUM_SWING_LABEL_HORIZON_SESSIONS",
     "MomentumBaselineConfig",
     "REPLAY_SESSION_SCHEMA_VERSION",
+    "REPLAY_SESSION_SCHEMA_VERSION_V1",
     "NseArchiveResearchReplayError",
     "NseArchiveResearchReplayRecord",
     "NseArchiveResearchReplaySession",
+    "NseArchiveResearchSourceIdentityClaim",
     "iter_verified_nse_archive_research_sessions",
     "EvaluationPlanError",
     "EvaluationPlanIntegrityError",

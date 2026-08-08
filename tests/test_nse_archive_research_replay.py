@@ -22,16 +22,25 @@ from india_swing.evaluation.nse_archive_research_replay import (
     NseArchiveResearchReplayError,
     NseArchiveResearchReplayRecord,
     NseArchiveResearchReplaySession,
+    NseArchiveResearchSourceIdentityClaim,
     _build_replay_record,
+    _build_replay_source_identity_claim,
     iter_verified_nse_archive_research_sessions,
 )
 from india_swing.market_data.nse_archive import (
     EVIDENCE_PROFILE_COMPLETE,
+    EVIDENCE_PROFILE_PRICE_UDIFF,
+    EVIDENCE_PROFILE_PRICE_UDIFF_SECURITY,
     EVIDENCE_PROFILE_UNRECONCILED,
     IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE,
     NSE_HISTORICAL_ARCHIVE_EQ_DATASET,
     NSE_HISTORICAL_ARCHIVE_INDEX_DATASET,
     NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION,
+    NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1,
+    NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2,
+    SOURCE_IDENTITY_CLAIM_KIND_LEGACY_BHAVCOPY_ISIN,
+    SOURCE_IDENTITY_CLAIM_STATUS_SOURCE_CLAIMED_UNVERIFIED,
+    _legacy_bhavcopy_stem,
 )
 from india_swing.market_data.nse_archive_range import VerifiedNseHistoricalArchiveRange
 from india_swing.market_data.snapshot_store import (
@@ -49,6 +58,7 @@ from tests.test_nse_archive_research_dataset import (
 )
 from tests.test_nse_historical_archive import (
     _one_file_archive_bytes,
+    _recompute_claim_id,
     _recompute_issue_id,
     _recompute_record_id,
     archive_bytes,
@@ -195,6 +205,26 @@ def _valid_identity_issue(session: date, *, symbol: str = "TESTX", **overrides: 
     return issue
 
 
+def _valid_source_identity_claim(
+    session: date, *, symbol: str = "INFY", **overrides: object
+) -> dict:
+    claim = {
+        "session": session,
+        "listing_key": f"NSE:{symbol}",
+        "symbol": symbol,
+        "series": "EQ",
+        "claimed_isin": "INE000A01001",
+        "source_kind": SOURCE_IDENTITY_CLAIM_KIND_LEGACY_BHAVCOPY_ISIN,
+        "source_entry_name": f"{_legacy_bhavcopy_stem(session)}.csv",
+        "source_entry_sha256": _fake_sha256("legacy-inner-csv"),
+        "source_row_number": 2,
+        "status": SOURCE_IDENTITY_CLAIM_STATUS_SOURCE_CLAIMED_UNVERIFIED,
+    }
+    claim.update(overrides)
+    _recompute_claim_id(claim)
+    return claim
+
+
 def _full_stored_session(
     session: date,
     *,
@@ -209,6 +239,7 @@ def _full_stored_session(
     actionable: bool = False,
     training_eligible: bool = False,
     record_count: int | None = None,
+    source_identity_claims: tuple[dict, ...] = (),
 ) -> StoredMarketSnapshot:
     resolved_records = (_valid_record(session),) if records is None else records
     resolved_id = snapshot_id or _fake_sha256(f"synthetic-session-{session.isoformat()}")
@@ -247,6 +278,7 @@ def _full_stored_session(
             len(identity_issues) if identity_issue_count is None else identity_issue_count
         ),
         "identity_issues": identity_issues,
+        "source_identity_claims": source_identity_claims,
         "collection_only": collection_only,
         "actionable": actionable,
         "training_eligible": training_eligible,
@@ -819,6 +851,58 @@ class NseArchiveResearchReplayAdversarialTests(unittest.TestCase):
         with self.assertRaises(NseArchiveResearchReplayError):
             self._replay_with_patched_loader(mutated)
 
+    # -----------------------------------------------------------------
+    # Legacy source-identity-claim sidecar binding, through the full
+    # patched-loader pipeline.
+    # -----------------------------------------------------------------
+
+    def test_legacy_shaped_claim_binds_through_full_replay_pipeline(self) -> None:
+        session_date = self.binding.accepted_sessions[0]
+        claim = _valid_source_identity_claim(session_date, symbol="INFY")
+        mutated = self._mutated_verified_with_first_session_payload(
+            source_identity_claims=(claim,),
+            evidence_profile=EVIDENCE_PROFILE_UNRECONCILED,
+        )
+        sessions = self._replay_with_patched_loader(mutated)
+        self.assertEqual(len(sessions[0].source_identity_claims), 1)
+        self.assertEqual(
+            sessions[0].source_identity_claims[0].claimed_isin, claim["claimed_isin"]
+        )
+        self.assertEqual(sessions[0].source_identity_claims[0].claim_id, claim["claim_id"])
+
+    def test_claim_wrong_session_fails_closed_through_full_pipeline(self) -> None:
+        session_date = self.binding.accepted_sessions[0]
+        wrong_session_claim = _valid_source_identity_claim(
+            session_date + timedelta(days=1), symbol="INFY"
+        )
+        mutated = self._mutated_verified_with_first_session_payload(
+            source_identity_claims=(wrong_session_claim,),
+            evidence_profile=EVIDENCE_PROFILE_UNRECONCILED,
+        )
+        with self.assertRaises(NseArchiveResearchReplayError):
+            self._replay_with_patched_loader(mutated)
+
+    def test_claim_symbol_mismatch_fails_closed_through_full_pipeline(self) -> None:
+        session_date = self.binding.accepted_sessions[0]
+        wrong_symbol_claim = _valid_source_identity_claim(session_date, symbol="OTHERCO")
+        mutated = self._mutated_verified_with_first_session_payload(
+            source_identity_claims=(wrong_symbol_claim,),
+            evidence_profile=EVIDENCE_PROFILE_UNRECONCILED,
+        )
+        with self.assertRaises(NseArchiveResearchReplayError):
+            self._replay_with_patched_loader(mutated)
+
+    def test_claim_rejected_for_non_unreconciled_evidence_profile_through_full_pipeline(
+        self,
+    ) -> None:
+        session_date = self.binding.accepted_sessions[0]
+        claim = _valid_source_identity_claim(session_date, symbol="INFY")
+        mutated = self._mutated_verified_with_first_session_payload(
+            source_identity_claims=(claim,)
+        )
+        with self.assertRaises(NseArchiveResearchReplayError):
+            self._replay_with_patched_loader(mutated)
+
 
 # ---------------------------------------------------------------------------
 # Direct construction: each record/session independently proves its own
@@ -844,6 +928,7 @@ def _direct_session_kwargs(*, market_session: date, records: tuple) -> dict:
         records=records,
         record_count=len(records),
         identity_issue_count=0,
+        source_identity_claims=(),
     )
 
 
@@ -860,6 +945,16 @@ class NseArchiveResearchReplayDirectConstructionTests(unittest.TestCase):
         stale_record_dict = {**stale_record_dict, "close": Decimal("103.00")}
         with self.assertRaises(NseArchiveResearchReplayError):
             _build_replay_record(stale_record_dict)
+
+    def test_direct_record_construction_rejects_correctly_rehashed_non_eq_series(
+        self,
+    ) -> None:
+        non_eq_record = _valid_record(date(2024, 1, 2), series="BE")
+        with self.assertRaises(NseArchiveResearchReplayError) as context:
+            _build_replay_record(non_eq_record)
+        exc = context.exception
+        self.assertIsNone(exc.__cause__)
+        self.assertIsNone(exc.__context__)
 
     def test_direct_record_dataclass_construction_rejects_altered_content(self) -> None:
         valid_record = _build_replay_record(_valid_record(date(2024, 1, 2)))
@@ -924,6 +1019,233 @@ class NseArchiveResearchReplayDirectConstructionTests(unittest.TestCase):
         with localcontext() as context:
             context.prec = 5
             session.verify_content_identity()
+
+
+# ---------------------------------------------------------------------------
+# Source-identity-claim direct construction: an official legacy Bhavcopy
+# ISIN claim independently proves its own content identity, regardless of
+# whether it was built through the replay pipeline.
+# ---------------------------------------------------------------------------
+
+
+class NseArchiveResearchReplaySourceIdentityClaimDirectConstructionTests(unittest.TestCase):
+    def test_valid_claim_recomputed_id_matches_source_and_is_deterministic(self) -> None:
+        claim = _build_replay_source_identity_claim(
+            _valid_source_identity_claim(date(2024, 1, 2))
+        )
+        claim.verify_content_identity()
+        with localcontext() as context:
+            context.prec = 5
+            claim.verify_content_identity()
+
+    def test_direct_claim_construction_rejects_stale_claim_id(self) -> None:
+        stale = _valid_source_identity_claim(date(2024, 1, 2))
+        stale = {**stale, "claimed_isin": "INE999Z99999"}
+        with self.assertRaises(NseArchiveResearchReplayError):
+            _build_replay_source_identity_claim(stale)
+
+    def test_direct_claim_dataclass_construction_rejects_altered_content(self) -> None:
+        valid_claim = _build_replay_source_identity_claim(
+            _valid_source_identity_claim(date(2024, 1, 2))
+        )
+        with self.assertRaises(NseArchiveResearchReplayError):
+            replace(valid_claim, claimed_isin="INE999Z99999")
+
+    def test_direct_claim_construction_rejects_malformed_fields(self) -> None:
+        base = _valid_source_identity_claim(date(2024, 1, 2))
+        cases = {
+            "bad_source_kind": {**base, "source_kind": "OTHER"},
+            "bad_status": {**base, "status": "SOURCE_VALIDATED"},
+            "row_number_bool": {**base, "source_row_number": True},
+            "row_number_zero": {**base, "source_row_number": 0},
+            "bad_listing_key": {**base, "listing_key": "NSE:WRONG"},
+            "empty_isin": {**base, "claimed_isin": ""},
+            "malformed_isin": {**base, "claimed_isin": "not-an-isin"},
+            "lowercase_symbol": {
+                **base, "symbol": "infy", "listing_key": "NSE:infy",
+            },
+            "noncanonical_symbol": {
+                **base, "symbol": "IN FY", "listing_key": "NSE:IN FY",
+            },
+            "non_eq_series": {**base, "series": "BE"},
+            "wrong_inner_entry_name": {**base, "source_entry_name": "wrong.csv"},
+        }
+        for label, mutated in cases.items():
+            with self.subTest(label):
+                mutated = dict(mutated)
+                _recompute_claim_id(mutated)
+                with self.assertRaises(NseArchiveResearchReplayError) as context:
+                    _build_replay_source_identity_claim(mutated)
+                exc = context.exception
+                self.assertIsNone(exc.__cause__)
+                self.assertIsNone(exc.__context__)
+
+
+# ---------------------------------------------------------------------------
+# Source-identity-claim session binding: a replay session must independently
+# verify every claim and bind it 1:1 (ordered) to its records.
+# ---------------------------------------------------------------------------
+
+
+class NseArchiveResearchReplaySourceIdentityClaimSessionTests(unittest.TestCase):
+    def test_session_validate_calls_every_claim_verification(self) -> None:
+        record = _build_replay_record(_valid_record(date(2024, 1, 1), symbol="20MICRONS"))
+        claim = _build_replay_source_identity_claim(
+            _valid_source_identity_claim(date(2024, 1, 1), symbol="20MICRONS")
+        )
+        kwargs = _direct_session_kwargs(
+            market_session=date(2024, 1, 1), records=(record,)
+        )
+        kwargs["evidence_profile"] = EVIDENCE_PROFILE_UNRECONCILED
+        kwargs["source_identity_claims"] = (claim,)
+        session = NseArchiveResearchReplaySession(**kwargs)
+        session.verify_content_identity()
+
+        tampered_claim = _build_replay_source_identity_claim(
+            _valid_source_identity_claim(
+                date(2024, 1, 1), symbol="20MICRONS", claimed_isin="INE999Z99999"
+            )
+        )
+        object.__setattr__(session, "source_identity_claims", (tampered_claim,))
+        with self.assertRaises(NseArchiveResearchReplayError):
+            session.verify_content_identity()
+
+    def test_session_validate_rejects_claim_bound_to_different_symbol(self) -> None:
+        record = _build_replay_record(_valid_record(date(2024, 1, 1), symbol="20MICRONS"))
+        wrong_claim = _build_replay_source_identity_claim(
+            _valid_source_identity_claim(date(2024, 1, 1), symbol="OTHERCO")
+        )
+        kwargs = _direct_session_kwargs(
+            market_session=date(2024, 1, 1), records=(record,)
+        )
+        kwargs["evidence_profile"] = EVIDENCE_PROFILE_UNRECONCILED
+        kwargs["source_identity_claims"] = (wrong_claim,)
+        with self.assertRaises(NseArchiveResearchReplayError):
+            NseArchiveResearchReplaySession(**kwargs)
+
+    def test_session_validate_rejects_claim_wrong_session(self) -> None:
+        record = _build_replay_record(_valid_record(date(2024, 1, 1), symbol="20MICRONS"))
+        wrong_session_claim = _build_replay_source_identity_claim(
+            _valid_source_identity_claim(date(2024, 1, 2), symbol="20MICRONS")
+        )
+        kwargs = _direct_session_kwargs(
+            market_session=date(2024, 1, 1), records=(record,)
+        )
+        kwargs["evidence_profile"] = EVIDENCE_PROFILE_UNRECONCILED
+        kwargs["source_identity_claims"] = (wrong_session_claim,)
+        with self.assertRaises(NseArchiveResearchReplayError):
+            NseArchiveResearchReplaySession(**kwargs)
+
+    def test_session_validate_rejects_claim_count_mismatch(self) -> None:
+        record = _build_replay_record(_valid_record(date(2024, 1, 1), symbol="20MICRONS"))
+        claim = _build_replay_source_identity_claim(
+            _valid_source_identity_claim(date(2024, 1, 1), symbol="20MICRONS")
+        )
+        extra_claim = _build_replay_source_identity_claim(
+            _valid_source_identity_claim(
+                date(2024, 1, 1), symbol="20MICRONS", source_row_number=3
+            )
+        )
+        kwargs = _direct_session_kwargs(
+            market_session=date(2024, 1, 1), records=(record,)
+        )
+        kwargs["evidence_profile"] = EVIDENCE_PROFILE_UNRECONCILED
+        kwargs["source_identity_claims"] = (claim, extra_claim)
+        with self.assertRaises(NseArchiveResearchReplayError):
+            NseArchiveResearchReplaySession(**kwargs)
+
+    def test_session_validate_rejects_claims_for_non_unreconciled_evidence_profiles(
+        self,
+    ) -> None:
+        record = _build_replay_record(_valid_record(date(2024, 1, 1), symbol="20MICRONS"))
+        claim = _build_replay_source_identity_claim(
+            _valid_source_identity_claim(date(2024, 1, 1), symbol="20MICRONS")
+        )
+        for profile in (
+            EVIDENCE_PROFILE_COMPLETE,
+            EVIDENCE_PROFILE_PRICE_UDIFF,
+            EVIDENCE_PROFILE_PRICE_UDIFF_SECURITY,
+        ):
+            with self.subTest(profile):
+                kwargs = _direct_session_kwargs(
+                    market_session=date(2024, 1, 1), records=(record,)
+                )
+                kwargs["evidence_profile"] = profile
+                kwargs["source_identity_claims"] = (claim,)
+                with self.assertRaises(NseArchiveResearchReplayError):
+                    NseArchiveResearchReplaySession(**kwargs)
+
+        kwargs = _direct_session_kwargs(
+            market_session=date(2024, 1, 1), records=(record,)
+        )
+        kwargs["evidence_profile"] = EVIDENCE_PROFILE_UNRECONCILED
+        kwargs["source_identity_claims"] = (claim,)
+        session = NseArchiveResearchReplaySession(**kwargs)
+        self.assertEqual(len(session.source_identity_claims), 1)
+
+    def test_v1_v2_style_direct_session_defaults_to_empty_claims(self) -> None:
+        record = _build_replay_record(_valid_record(date(2024, 1, 1)))
+        kwargs = _direct_session_kwargs(
+            market_session=date(2024, 1, 1), records=(record,)
+        )
+        session = NseArchiveResearchReplaySession(**kwargs)
+        self.assertEqual(session.source_identity_claims, ())
+
+    def test_replay_session_schema_version_is_v2_and_claim_ids_affect_identity(
+        self,
+    ) -> None:
+        self.assertEqual(
+            replay_module.REPLAY_SESSION_SCHEMA_VERSION_V1,
+            "nse-archive-research-replay-session/v1",
+        )
+        self.assertEqual(
+            replay_module.REPLAY_SESSION_SCHEMA_VERSION,
+            "nse-archive-research-replay-session/v2",
+        )
+
+        record = _build_replay_record(_valid_record(date(2024, 1, 1), symbol="20MICRONS"))
+        base_kwargs = _direct_session_kwargs(
+            market_session=date(2024, 1, 1), records=(record,)
+        )
+        base_kwargs["evidence_profile"] = EVIDENCE_PROFILE_UNRECONCILED
+
+        without_claims = NseArchiveResearchReplaySession(
+            **{**base_kwargs, "source_identity_claims": ()}
+        )
+        claim = _build_replay_source_identity_claim(
+            _valid_source_identity_claim(date(2024, 1, 1), symbol="20MICRONS")
+        )
+        with_claim = NseArchiveResearchReplaySession(
+            **{**base_kwargs, "source_identity_claims": (claim,)}
+        )
+        self.assertNotEqual(without_claims.replay_session_id, with_claim.replay_session_id)
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility: v1/v2 stored session payloads never have claims
+# inferred or fabricated -- they verify with an empty claims tuple.
+# ---------------------------------------------------------------------------
+
+
+class NseArchiveResearchReplaySourceIdentityClaimBackwardCompatTests(unittest.TestCase):
+    def test_v1_and_v2_session_payloads_verify_with_empty_claims(self) -> None:
+        cases = {
+            "v1": (NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1, {"evidence_profile", "missing_evidence"}),
+            "v2": (NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2, set()),
+        }
+        for label, (schema, drop_keys) in cases.items():
+            with self.subTest(label):
+                session = date(2024, 1, 2)
+                stored = _full_stored_session(session)
+                payload = dict(stored.normalized_payload)
+                del payload["source_identity_claims"]
+                for key in drop_keys:
+                    del payload[key]
+                payload["schema_version"] = schema
+                stored = replace(stored, normalized_payload=payload)
+                result = replay_module._verify_session_payload(stored, session)
+                source_identity_claims_payload = result[-1]
+                self.assertEqual(source_identity_claims_payload, ())
 
 
 # ---------------------------------------------------------------------------

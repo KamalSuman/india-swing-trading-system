@@ -25,6 +25,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Iterator, Mapping
 
+from india_swing.daily_reports.parser import _RAW_IDENTIFIER, _SYMBOL
 from india_swing.identity import content_id
 from india_swing.market_data.nse_archive import (
     EVIDENCE_PROFILE_COMPLETE,
@@ -34,6 +35,10 @@ from india_swing.market_data.nse_archive import (
     IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE,
     NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION,
     NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1,
+    NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2,
+    SOURCE_IDENTITY_CLAIM_KIND_LEGACY_BHAVCOPY_ISIN,
+    SOURCE_IDENTITY_CLAIM_STATUS_SOURCE_CLAIMED_UNVERIFIED,
+    _legacy_bhavcopy_stem,
 )
 from india_swing.market_data.nse_archive_range import (
     NseHistoricalArchiveSnapshotReader,
@@ -50,10 +55,14 @@ from .nse_archive_research_dataset import (
 )
 
 
-REPLAY_SESSION_SCHEMA_VERSION = "nse-archive-research-replay-session/v1"
+REPLAY_SESSION_SCHEMA_VERSION_V1 = "nse-archive-research-replay-session/v1"
+REPLAY_SESSION_SCHEMA_VERSION = "nse-archive-research-replay-session/v2"
 _UNVERIFIED_KNOWLEDGE_TIME_STATUS = "MANUAL_HISTORICAL_IMPORT_UNVERIFIED"
 _RECORD_CONTENT_SCHEMA_VERSION = "nse-historical-archive-eq-record/v1"
 _IDENTITY_ISSUE_CONTENT_SCHEMA_VERSION = "nse-historical-archive-identity-issue/v1"
+_SOURCE_IDENTITY_CLAIM_CONTENT_SCHEMA_VERSION = (
+    "nse-historical-archive-source-identity-claim/v1"
+)
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _KNOWN_EVIDENCE_PROFILES = (
@@ -141,6 +150,22 @@ _SESSION_KEYS_V1 = frozenset(
     }
 )
 _SESSION_KEYS_V2 = _SESSION_KEYS_V1 | {"evidence_profile", "missing_evidence"}
+_SESSION_KEYS_V3 = _SESSION_KEYS_V2 | {"source_identity_claims"}
+_SOURCE_IDENTITY_CLAIM_KEYS = frozenset(
+    {
+        "claim_id",
+        "session",
+        "listing_key",
+        "symbol",
+        "series",
+        "claimed_isin",
+        "source_kind",
+        "source_entry_name",
+        "source_entry_sha256",
+        "source_row_number",
+        "status",
+    }
+)
 
 
 class NseArchiveResearchReplayError(ValueError):
@@ -216,12 +241,12 @@ class NseArchiveResearchReplayRecord:
             _fail("research replay record identity is invalid")
         if type(self.session) is not date:
             _fail("research replay record session is invalid")
-        if type(self.listing_key) is not str or not self.listing_key:
-            _fail("research replay record listing key is invalid")
-        if type(self.symbol) is not str or not self.symbol:
+        if type(self.symbol) is not str or _SYMBOL.fullmatch(self.symbol) is None:
             _fail("research replay record symbol is invalid")
-        if type(self.series) is not str or not self.series:
+        if self.series != "EQ":
             _fail("research replay record series is invalid")
+        if type(self.listing_key) is not str or self.listing_key != f"NSE:{self.symbol}":
+            _fail("research replay record listing key is invalid")
         if self.financial_instrument_id is not None and type(self.financial_instrument_id) is not int:
             _fail("research replay record financial instrument id is invalid")
         if (
@@ -354,6 +379,92 @@ class NseArchiveResearchReplayRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class NseArchiveResearchSourceIdentityClaim:
+    """One immutable, lossless projection of an official legacy Bhavcopy ISIN claim.
+
+    The claim is exactly what the legacy source publisher wrote for one EQ
+    row -- ``status`` is always ``SOURCE_CLAIMED_UNVERIFIED``. It never sets
+    ``validated_isin``, never implies identity match, and never carries
+    feature/training/actionable authority; a later, separately reviewed
+    historical identity-admission task decides whether a corroborated claim
+    can ever be promoted.
+    """
+
+    claim_id: str
+    session: date
+    listing_key: str
+    symbol: str
+    series: str
+    claimed_isin: str
+    source_kind: str
+    source_entry_name: str
+    source_entry_sha256: str
+    source_row_number: int
+    status: str
+
+    def __post_init__(self) -> None:
+        self.verify_content_identity()
+
+    def _validate_shape(self) -> None:
+        if not _is_sha256(self.claim_id):
+            _fail("research replay source identity claim identity is invalid")
+        if type(self.session) is not date:
+            _fail("research replay source identity claim session is invalid")
+        if type(self.symbol) is not str or _SYMBOL.fullmatch(self.symbol) is None:
+            _fail("research replay source identity claim symbol is invalid")
+        if self.series != "EQ":
+            _fail("research replay source identity claim series is invalid")
+        if type(self.listing_key) is not str or self.listing_key != f"NSE:{self.symbol}":
+            _fail("research replay source identity claim listing key is invalid")
+        if (
+            type(self.claimed_isin) is not str
+            or _RAW_IDENTIFIER.fullmatch(self.claimed_isin) is None
+        ):
+            _fail("research replay source identity claim ISIN is invalid")
+        if self.source_kind != SOURCE_IDENTITY_CLAIM_KIND_LEGACY_BHAVCOPY_ISIN:
+            _fail("research replay source identity claim source kind is invalid")
+        if (
+            type(self.source_entry_name) is not str
+            or self.source_entry_name != f"{_legacy_bhavcopy_stem(self.session)}.csv"
+        ):
+            _fail("research replay source identity claim entry name is invalid")
+        if not _is_sha256(self.source_entry_sha256):
+            _fail("research replay source identity claim entry hash is invalid")
+        if (
+            type(self.source_row_number) is not int
+            or isinstance(self.source_row_number, bool)
+            or self.source_row_number < 2
+        ):
+            _fail("research replay source identity claim row number is invalid")
+        if self.status != SOURCE_IDENTITY_CLAIM_STATUS_SOURCE_CLAIMED_UNVERIFIED:
+            _fail("research replay source identity claim status is invalid")
+
+    def verify_content_identity(self) -> None:
+        self._validate_shape()
+        canonical_claim = {
+            "session": self.session,
+            "listing_key": self.listing_key,
+            "symbol": self.symbol,
+            "series": self.series,
+            "claimed_isin": self.claimed_isin,
+            "source_kind": self.source_kind,
+            "source_entry_name": self.source_entry_name,
+            "source_entry_sha256": self.source_entry_sha256,
+            "source_row_number": self.source_row_number,
+            "status": self.status,
+        }
+        expected_claim_id = content_id(
+            {
+                "schema": _SOURCE_IDENTITY_CLAIM_CONTENT_SCHEMA_VERSION,
+                **canonical_claim,
+            },
+            length=64,
+        )
+        if self.claim_id != expected_claim_id:
+            _fail("research replay source identity claim identity failed")
+
+
+@dataclass(frozen=True, slots=True)
 class NseArchiveResearchReplaySession:
     """One immutable replayed session, exactly bound to its dataset lineage."""
 
@@ -372,6 +483,7 @@ class NseArchiveResearchReplaySession:
     records: tuple[NseArchiveResearchReplayRecord, ...]
     record_count: int
     identity_issue_count: int
+    source_identity_claims: tuple[NseArchiveResearchSourceIdentityClaim, ...]
     collection_only: bool = field(init=False)
     actionable: bool = field(init=False)
     training_eligible: bool = field(init=False)
@@ -431,6 +543,41 @@ class NseArchiveResearchReplaySession:
             _fail("research replay session record count is invalid")
         if type(self.identity_issue_count) is not int or self.identity_issue_count < 0:
             _fail("research replay session identity issue count is invalid")
+        if type(self.source_identity_claims) is not tuple or any(
+            type(value) is not NseArchiveResearchSourceIdentityClaim
+            for value in self.source_identity_claims
+        ):
+            _fail("research replay session source identity claims are invalid")
+        for claim in self.source_identity_claims:
+            claim.verify_content_identity()
+            if claim.session != self.market_session:
+                _fail(
+                    "research replay session source identity claim session does "
+                    "not match its session"
+                )
+        if self.source_identity_claims:
+            if self.evidence_profile != EVIDENCE_PROFILE_UNRECONCILED:
+                _fail(
+                    "research replay session source identity claims are only "
+                    "valid for legacy unreconciled evidence"
+                )
+            if len(self.source_identity_claims) != len(self.records):
+                _fail(
+                    "research replay session source identity claim count is invalid"
+                )
+            for claim, record in zip(
+                self.source_identity_claims, self.records, strict=True
+            ):
+                if (
+                    claim.session != record.session
+                    or claim.listing_key != record.listing_key
+                    or claim.symbol != record.symbol
+                    or claim.series != record.series
+                ):
+                    _fail(
+                        "research replay session source identity claim binding "
+                        "is invalid"
+                    )
         if (
             self.collection_only is not True
             or self.actionable is not False
@@ -461,6 +608,9 @@ class NseArchiveResearchReplaySession:
                 "record_ids": tuple(value.record_id for value in self.records),
                 "record_count": self.record_count,
                 "identity_issue_count": self.identity_issue_count,
+                "source_identity_claim_ids": tuple(
+                    value.claim_id for value in self.source_identity_claims
+                ),
                 "collection_only": self.collection_only,
                 "actionable": self.actionable,
                 "training_eligible": self.training_eligible,
@@ -625,7 +775,7 @@ def _verify_identity_issues_payload(
 
 def _verify_session_payload(
     stored: StoredMarketSnapshot, expected_session: date
-) -> tuple[str, tuple[str, ...], str, tuple[object, ...], int]:
+) -> tuple[str, tuple[str, ...], str, tuple[object, ...], int, tuple[object, ...]]:
     payload = stored.normalized_payload
     if not isinstance(payload, Mapping) or payload.get("session") != expected_session:
         _fail("research replay session payload is invalid")
@@ -635,11 +785,21 @@ def _verify_session_payload(
             _fail("research replay session payload shape is invalid")
         evidence_profile = EVIDENCE_PROFILE_COMPLETE
         missing_evidence: object = ()
-    elif schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION:
+        source_identity_claims_payload: object = ()
+    elif schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2:
         if set(payload) != _SESSION_KEYS_V2:
             _fail("research replay session payload shape is invalid")
         evidence_profile = payload.get("evidence_profile")
         missing_evidence = payload.get("missing_evidence")
+        source_identity_claims_payload = ()
+    elif schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION:
+        if set(payload) != _SESSION_KEYS_V3:
+            _fail("research replay session payload shape is invalid")
+        evidence_profile = payload.get("evidence_profile")
+        missing_evidence = payload.get("missing_evidence")
+        source_identity_claims_payload = payload.get("source_identity_claims")
+        if type(source_identity_claims_payload) is not tuple:
+            _fail("research replay session source identity claims are invalid")
     else:
         _fail("research replay session schema is invalid")
     if evidence_profile not in _KNOWN_EVIDENCE_PROFILES:
@@ -669,7 +829,14 @@ def _verify_session_payload(
         or payload.get("training_eligible") is not False
     ):
         _fail("research replay session safety posture is invalid")
-    return evidence_profile, missing_evidence, knowledge_time_status, records, identity_issue_count
+    return (
+        evidence_profile,
+        missing_evidence,
+        knowledge_time_status,
+        records,
+        identity_issue_count,
+        source_identity_claims_payload,
+    )
 
 
 def _build_replay_record(value: object) -> NseArchiveResearchReplayRecord:
@@ -814,6 +981,71 @@ def _build_replay_record(value: object) -> NseArchiveResearchReplayRecord:
     )
 
 
+def _build_replay_source_identity_claim(
+    value: object,
+) -> NseArchiveResearchSourceIdentityClaim:
+    if not isinstance(value, Mapping) or set(value) != _SOURCE_IDENTITY_CLAIM_KEYS:
+        _fail("research replay source identity claim shape is invalid")
+    claim_id = _required(
+        value["claim_id"], str, "research replay source identity claim identity is invalid"
+    )
+    if not _is_sha256(claim_id):
+        _fail("research replay source identity claim identity is invalid")
+    session = _required(
+        value["session"], date, "research replay source identity claim session is invalid"
+    )
+    listing_key = _required(
+        value["listing_key"],
+        str,
+        "research replay source identity claim listing key is invalid",
+    )
+    symbol = _required(
+        value["symbol"], str, "research replay source identity claim symbol is invalid"
+    )
+    series = _required(
+        value["series"], str, "research replay source identity claim series is invalid"
+    )
+    claimed_isin = _required(
+        value["claimed_isin"],
+        str,
+        "research replay source identity claim ISIN is invalid",
+    )
+    source_kind = _required(
+        value["source_kind"],
+        str,
+        "research replay source identity claim source kind is invalid",
+    )
+    source_entry_name = _required(
+        value["source_entry_name"],
+        str,
+        "research replay source identity claim entry name is invalid",
+    )
+    source_entry_sha256 = _required(
+        value["source_entry_sha256"],
+        str,
+        "research replay source identity claim entry hash is invalid",
+    )
+    source_row_number = value["source_row_number"]
+    if type(source_row_number) is not int or isinstance(source_row_number, bool):
+        _fail("research replay source identity claim row number is invalid")
+    status = _required(
+        value["status"], str, "research replay source identity claim status is invalid"
+    )
+    return NseArchiveResearchSourceIdentityClaim(
+        claim_id=claim_id,
+        session=session,
+        listing_key=listing_key,
+        symbol=symbol,
+        series=series,
+        claimed_isin=claimed_isin,
+        source_kind=source_kind,
+        source_entry_name=source_entry_name,
+        source_entry_sha256=source_entry_sha256,
+        source_row_number=source_row_number,
+        status=status,
+    )
+
+
 def _build_replay_session(
     dataset: NseArchiveResearchDataset,
     binding: NseArchiveResearchRangeBinding,
@@ -828,8 +1060,13 @@ def _build_replay_session(
         knowledge_time_status,
         records_payload,
         identity_issue_count,
+        source_identity_claims_payload,
     ) = _verify_session_payload(stored, accepted_session)
     records = tuple(_build_replay_record(value) for value in records_payload)
+    source_identity_claims = tuple(
+        _build_replay_source_identity_claim(value)
+        for value in source_identity_claims_payload
+    )
     return NseArchiveResearchReplaySession(
         dataset_id=dataset.dataset_id,
         split_policy_id=dataset.split_policy_id,
@@ -846,6 +1083,7 @@ def _build_replay_session(
         records=records,
         record_count=len(records),
         identity_issue_count=identity_issue_count,
+        source_identity_claims=source_identity_claims,
     )
 
 

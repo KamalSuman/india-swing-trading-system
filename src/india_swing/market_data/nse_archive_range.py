@@ -8,6 +8,8 @@ from typing import Mapping, Protocol
 
 from india_swing.identity import content_id
 
+from india_swing.daily_reports.parser import _RAW_IDENTIFIER, _SYMBOL
+
 from .nse_archive import (
     EVIDENCE_PROFILE_COMPLETE,
     EVIDENCE_PROFILE_PRICE_UDIFF,
@@ -21,7 +23,11 @@ from .nse_archive import (
     NSE_HISTORICAL_ARCHIVE_PROVIDER,
     NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION,
     NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1,
+    NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2,
+    SOURCE_IDENTITY_CLAIM_KIND_LEGACY_BHAVCOPY_ISIN,
+    SOURCE_IDENTITY_CLAIM_STATUS_SOURCE_CLAIMED_UNVERIFIED,
     _expected_legacy_names,
+    _legacy_bhavcopy_stem,
 )
 from .codec import decode_market_payload
 from .snapshot_store import StoredMarketSnapshot
@@ -83,6 +89,7 @@ _SESSION_KEYS_V2 = _SESSION_KEYS_V1 | {
     "evidence_profile",
     "missing_evidence",
 }
+_SESSION_KEYS_V3 = _SESSION_KEYS_V2 | {"source_identity_claims"}
 _EVIDENCE_PROFILE_MISSING = {
     EVIDENCE_PROFILE_PRICE_UDIFF: (
         "REG1_SURVEILLANCE",
@@ -138,6 +145,19 @@ _ISSUE_KEYS = {
     "status",
     "issue_id",
 }
+_CLAIM_KEYS = {
+    "claim_id",
+    "session",
+    "listing_key",
+    "symbol",
+    "series",
+    "claimed_isin",
+    "source_kind",
+    "source_entry_name",
+    "source_entry_sha256",
+    "source_row_number",
+    "status",
+}
 
 
 class NseHistoricalArchiveRangeError(ValueError):
@@ -192,6 +212,27 @@ def _replay_issue_id(issue: Mapping[str, object]) -> str:
         {"schema": "nse-historical-archive-identity-issue/v1", **payload},
         length=64,
     )
+
+
+def _replay_claim_id(claim: Mapping[str, object]) -> str:
+    payload = {key: value for key, value in claim.items() if key != "claim_id"}
+    return content_id(
+        {"schema": "nse-historical-archive-source-identity-claim/v1", **payload},
+        length=64,
+    )
+
+
+def _is_legacy_unreconciled_source(
+    source_entry_sha256: object, session: date
+) -> bool:
+    if type(source_entry_sha256) is not tuple:
+        return False
+    names = {
+        pair[0]
+        for pair in source_entry_sha256
+        if type(pair) is tuple and len(pair) == 2
+    }
+    return names == set(_expected_legacy_names(session))
 
 
 _UNRECONCILED_NULL_RECORD_FIELDS = (
@@ -264,6 +305,14 @@ def _verify_record(value: object, session: date) -> Mapping[str, object]:
     record = _mapping(value, _RECORD_KEYS, "archive range record is invalid")
     if record["session"] != session:
         _fail("archive range record session is invalid")
+    symbol = record["symbol"]
+    if (
+        type(symbol) is not str
+        or _SYMBOL.fullmatch(symbol) is None
+        or record["series"] != "EQ"
+        or record["listing_key"] != f"NSE:{symbol}"
+    ):
+        _fail("archive range record listing binding is invalid")
     _sha256(record["record_id"], "archive range record identity is invalid")
     status = record["identity_status"]
     if status not in _IDENTITY_STATUSES:
@@ -289,6 +338,80 @@ def _verify_issue(value: object, session: date) -> Mapping[str, object]:
         _fail("archive range identity issue is invalid")
     _sha256(issue["issue_id"], "archive range issue identity is invalid")
     return issue
+
+
+def _verify_claim(value: object, session: date) -> Mapping[str, object]:
+    claim = _mapping(
+        value, _CLAIM_KEYS, "archive range source identity claim is invalid"
+    )
+    if claim["session"] != session:
+        _fail("archive range source identity claim session is invalid")
+    symbol = claim["symbol"]
+    if (
+        type(symbol) is not str
+        or _SYMBOL.fullmatch(symbol) is None
+        or claim["series"] != "EQ"
+        or claim["listing_key"] != f"NSE:{symbol}"
+    ):
+        _fail("archive range source identity claim listing binding is invalid")
+    claimed_isin = claim["claimed_isin"]
+    if type(claimed_isin) is not str or _RAW_IDENTIFIER.fullmatch(claimed_isin) is None:
+        _fail("archive range source identity claim ISIN is invalid")
+    if claim["source_kind"] != SOURCE_IDENTITY_CLAIM_KIND_LEGACY_BHAVCOPY_ISIN:
+        _fail("archive range source identity claim source kind is invalid")
+    if claim["status"] != SOURCE_IDENTITY_CLAIM_STATUS_SOURCE_CLAIMED_UNVERIFIED:
+        _fail("archive range source identity claim status is invalid")
+    if type(claim["source_entry_name"]) is not str or not claim["source_entry_name"]:
+        _fail("archive range source identity claim entry name is invalid")
+    _sha256(
+        claim["source_entry_sha256"],
+        "archive range source identity claim entry hash is invalid",
+    )
+    row_number = claim["source_row_number"]
+    if type(row_number) is not int or isinstance(row_number, bool) or row_number < 2:
+        _fail("archive range source identity claim row number is invalid")
+    _sha256(claim["claim_id"], "archive range source identity claim identity is invalid")
+    if claim["claim_id"] != _replay_claim_id(claim):
+        _fail("archive range source identity claim identity is invalid")
+    return claim
+
+
+def _verify_legacy_source_identity_claims(
+    claims_value: object,
+    *,
+    session: date,
+    records: tuple[Mapping[str, object], ...],
+) -> tuple[Mapping[str, object], ...]:
+    if type(claims_value) is not tuple:
+        _fail("archive range source identity claims are invalid")
+    verified_claims = tuple(_verify_claim(value, session) for value in claims_value)
+    if len(verified_claims) != len(records):
+        _fail("archive range source identity claim count is invalid")
+    expected_entry_name = f"{_legacy_bhavcopy_stem(session)}.csv"
+    reference_entry_name = verified_claims[0]["source_entry_name"]
+    reference_entry_sha256 = verified_claims[0]["source_entry_sha256"]
+    seen_row_numbers: set[int] = set()
+    for claim, record in zip(verified_claims, records, strict=True):
+        if (
+            claim["session"] != record["session"]
+            or claim["listing_key"] != record["listing_key"]
+            or claim["symbol"] != record["symbol"]
+            or claim["series"] != record["series"]
+        ):
+            _fail("archive range source identity claim binding is invalid")
+        if claim["source_entry_name"] != expected_entry_name:
+            _fail("archive range source identity claim entry name is invalid")
+        if (
+            claim["source_entry_name"] != reference_entry_name
+            or claim["source_entry_sha256"] != reference_entry_sha256
+        ):
+            _fail(
+                "archive range source identity claim entry evidence is inconsistent"
+            )
+        if claim["source_row_number"] in seen_row_numbers:
+            _fail("archive range source identity claim row numbers are not unique")
+        seen_row_numbers.add(claim["source_row_number"])
+    return verified_claims
 
 
 def _verify_session(
@@ -344,8 +467,13 @@ def _verify_session(
     if session_schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1:
         session_keys = _SESSION_KEYS_V1
         evidence_profile = EVIDENCE_PROFILE_COMPLETE
-    elif session_schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION:
+    elif session_schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2:
         session_keys = _SESSION_KEYS_V2
+        evidence_profile = stored.normalized_payload.get("evidence_profile")
+        if evidence_profile not in _EVIDENCE_PROFILE_MISSING:
+            _fail("archive range session evidence profile is invalid")
+    elif session_schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION:
+        session_keys = _SESSION_KEYS_V3
         evidence_profile = stored.normalized_payload.get("evidence_profile")
         if evidence_profile not in _EVIDENCE_PROFILE_MISSING:
             _fail("archive range session evidence profile is invalid")
@@ -374,7 +502,10 @@ def _verify_session(
         or len(issues) != payload["identity_issue_count"]
     ):
         _fail("archive range session payload is invalid")
-    if session_schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION:
+    if session_schema in (
+        NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2,
+        NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION,
+    ):
         if payload["missing_evidence"] != _EVIDENCE_PROFILE_MISSING[evidence_profile]:
             _fail("archive range session missing-evidence accounting is invalid")
     _verify_source_entries(
@@ -471,6 +602,19 @@ def _verify_session(
         value["surveillance_indicators"] != {} for value in verified_records
     ):
         _fail("archive range record surveillance evidence is inconsistent")
+    if session_schema == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION:
+        is_legacy = evidence_profile == EVIDENCE_PROFILE_UNRECONCILED and (
+            _is_legacy_unreconciled_source(payload["source_entry_sha256"], session)
+        )
+        claims_value = payload["source_identity_claims"]
+        if type(claims_value) is not tuple:
+            _fail("archive range source identity claims are invalid")
+        if is_legacy:
+            _verify_legacy_source_identity_claims(
+                claims_value, session=session, records=verified_records
+            )
+        elif claims_value:
+            _fail("archive range source identity claims are invalid")
     return evidence_profile
 
 

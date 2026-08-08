@@ -37,15 +37,18 @@ NSE_HISTORICAL_ARCHIVE_INDEX_DATASET = "nse-historical-archive-eq-index"
 NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1 = (
     "nse-historical-archive-eq-session/v1"
 )
-NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION = "nse-historical-archive-eq-session/v2"
+NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2 = "nse-historical-archive-eq-session/v2"
+NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION = "nse-historical-archive-eq-session/v3"
 NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2 = (
     "nse-historical-archive-eq-index/v2"
 )
 NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION = (
     "nse-historical-archive-eq-index/v3"
 )
-NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION = "nse-archive-eq-importer/v5"
+NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION = "nse-archive-eq-importer/v6"
 NSE_HISTORICAL_ARCHIVE_PROVIDER = "NSE_ARCHIVE"
+SOURCE_IDENTITY_CLAIM_KIND_LEGACY_BHAVCOPY_ISIN = "LEGACY_BHAVCOPY_ISIN"
+SOURCE_IDENTITY_CLAIM_STATUS_SOURCE_CLAIMED_UNVERIFIED = "SOURCE_CLAIMED_UNVERIFIED"
 MAXIMUM_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAXIMUM_ENTRY_BYTES = 64 * 1024 * 1024
 MAXIMUM_RECORDS = 20_000
@@ -668,7 +671,7 @@ def _unreconciled_eq_records(
     return records, identity_issues
 
 
-def _legacy_full_bhavcopy_csv(payload: bytes, *, session: date) -> bytes:
+def _legacy_full_bhavcopy_csv(payload: bytes, *, session: date) -> tuple[str, bytes]:
     inner_name = f"{_legacy_bhavcopy_stem(session)}.csv"
     validator = NseDailyBundleParser()
     try:
@@ -696,7 +699,7 @@ def _legacy_full_bhavcopy_csv(payload: bytes, *, session: date) -> bytes:
         ) from None
     if not inner_payload:
         raise NseHistoricalArchiveIntegrityError("legacy Bhavcopy inner CSV is empty")
-    return inner_payload
+    return inner_name, inner_payload
 
 
 def _parse_legacy_full_bhavcopy(
@@ -744,7 +747,7 @@ def _parse_legacy_full_bhavcopy(
     seen_keys: set[tuple[str, str]] = set()
     eq_rows: list[dict[str, object]] = []
     try:
-        for row in data_rows:
+        for row_number, row in enumerate(data_rows, start=2):
             if len(row) != len(header):
                 raise NseHistoricalArchiveIntegrityError(
                     "legacy Bhavcopy row width is inconsistent"
@@ -812,6 +815,8 @@ def _parse_legacy_full_bhavcopy(
                 {
                     "symbol": values["SYMBOL"],
                     "series": values["SERIES"],
+                    "isin": values["ISIN"],
+                    "row_number": row_number,
                     "open": prices["OPEN"],
                     "high": prices["HIGH"],
                     "low": prices["LOW"],
@@ -1039,14 +1044,19 @@ def _legacy_unreconciled_eq_records(
     mto_payload: bytes,
     *,
     session: date,
-) -> tuple[tuple[dict[str, object], ...], tuple[dict[str, object], ...]]:
+) -> tuple[
+    tuple[dict[str, object], ...],
+    tuple[dict[str, object], ...],
+    tuple[dict[str, object], ...],
+]:
     # _parse_legacy_full_bhavcopy already returns EQ-only rows (mirroring
     # the modern format's _eq_only_csv precedent); _parse_legacy_mto
     # returns every series, filtered to EQ below.
-    bhavcopy_rows = _parse_legacy_full_bhavcopy(
-        _legacy_full_bhavcopy_csv(legacy_zip_payload, session=session),
-        session=session,
+    inner_name, inner_payload = _legacy_full_bhavcopy_csv(
+        legacy_zip_payload, session=session
     )
+    bhavcopy_rows = _parse_legacy_full_bhavcopy(inner_payload, session=session)
+    inner_sha256 = _sha256(inner_payload)
     mto_rows = _parse_legacy_mto(mto_payload, session=session)
 
     bhavcopy_eq = {(row["symbol"], row["series"]): row for row in bhavcopy_rows}
@@ -1064,6 +1074,7 @@ def _legacy_unreconciled_eq_records(
 
     records: list[dict[str, object]] = []
     identity_issues: list[dict[str, object]] = []
+    claims: list[dict[str, object]] = []
     with localcontext() as context:
         context.prec = 50
         for key in sorted(bhavcopy_eq):
@@ -1074,6 +1085,27 @@ def _legacy_unreconciled_eq_records(
                     "EQ traded quantity disagrees between legacy Bhavcopy and MTO"
                 )
             symbol, series = key
+            listing_key = f"NSE:{symbol}"
+            claim: dict[str, object] = {
+                "session": session,
+                "listing_key": listing_key,
+                "symbol": symbol,
+                "series": series,
+                "claimed_isin": bhav["isin"],
+                "source_kind": SOURCE_IDENTITY_CLAIM_KIND_LEGACY_BHAVCOPY_ISIN,
+                "source_entry_name": inner_name,
+                "source_entry_sha256": inner_sha256,
+                "source_row_number": bhav["row_number"],
+                "status": SOURCE_IDENTITY_CLAIM_STATUS_SOURCE_CLAIMED_UNVERIFIED,
+            }
+            claim["claim_id"] = content_id(
+                {
+                    "schema": "nse-historical-archive-source-identity-claim/v1",
+                    **claim,
+                },
+                length=64,
+            )
+            claims.append(claim)
             total_value = bhav["total_traded_value"]
             volume = bhav["traded_quantity"]
             average_price = (total_value / Decimal(volume)).quantize(
@@ -1136,7 +1168,7 @@ def _legacy_unreconciled_eq_records(
         raise NseHistoricalArchiveIntegrityError(
             "historical archive EQ record count is outside limits"
         )
-    return tuple(records), tuple(identity_issues)
+    return tuple(records), tuple(identity_issues), tuple(claims)
 
 
 def parse_nse_historical_archive_entries(
@@ -1163,13 +1195,16 @@ def parse_nse_historical_archive_entries(
 
     legacy_names = _expected_legacy_names(session)
     if present_names == legacy_names:
-        records, identity_issues = _legacy_unreconciled_eq_records(
-            entries[legacy_names[0]],
-            entries[legacy_names[1]],
-            session=session,
+        records, identity_issues, source_identity_claims = (
+            _legacy_unreconciled_eq_records(
+                entries[legacy_names[0]],
+                entries[legacy_names[1]],
+                session=session,
+            )
         )
         records = tuple(records)
         identity_issues = tuple(identity_issues)
+        source_identity_claims = tuple(source_identity_claims)
         source_entry_sha256 = tuple(
             (name, _sha256(entries[name])) for name in sorted(present_names)
         )
@@ -1189,6 +1224,7 @@ def parse_nse_historical_archive_entries(
             "reg1_row_count": None,
             "identity_issue_count": len(identity_issues),
             "identity_issues": identity_issues,
+            "source_identity_claims": source_identity_claims,
             "collection_only": True,
             "actionable": False,
             "training_eligible": False,
@@ -1297,6 +1333,7 @@ def parse_nse_historical_archive_entries(
             "reg1_row_count": None,
             "identity_issue_count": len(identity_issues),
             "identity_issues": identity_issues,
+            "source_identity_claims": (),
             "collection_only": True,
             "actionable": False,
             "training_eligible": False,
@@ -1454,6 +1491,7 @@ def parse_nse_historical_archive_entries(
         "reg1_row_count": None if reg1 is None else reg1.row_count,
         "identity_issue_count": len(identity_issues),
         "identity_issues": tuple(identity_issues),
+        "source_identity_claims": (),
         "collection_only": True,
         "actionable": False,
         "training_eligible": False,

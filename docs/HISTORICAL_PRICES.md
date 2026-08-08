@@ -63,6 +63,25 @@ security-master vintages. Corporate-action notices must be separately archived
 with publication knowledge time before any cutoff-specific adjusted-price view
 is created. Splits or dividends must never rewrite these stored raw bars.
 
+### Legacy source-claimed ISIN lineage (v3)
+
+For sessions imported from the official legacy Full Bhavcopy/MTO archive pair
+(`nse-historical-archive-eq-session/v3`), the parser retains each row's exact
+published ISIN and its exact data-row number alongside the record, as an
+immutable, ordered `SOURCE_CLAIMED_UNVERIFIED` claim per EQ record. Every
+claim is bound to its exact record and to the exact SHA-256 of the inner
+Bhavcopy CSV bytes it was read from -- never the outer ZIP -- and is
+independently re-verified, both at range-load time and at research-replay
+time, before any session built from it is trusted.
+
+This is a retained source claim, not a validated identity: it never sets
+`validated_isin`, `financial_instrument_id`, or any identity-matched,
+market-eligibility, feature-, training-, label-, alert-, or execution
+authority. It remains unusable for identity resolution until a separately
+pinned corroboration/admission decision promotes it. Sessions stored under
+the earlier `v1`/`v2` schemas, and non-legacy `v3` sessions, carry no such
+claims and never have one inferred or fabricated on replay.
+
 ## Cross-session promoted history panel
 
 `india_swing.historical_prices.promoted_history` assembles multiple verified
