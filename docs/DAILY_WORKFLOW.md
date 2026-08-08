@@ -253,6 +253,47 @@ caller-controllable; this manifest does not authorize model training or any
 feature, label, alert, or execution generation until separate identity
 resolution and corporate-action adjustment gates exist.
 
+The manifest above can now be sealed locally. `research-dataset-build`
+performs the complete exact replay -- it calls `build_nse_archive_research_dataset`
+against `LocalMarketSnapshotStore`, which loads and re-verifies every pinned
+range/session before sealing the compact manifest -- and then stores the
+result exactly once through a create-once, exact-ID local store:
+
+```powershell
+python -m india_swing.market_data.nse_archive_cli research-dataset-build `
+  --store-root C:\project\india-swing-data\canonical-market-data `
+  --research-store-root C:\project\india-swing-data\research-datasets `
+  --index-snapshot-id <exact-index-snapshot-id> `
+  --index-snapshot-id <exact-index-snapshot-id> `
+  --train-end 2022-12-31 `
+  --validation-start 2023-01-01 `
+  --validation-end 2024-12-31 `
+  --test-start 2025-01-01 `
+  --maximum-forward-label-horizon-sessions 20 `
+  --source-accounting-failed-session <YYYY-MM-DD> `
+  --source-cross-source-join-failed-session <YYYY-MM-DD>
+```
+
+`--index-snapshot-id` may repeat, and the supplied order is preserved exactly
+as the chronological range order the manifest binds. This can be slow on the
+real corpus -- it is local computation, not a cached "latest" shortcut, and
+must not be replaced with one. The result is written under
+`<research-store-root>/nse-archive-research-datasets/<dataset_id>.json`;
+`put` is create-once and idempotent, and there is no list, glob, latest, or
+overwrite path. To replay an already-sealed manifest without rebuilding it:
+
+```powershell
+python -m india_swing.market_data.nse_archive_cli research-dataset-show `
+  --research-store-root C:\project\india-swing-data\research-datasets `
+  --dataset-id <exact-dataset-id>
+```
+
+Both commands print only a deterministic JSON summary (counts, IDs, safety
+flags, and per-partition role/session/candidate/tail counts) -- never a raw
+record. Neither command changes the research-only boundary above: sealing
+the manifest is still not model training, feature/label/alert generation, or
+any action on the promoted engine.
+
 ## Deliberate boundary
 
 This workflow closes the automated **EOD paper-outcome leg**. It does not yet
