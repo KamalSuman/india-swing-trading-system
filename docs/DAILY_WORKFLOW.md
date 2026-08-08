@@ -227,6 +227,32 @@ and identity-issue accounting. This complete replay is intentionally an
 offline trust-boundary operation; recurring jobs should pin its accepted index
 ID and process only newly appended immutable sessions.
 
+`src/india_swing/evaluation/nse_archive_research_dataset.py` adds one further
+offline layer above `verify-range`: `build_nse_archive_research_dataset`
+binds an exact, caller-ordered tuple of already-pinned index snapshot IDs
+into one immutable `NseArchiveResearchDataset` lineage/control manifest. It
+is a compact manifest, not a materialized price panel -- it references exact
+range and session snapshot IDs and aggregate counts, and it never lists,
+discovers, or selects a latest index. As of this increment the pinned corpus
+spans nine exact archive-range indexes covering 2015-01-01 through
+2026-07-31: 2,849 accepted sessions and 4,792,827 EQ records. Three sessions
+are explicit, permanently unresolved exclusions rather than silent gaps:
+2018-10-12 (`SOURCE_ACCOUNTING_FAILED`, inconsistent authoritative MTO
+accounting) and 2019-06-17 / 2019-06-18 (`SOURCE_CROSS_SOURCE_JOIN_FAILED`,
+the exact cross-source EQ join failed). The first research split policy is
+fixed and chronological: training sessions through 2022-12-31, validation
+sessions from 2023-01-01 through 2024-12-31, and untouched test sessions
+from 2025-01-01 onward; the final 20 sessions of every partition are
+reserved as an unavailable forward-label tail (the maximum planned
+forward-return horizon) and are never candidate label origins. Every dataset
+safety flag -- `collection_only`, `actionable`, `training_eligible`,
+`feature_eligible`, `label_eligible`, `alert_eligible`,
+`execution_eligible`, `identity_resolution_complete`, and
+`corporate_action_adjustment_complete` -- is hard-coded and not
+caller-controllable; this manifest does not authorize model training or any
+feature, label, alert, or execution generation until separate identity
+resolution and corporate-action adjustment gates exist.
+
 ## Deliberate boundary
 
 This workflow closes the automated **EOD paper-outcome leg**. It does not yet
