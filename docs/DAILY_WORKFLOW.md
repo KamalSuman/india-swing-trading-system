@@ -148,6 +148,38 @@ virtue of matching this naming convention; they become part of the record
 only once staged, imported, and their range successfully replayed through
 `verify-range`.
 
+A read-only audit of 1,228 locally staged 2015-2019 legacy sessions (two
+further sessions, 17-Jun-2019 and 18-Jun-2019, correctly and permanently fail
+the exact EQ join) found four bounded official publisher variants, and the
+parser now accepts exactly these four, never a generic relaxation:
+
+- The legacy Bhavcopy also accepts the same 13 named columns with no
+  trailing comma (so no terminal empty 14th field), selected by an exact
+  header match; a file may not mix that shape's rows with the terminal-comma
+  shape's rows.
+- The MTO settlement-metadata line also accepts the same four labeled
+  fields with the publisher's dropped-"T" typo (`rade Date` instead of
+  `Trade Date`), and a two-field shape carrying only `Trade Date` and
+  `Settlement Type` (`Settlement No`/`Settlement Date` genuinely absent, not
+  fabricated) for sessions from 2019 onward. The parsed trade date must
+  still equal the outer session in every shape.
+- The MTO body also accepts exactly one trailing empty CSV record (a
+  second terminal newline in the source file); an interior empty record or
+  a second trailing one still fails closed.
+- The published delivery percentage is bounded corroboration, not the
+  validation authority: it is accepted when it differs from an explicit,
+  caller-context-independent `ROUND_HALF_UP` recalculation by at most 0.01,
+  and the published value -- never the recalculated one -- is what is
+  stored. Every quantity control (`deliverable_quantity <= traded_quantity`,
+  the exact EQ join, the MTO record-count/total-deliverable-quantity
+  accounting) is unchanged and unaffected by this tolerance.
+
+`NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION` moved to v5 for this widened
+physical grammar; the evidence profile, schemas, and every other validation
+ceiling are unchanged. This audit and the parser fix that followed it are not
+a claim that the entire 2015-2019 corpus is now accepted -- that requires
+Codex to rerun the real local audit and a full immutable range replay.
+
 The immutable range index reports both `identity_issue_count` and
 `identity_quarantined_session_count`. These counts are operational alarms, not
 permission to repair history from a later session. A later NSE file may explain

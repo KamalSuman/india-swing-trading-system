@@ -30,6 +30,8 @@ from india_swing.market_data.nse_archive import (
     NSE_HISTORICAL_ARCHIVE_PROVIDER,
     NseHistoricalArchiveIntegrityError,
     _LEGACY_FULL_BHAVCOPY_HEADER,
+    _LEGACY_FULL_BHAVCOPY_HEADER_NAMES,
+    _LEGACY_FULL_BHAVCOPY_HEADER_NO_TERMINAL,
     _MTO_CONTROL_RECORD_TYPE,
     _MTO_DATA_RECORD_TYPE,
     _MTO_HEADER_RECORD,
@@ -1023,6 +1025,7 @@ def _legacy_bhavcopy_row(
     total_trades: str = "50",
     isin: str = "INE144J01027",
     terminal_field: str = "",
+    include_terminal: bool = True,
 ) -> list[str]:
     values = {
         "SYMBOL": symbol,
@@ -1039,10 +1042,10 @@ def _legacy_bhavcopy_row(
         "TOTALTRADES": total_trades,
         "ISIN": isin,
     }
-    # _LEGACY_FULL_BHAVCOPY_HEADER's last element is the canonical trailing
-    # empty column caused by the real file's terminal comma.
-    named_header = _LEGACY_FULL_BHAVCOPY_HEADER[:-1]
-    return [values[name] for name in named_header] + [terminal_field]
+    row = [values[name] for name in _LEGACY_FULL_BHAVCOPY_HEADER_NAMES]
+    if include_terminal:
+        row.append(terminal_field)
+    return row
 
 
 def _mto_row(
@@ -1084,6 +1087,9 @@ def _mto_bytes(
     settlement_no: str = "2019002",
     title_line: str = _MTO_TITLE_LINE,
     header_record: tuple[str, ...] = _MTO_HEADER_RECORD,
+    trade_date_label: str = "Trade Date",
+    settlement_row: list[str] | None = None,
+    trailing_blank_rows: int = 0,
 ) -> bytes:
     control_date = (
         control_date_text if control_date_text is not None else f"{session:%d%m%Y}"
@@ -1098,6 +1104,16 @@ def _mto_bytes(
         if total_deliverable_quantity is None
         else total_deliverable_quantity
     )
+    effective_settlement_row = (
+        settlement_row
+        if settlement_row is not None
+        else [
+            f"{trade_date_label} <{trade_date}>",
+            f"Settlement Type <{settlement_type}>",
+            f"Settlement No <{settlement_no}>",
+            f"Settlement Date <{settlement_date}>",
+        ]
+    )
     body = [
         [
             _MTO_CONTROL_RECORD_TYPE,
@@ -1106,14 +1122,10 @@ def _mto_bytes(
             str(effective_total_deliverable),
             str(effective_count),
         ],
-        [
-            f"Trade Date <{trade_date}>",
-            f"Settlement Type <{settlement_type}>",
-            f"Settlement No <{settlement_no}>",
-            f"Settlement Date <{settlement_date}>",
-        ],
+        effective_settlement_row,
         list(header_record),
         *rows,
+        *([[]] * trailing_blank_rows),
     ]
     return _csv((title_line,), body)
 
@@ -1720,6 +1732,226 @@ class NseLegacyBhavcopyMtoProfileTests(unittest.TestCase):
         self.assertEqual(record["average_price"], Decimal("30.50"))
         self.assertEqual(record["turnover_lacs"], Decimal("3.05"))
         self.assertEqual(record["delivery_percent"], Decimal("67.89"))
+
+    def test_no_terminal_bhavcopy_header_variant_accepted_and_mixed_rows_reject(
+        self,
+    ) -> None:
+        # One proven official variant (10-Jul-2017): the same 13 named
+        # columns, but no trailing comma on the header or any data row.
+        no_terminal_row = _legacy_bhavcopy_row(include_terminal=False)
+        valid_csv = _csv(_LEGACY_FULL_BHAVCOPY_HEADER_NO_TERMINAL, [no_terminal_row])
+        parsed = parse_nse_historical_archive_bytes(
+            _legacy_outer_zip_bytes(
+                legacy_zip_payload=_legacy_zip_bytes(csv_bytes=valid_csv)
+            ),
+            original_filename=f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip",
+        )
+        self.assertEqual(len(parsed.normalized_payload["records"]), 1)
+        self.assertEqual(
+            parsed.normalized_payload["records"][0]["symbol"], "20MICRONS"
+        )
+
+        mixed_13_and_14_width_rows = _csv(
+            _LEGACY_FULL_BHAVCOPY_HEADER_NO_TERMINAL,
+            [
+                no_terminal_row,
+                _legacy_bhavcopy_row(symbol="OTHERCO", include_terminal=True),
+            ],
+        )
+        missing_named_field_header = tuple(
+            name for name in _LEGACY_FULL_BHAVCOPY_HEADER_NAMES if name != "ISIN"
+        )
+        missing_named_field = _csv(
+            missing_named_field_header, [no_terminal_row[:-1]]
+        )
+        extra_field_header = _LEGACY_FULL_BHAVCOPY_HEADER_NAMES + ("EXTRA",)
+        extra_field = _csv(extra_field_header, [no_terminal_row + ["x"]])
+
+        cases = {
+            "mixed_13_and_14_width_rows": mixed_13_and_14_width_rows,
+            "missing_named_field": missing_named_field,
+            "extra_field": extra_field,
+        }
+        for label, csv_bytes in cases.items():
+            with self.subTest(label), self.assertRaises(
+                NseHistoricalArchiveIntegrityError
+            ):
+                parse_nse_historical_archive_bytes(
+                    _legacy_outer_zip_bytes(
+                        legacy_zip_payload=_legacy_zip_bytes(csv_bytes=csv_bytes)
+                    ),
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+
+    def test_mto_settlement_line_shape_variants(self) -> None:
+        trade_date = _legacy_date_text(LEGACY_SESSION)
+
+        standard = _mto_bytes([_mto_row()])
+        typo = _mto_bytes([_mto_row()], trade_date_label="rade Date")
+        two_field = _mto_bytes(
+            [_mto_row()],
+            settlement_row=[f"Trade Date <{trade_date}>", "Settlement Type <N>"],
+        )
+        good_cases = {"standard": standard, "typo": typo, "two_field": two_field}
+        for label, payload in good_cases.items():
+            with self.subTest(label):
+                parsed = parse_nse_historical_archive_bytes(
+                    _legacy_outer_zip_bytes(mto_payload=payload),
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+                self.assertEqual(len(parsed.normalized_payload["records"]), 1)
+
+        three_field = _mto_bytes(
+            [_mto_row()],
+            settlement_row=[
+                f"Trade Date <{trade_date}>",
+                "Settlement Type <N>",
+                "Settlement No <2019002>",
+            ],
+        )
+        five_field = _mto_bytes(
+            [_mto_row()],
+            settlement_row=[
+                f"Trade Date <{trade_date}>",
+                "Settlement Type <N>",
+                "Settlement No <2019002>",
+                f"Settlement Date <{trade_date}>",
+                "Extra <x>",
+            ],
+        )
+        reordered = _mto_bytes(
+            [_mto_row()],
+            settlement_row=[
+                "Settlement Type <N>",
+                f"Trade Date <{trade_date}>",
+                "Settlement No <2019002>",
+                f"Settlement Date <{trade_date}>",
+            ],
+        )
+        aliased_label = _mto_bytes(
+            [_mto_row()],
+            settlement_row=[f"Value Date <{trade_date}>", "Settlement Type <N>"],
+        )
+        wrong_trade_date_two_field = _mto_bytes(
+            [_mto_row()],
+            settlement_row=["Trade Date <01-JAN-2019>", "Settlement Type <N>"],
+        )
+        bad_cases = {
+            "three_field": three_field,
+            "five_field": five_field,
+            "reordered": reordered,
+            "aliased_label": aliased_label,
+            "wrong_trade_date_two_field": wrong_trade_date_two_field,
+        }
+        for label, payload in bad_cases.items():
+            with self.subTest(label), self.assertRaises(
+                NseHistoricalArchiveIntegrityError
+            ):
+                parse_nse_historical_archive_bytes(
+                    _legacy_outer_zip_bytes(mto_payload=payload),
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+
+    def test_mto_trailing_blank_record_variants(self) -> None:
+        no_blank = _mto_bytes([_mto_row()])
+        one_trailing_blank = _mto_bytes([_mto_row()], trailing_blank_rows=1)
+        good_cases = {"no_blank": no_blank, "one_trailing_blank": one_trailing_blank}
+        for label, payload in good_cases.items():
+            with self.subTest(label):
+                parsed = parse_nse_historical_archive_bytes(
+                    _legacy_outer_zip_bytes(mto_payload=payload),
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+                self.assertEqual(len(parsed.normalized_payload["records"]), 1)
+
+        two_trailing_blanks = _mto_bytes([_mto_row()], trailing_blank_rows=2)
+        interior_blank = _mto_bytes(
+            [_mto_row(serial=1), [], _mto_row(serial=2, symbol="OTHERCO")],
+            total_deliverable_quantity=0,
+            record_count=0,
+        )
+        bad_cases = {
+            "two_trailing_blanks": two_trailing_blanks,
+            "interior_blank": interior_blank,
+        }
+        for label, payload in bad_cases.items():
+            with self.subTest(label), self.assertRaises(
+                NseHistoricalArchiveIntegrityError
+            ):
+                parse_nse_historical_archive_bytes(
+                    _legacy_outer_zip_bytes(mto_payload=payload),
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+
+    def test_mto_percentage_tolerance_boundaries(self) -> None:
+        # 6789/10000 * 100 = 67.89 exactly under ROUND_HALF_UP.
+        for label, percent_text in {
+            "exact": "67.89",
+            "minus_0_01": "67.88",
+            "plus_0_01": "67.90",
+        }.items():
+            with self.subTest(label):
+                payload = _mto_bytes([_mto_row(percent=percent_text)])
+                parsed = parse_nse_historical_archive_bytes(
+                    _legacy_outer_zip_bytes(mto_payload=payload),
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+                record = parsed.normalized_payload["records"][0]
+                # Published percentage is retained unchanged, never
+                # replaced with the recalculated ROUND_HALF_UP value.
+                self.assertEqual(record["delivery_percent"], Decimal(percent_text))
+
+        for label, percent_text in {
+            "minus_0_02": "67.87",
+            "plus_0_02": "67.91",
+        }.items():
+            with self.subTest(label), self.assertRaises(
+                NseHistoricalArchiveIntegrityError
+            ):
+                payload = _mto_bytes([_mto_row(percent=percent_text)])
+                parse_nse_historical_archive_bytes(
+                    _legacy_outer_zip_bytes(mto_payload=payload),
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+
+    def test_percentage_tolerance_decimal_invariant_under_hostile_global_context(
+        self,
+    ) -> None:
+        payload = _mto_bytes([_mto_row(percent="67.90")])
+        archive_payload = _legacy_outer_zip_bytes(mto_payload=payload)
+        original_prec = decimal.getcontext().prec
+        original_traps = dict(decimal.getcontext().traps)
+        try:
+            decimal.getcontext().prec = 1
+            for trap in decimal.getcontext().traps:
+                decimal.getcontext().traps[trap] = False
+            parsed = parse_nse_historical_archive_bytes(
+                archive_payload,
+                original_filename=(
+                    f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                ),
+            )
+        finally:
+            decimal.getcontext().prec = original_prec
+            for trap, value in original_traps.items():
+                decimal.getcontext().traps[trap] = value
+
+        record = parsed.normalized_payload["records"][0]
+        self.assertEqual(record["delivery_percent"], Decimal("67.90"))
 
 
 if __name__ == "__main__":

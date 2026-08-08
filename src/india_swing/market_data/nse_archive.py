@@ -44,7 +44,7 @@ NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2 = (
 NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION = (
     "nse-historical-archive-eq-index/v3"
 )
-NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION = "nse-archive-eq-importer/v4"
+NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION = "nse-archive-eq-importer/v5"
 NSE_HISTORICAL_ARCHIVE_PROVIDER = "NSE_ARCHIVE"
 MAXIMUM_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAXIMUM_ENTRY_BYTES = 64 * 1024 * 1024
@@ -217,9 +217,7 @@ _LEGACY_MONTH_ABBREVIATIONS = (
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
     "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 )
-_LEGACY_FULL_BHAVCOPY_HEADER = (
-    # The official file has a trailing comma after ISIN, producing a
-    # canonical 14th, always-empty column on the header and every row.
+_LEGACY_FULL_BHAVCOPY_HEADER_NAMES = (
     "SYMBOL",
     "SERIES",
     "OPEN",
@@ -233,8 +231,12 @@ _LEGACY_FULL_BHAVCOPY_HEADER = (
     "TIMESTAMP",
     "TOTALTRADES",
     "ISIN",
-    "",
 )
+_LEGACY_FULL_BHAVCOPY_HEADER = _LEGACY_FULL_BHAVCOPY_HEADER_NAMES + ("",)
+# One proven official variant (10-Jul-2017) has the same exact 13 named
+# columns but no trailing comma, so no terminal empty field on the header
+# or any data row.
+_LEGACY_FULL_BHAVCOPY_HEADER_NO_TERMINAL = _LEGACY_FULL_BHAVCOPY_HEADER_NAMES
 _MTO_TITLE_LINE = "Security Wise Delivery Position - Compulsory Rolling Settlement"
 _MTO_CONTROL_RECORD_TYPE = "10"
 _MTO_DATA_RECORD_TYPE = "20"
@@ -249,10 +251,14 @@ _MTO_HEADER_RECORD = (
     "% of Deliverable Quantity to Traded Quantity",
 )
 _MTO_TRADE_DATE_FIELD = re.compile(r"Trade Date <(?P<value>[^>]+)>\Z")
+# One proven official publisher typo: the leading "T" of "Trade Date" is
+# dropped on some sessions' four-field settlement lines.
+_MTO_TRADE_DATE_TYPO_FIELD = re.compile(r"rade Date <(?P<value>[^>]+)>\Z")
 _MTO_SETTLEMENT_TYPE_FIELD = re.compile(r"Settlement Type <(?P<value>[A-Z0-9]{1,10})>\Z")
 _MTO_SETTLEMENT_NO_FIELD = re.compile(r"Settlement No <(?P<value>[0-9]+)>\Z")
 _MTO_SETTLEMENT_DATE_FIELD = re.compile(r"Settlement Date <(?P<value>[^>]+)>\Z")
 _ZERO_PADDED_INTEGER = re.compile(r"[0-9]+\Z")
+_PERCENT_TOLERANCE = Decimal("0.01")
 
 
 def _zero_padded_unsigned_integer(value: str, field_name: str) -> int:
@@ -705,26 +711,36 @@ def _parse_legacy_full_bhavcopy(
         ) from None
     if not rows:
         raise NseHistoricalArchiveIntegrityError("legacy Bhavcopy is empty")
-    if tuple(rows[0]) != _LEGACY_FULL_BHAVCOPY_HEADER:
+    # Exactly two accepted whole-file shapes, selected by exact header
+    # match: the standard 14-field header/rows ending in one empty field,
+    # or the same 13 named fields with no terminal empty field at all
+    # (one proven official variant, 10-Jul-2017). Never a mixture.
+    if tuple(rows[0]) == _LEGACY_FULL_BHAVCOPY_HEADER:
+        header = _LEGACY_FULL_BHAVCOPY_HEADER
+        require_terminal_empty = True
+    elif tuple(rows[0]) == _LEGACY_FULL_BHAVCOPY_HEADER_NO_TERMINAL:
+        header = _LEGACY_FULL_BHAVCOPY_HEADER_NO_TERMINAL
+        require_terminal_empty = False
+    else:
         raise NseHistoricalArchiveIntegrityError(
             "legacy Bhavcopy header is not canonical"
         )
-    header = _LEGACY_FULL_BHAVCOPY_HEADER
     data_rows = rows[1:]
     if not data_rows:
         raise NseHistoricalArchiveIntegrityError("legacy Bhavcopy contains no data rows")
 
     # Every row -- EQ or not -- is structurally validated: exact width and
-    # terminal empty field, canonical symbol/series, exact session
-    # TIMESTAMP, unique (symbol, series), valid ISIN shape, and numeric
-    # parseability of every price/value/quantity/trade-count field. Only
-    # the stricter business constraints (strictly positive prices, OHLC
-    # consistency, strictly positive traded quantity/trade count) are
-    # gated to the declared EQ lane, so a real excluded non-EQ business
-    # anomaly (observed officially: a "YT" row with LAST=0) stays excluded
-    # rather than rejecting the session, while a malformed or wrong-dated
-    # non-EQ row (e.g. TIMESTAMP 01-JAN-1900) still fails closed. Excluded
-    # rows are never normalized, retained, or joined.
+    # terminal-field convention (matching whichever header shape was
+    # selected), canonical symbol/series, exact session TIMESTAMP, unique
+    # (symbol, series), valid ISIN shape, and numeric parseability of
+    # every price/value/quantity/trade-count field. Only the stricter
+    # business constraints (strictly positive prices, OHLC consistency,
+    # strictly positive traded quantity/trade count) are gated to the
+    # declared EQ lane, so a real excluded non-EQ business anomaly
+    # (observed officially: a "YT" row with LAST=0) stays excluded rather
+    # than rejecting the session, while a malformed or wrong-dated non-EQ
+    # row (e.g. TIMESTAMP 01-JAN-1900) still fails closed. Excluded rows
+    # are never normalized, retained, or joined.
     seen_keys: set[tuple[str, str]] = set()
     eq_rows: list[dict[str, object]] = []
     try:
@@ -733,7 +749,7 @@ def _parse_legacy_full_bhavcopy(
                 raise NseHistoricalArchiveIntegrityError(
                     "legacy Bhavcopy row width is inconsistent"
                 )
-            if row[-1] != "":
+            if require_terminal_empty and row[-1] != "":
                 raise NseHistoricalArchiveIntegrityError(
                     "legacy Bhavcopy row has a non-empty terminal field"
                 )
@@ -867,25 +883,48 @@ def _parse_legacy_mto(payload: bytes, *, session: date) -> tuple[dict[str, objec
         control_row[4], "MTO control record count"
     )
 
+    # Three proven official settlement-line shapes: (A) the standard four
+    # fields; (B) the same four fields but with the publisher typo "rade
+    # Date" instead of "Trade Date"; (C) exactly two fields, Trade Date and
+    # Settlement Type only (the shape begins in 2019 and genuinely omits
+    # Settlement No/Settlement Date rather than having them go missing).
     settlement_row = rows[2]
-    if len(settlement_row) != 4:
-        raise NseHistoricalArchiveIntegrityError("MTO settlement line is not canonical")
-    trade_date_match = _MTO_TRADE_DATE_FIELD.fullmatch(settlement_row[0])
-    settlement_type_match = _MTO_SETTLEMENT_TYPE_FIELD.fullmatch(settlement_row[1])
-    settlement_no_match = _MTO_SETTLEMENT_NO_FIELD.fullmatch(settlement_row[2])
-    settlement_date_match = _MTO_SETTLEMENT_DATE_FIELD.fullmatch(settlement_row[3])
-    if (
-        trade_date_match is None
-        or settlement_type_match is None
-        or settlement_no_match is None
-        or settlement_date_match is None
-    ):
+    settlement_date_text: str | None = None
+    if len(settlement_row) == 4:
+        trade_field, type_field, no_field, date_field = settlement_row
+        trade_date_match = _MTO_TRADE_DATE_FIELD.fullmatch(
+            trade_field
+        ) or _MTO_TRADE_DATE_TYPO_FIELD.fullmatch(trade_field)
+        settlement_type_match = _MTO_SETTLEMENT_TYPE_FIELD.fullmatch(type_field)
+        settlement_no_match = _MTO_SETTLEMENT_NO_FIELD.fullmatch(no_field)
+        settlement_date_match = _MTO_SETTLEMENT_DATE_FIELD.fullmatch(date_field)
+        if (
+            trade_date_match is None
+            or settlement_type_match is None
+            or settlement_no_match is None
+            or settlement_date_match is None
+        ):
+            raise NseHistoricalArchiveIntegrityError(
+                "MTO settlement line is not canonical"
+            )
+        settlement_date_text = settlement_date_match.group("value")
+    elif len(settlement_row) == 2:
+        trade_field, type_field = settlement_row
+        trade_date_match = _MTO_TRADE_DATE_FIELD.fullmatch(trade_field)
+        settlement_type_match = _MTO_SETTLEMENT_TYPE_FIELD.fullmatch(type_field)
+        if trade_date_match is None or settlement_type_match is None:
+            raise NseHistoricalArchiveIntegrityError(
+                "MTO settlement line is not canonical"
+            )
+    else:
         raise NseHistoricalArchiveIntegrityError("MTO settlement line is not canonical")
     try:
         trade_date = _nse_text_date(trade_date_match.group("value"), "MTO trade date")
-        # Settlement date is a genuinely different date (T+n settlement);
-        # only well-formedness is required, never equality to the session.
-        _nse_text_date(settlement_date_match.group("value"), "MTO settlement date")
+        # Settlement date, when present, is a genuinely different date
+        # (T+n settlement); only well-formedness is required, never
+        # equality to the session.
+        if settlement_date_text is not None:
+            _nse_text_date(settlement_date_text, "MTO settlement date")
     except DailyReportError:
         raise NseHistoricalArchiveIntegrityError(
             "MTO settlement line dates are invalid"
@@ -899,6 +938,13 @@ def _parse_legacy_mto(payload: bytes, *, session: date) -> tuple[dict[str, objec
         raise NseHistoricalArchiveIntegrityError("MTO header record is not canonical")
 
     data_rows = rows[4:]
+    # One proven official variant (12-Oct-2018) has exactly one trailing
+    # empty CSV record, caused by a second terminal newline. csv.reader
+    # yields a blank line as [] (not a 7-field row), so strip at most one
+    # such record and only from the very end -- an interior [] row, or a
+    # second trailing one, still fails the width check below.
+    if data_rows and data_rows[-1] == []:
+        data_rows = data_rows[:-1]
     if not data_rows:
         raise NseHistoricalArchiveIntegrityError("MTO contains no data rows")
 
@@ -955,7 +1001,13 @@ def _parse_legacy_mto(payload: bytes, *, session: date) -> tuple[dict[str, objec
                     * Decimal(deliverable_quantity)
                     / Decimal(traded_quantity)
                 ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            if percent != expected_percent:
+                percent_difference = abs(percent - expected_percent)
+            # Published percentage is bounded corroboration, not the
+            # validation authority -- quantities remain authoritative and
+            # unaltered. 387 real sessions differ from exact ROUND_HALF_UP
+            # by exactly +/-0.01 on some rows; the published value (never
+            # the recalculated one) is what gets stored.
+            if percent_difference > _PERCENT_TOLERANCE:
                 raise NseHistoricalArchiveIntegrityError(
                     "MTO delivery percent disagrees with its traded and "
                     "deliverable quantities"
