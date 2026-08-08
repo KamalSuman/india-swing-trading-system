@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import decimal
+import io
 import tempfile
 import unittest
 import zipfile
 from dataclasses import replace
 from datetime import date, datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Mapping
 
@@ -26,7 +29,13 @@ from india_swing.market_data.nse_archive import (
     NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION,
     NSE_HISTORICAL_ARCHIVE_PROVIDER,
     NseHistoricalArchiveIntegrityError,
+    _LEGACY_FULL_BHAVCOPY_HEADER,
+    _MTO_CONTROL_RECORD_TYPE,
+    _MTO_DATA_RECORD_TYPE,
+    _MTO_HEADER_RECORD,
+    _MTO_TITLE_LINE,
     _REG1_HISTORICAL_HEADER,
+    _expected_legacy_names,
     import_nse_historical_range,
     parse_nse_historical_archive_bytes,
 )
@@ -984,6 +993,733 @@ class NseHistoricalArchiveStoreTests(unittest.TestCase):
                             store,
                             index_snapshot_id=index_snapshot.manifest.snapshot_id,
                         )
+
+
+LEGACY_SESSION = date(2019, 1, 2)
+_LEGACY_MONTH_ABBR = {
+    1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
+    7: "JUL", 8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC",
+}
+
+
+def _legacy_date_text(session: date) -> str:
+    return f"{session:%d}-{_LEGACY_MONTH_ABBR[session.month]}-{session:%Y}"
+
+
+def _legacy_bhavcopy_row(
+    *,
+    symbol: str = "20MICRONS",
+    series: str = "EQ",
+    session: date = LEGACY_SESSION,
+    open_price: str = "30.00",
+    high: str = "31.00",
+    low: str = "29.50",
+    close: str = "30.50",
+    last: str = "30.50",
+    previous_close: str = "29.80",
+    traded_quantity: str = "10000",
+    traded_value: str = "305000.00",
+    timestamp: str | None = None,
+    total_trades: str = "50",
+    isin: str = "INE144J01027",
+    terminal_field: str = "",
+) -> list[str]:
+    values = {
+        "SYMBOL": symbol,
+        "SERIES": series,
+        "OPEN": open_price,
+        "HIGH": high,
+        "LOW": low,
+        "CLOSE": close,
+        "LAST": last,
+        "PREVCLOSE": previous_close,
+        "TOTTRDQTY": traded_quantity,
+        "TOTTRDVAL": traded_value,
+        "TIMESTAMP": timestamp if timestamp is not None else _legacy_date_text(session),
+        "TOTALTRADES": total_trades,
+        "ISIN": isin,
+    }
+    # _LEGACY_FULL_BHAVCOPY_HEADER's last element is the canonical trailing
+    # empty column caused by the real file's terminal comma.
+    named_header = _LEGACY_FULL_BHAVCOPY_HEADER[:-1]
+    return [values[name] for name in named_header] + [terminal_field]
+
+
+def _mto_row(
+    *,
+    serial: object = 1,
+    symbol: str = "20MICRONS",
+    series: str = "EQ",
+    traded_quantity: object = 10000,
+    deliverable_quantity: object = 6789,
+    percent: str | None = None,
+    record_type: str = _MTO_DATA_RECORD_TYPE,
+) -> list[str]:
+    if percent is None:
+        computed = (
+            Decimal(100) * Decimal(deliverable_quantity) / Decimal(traded_quantity)
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        percent = str(computed)
+    return [
+        record_type,
+        str(serial),
+        symbol,
+        series,
+        str(traded_quantity),
+        str(deliverable_quantity),
+        percent,
+    ]
+
+
+def _mto_bytes(
+    rows: list[list[str]],
+    *,
+    session: date = LEGACY_SESSION,
+    record_count: object = None,
+    total_deliverable_quantity: object = None,
+    control_date_text: str | None = None,
+    trade_date_text: str | None = None,
+    settlement_date_text: str | None = None,
+    settlement_type: str = "N",
+    settlement_no: str = "2019002",
+    title_line: str = _MTO_TITLE_LINE,
+    header_record: tuple[str, ...] = _MTO_HEADER_RECORD,
+) -> bytes:
+    control_date = (
+        control_date_text if control_date_text is not None else f"{session:%d%m%Y}"
+    )
+    trade_date = trade_date_text if trade_date_text is not None else _legacy_date_text(session)
+    settlement_date = (
+        settlement_date_text if settlement_date_text is not None else _legacy_date_text(session)
+    )
+    effective_count = len(rows) if record_count is None else record_count
+    effective_total_deliverable = (
+        sum(int(row[5]) for row in rows)
+        if total_deliverable_quantity is None
+        else total_deliverable_quantity
+    )
+    body = [
+        [
+            _MTO_CONTROL_RECORD_TYPE,
+            "MTO",
+            control_date,
+            str(effective_total_deliverable),
+            str(effective_count),
+        ],
+        [
+            f"Trade Date <{trade_date}>",
+            f"Settlement Type <{settlement_type}>",
+            f"Settlement No <{settlement_no}>",
+            f"Settlement Date <{settlement_date}>",
+        ],
+        list(header_record),
+        *rows,
+    ]
+    return _csv((title_line,), body)
+
+
+def _legacy_zip_bytes(
+    session: date = LEGACY_SESSION,
+    *,
+    inner_name: str | None = None,
+    csv_bytes: bytes | None = None,
+    extra_entries: tuple[tuple[str, bytes], ...] = (),
+) -> bytes:
+    legacy_zip_name, _ = _expected_legacy_names(session)
+    effective_inner_name = (
+        inner_name if inner_name is not None else legacy_zip_name[: -len(".zip")]
+    )
+    effective_csv = (
+        csv_bytes
+        if csv_bytes is not None
+        else _csv(_LEGACY_FULL_BHAVCOPY_HEADER, [_legacy_bhavcopy_row(session=session)])
+    )
+    entries = [(effective_inner_name, effective_csv), *extra_entries]
+    return _zip(entries)
+
+
+def _legacy_outer_zip_bytes(
+    session: date = LEGACY_SESSION,
+    *,
+    legacy_zip_payload: bytes | None = None,
+    mto_payload: bytes | None = None,
+    extra_entries: tuple[tuple[str, bytes], ...] = (),
+    omit_zip: bool = False,
+    omit_mto: bool = False,
+) -> bytes:
+    legacy_zip_name, mto_name = _expected_legacy_names(session)
+    effective_zip_payload = (
+        legacy_zip_payload if legacy_zip_payload is not None else _legacy_zip_bytes(session)
+    )
+    effective_mto_payload = (
+        mto_payload
+        if mto_payload is not None
+        else _mto_bytes([_mto_row()], session=session)
+    )
+    entries: list[tuple[str, bytes]] = []
+    if not omit_zip:
+        entries.append((legacy_zip_name, effective_zip_payload))
+    if not omit_mto:
+        entries.append((mto_name, effective_mto_payload))
+    entries.extend(extra_entries)
+    return _zip(entries)
+
+
+class NseLegacyBhavcopyMtoProfileTests(unittest.TestCase):
+    def test_valid_legacy_pair_parses_to_unreconciled_with_derived_values(self) -> None:
+        parsed = parse_nse_historical_archive_bytes(
+            _legacy_outer_zip_bytes(),
+            original_filename=f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip",
+        )
+
+        payload = parsed.normalized_payload
+        self.assertEqual(payload["evidence_profile"], EVIDENCE_PROFILE_UNRECONCILED)
+        self.assertEqual(
+            payload["missing_evidence"],
+            ("UDIFF_BHAVCOPY", "NSE_CM_SECURITY_MASTER", "REG1_SURVEILLANCE"),
+        )
+        self.assertEqual(len(parsed.source_entry_sha256), 2)
+        legacy_zip_name, mto_name = _expected_legacy_names(LEGACY_SESSION)
+        self.assertEqual(
+            {name for name, _ in parsed.source_entry_sha256},
+            {legacy_zip_name, mto_name},
+        )
+        self.assertTrue(payload["collection_only"])
+        self.assertFalse(payload["actionable"])
+        self.assertFalse(payload["training_eligible"])
+        self.assertEqual(payload["identity_issue_count"], 1)
+        self.assertEqual(len(payload["records"]), 1)
+
+        record = payload["records"][0]
+        self.assertEqual(record["listing_key"], "NSE:20MICRONS")
+        self.assertEqual(
+            record["identity_status"],
+            IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE,
+        )
+        self.assertIsNone(record["validated_isin"])
+        self.assertIsNone(record["financial_instrument_id"])
+        self.assertIsNone(record["udiff_source_identifier"])
+        self.assertEqual(record["surveillance_indicators"], {})
+        self.assertEqual(record["volume"], 10000)
+        self.assertEqual(record["trade_count"], 50)
+        self.assertEqual(record["delivery_quantity"], 6789)
+        self.assertEqual(record["delivery_percent"], Decimal("67.89"))
+        # 305000.00 / 10000 and 305000.00 / 100_000, both ROUND_HALF_UP 2dp.
+        self.assertEqual(record["average_price"], Decimal("30.50"))
+        self.assertEqual(record["turnover_lacs"], Decimal("3.05"))
+        self.assertEqual(record["open"], Decimal("30.00"))
+        self.assertEqual(record["close"], Decimal("30.50"))
+
+        issue = payload["identity_issues"][0]
+        self.assertEqual(
+            issue["status"],
+            IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE,
+        )
+        self.assertIsNone(issue["udiff_financial_instrument_id"])
+        self.assertEqual(
+            record["record_id"], _replay_record_id(record)
+        )
+        self.assertEqual(issue["issue_id"], _replay_issue_id(issue))
+
+    def test_valid_legacy_pair_range_import_and_verify_replays(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staging = root / "staging" / LEGACY_SESSION.isoformat()
+            archives = root / "source-archives" / LEGACY_SESSION.isoformat()
+            staging.mkdir(parents=True)
+            archives.mkdir(parents=True)
+            archive_path = (
+                archives
+                / f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+            )
+            archive_path.write_bytes(_legacy_outer_zip_bytes())
+            with zipfile.ZipFile(archive_path) as archive:
+                for name in archive.namelist():
+                    (staging / name).write_bytes(archive.read(name))
+            store = LocalMarketSnapshotStore(root / "canonical")
+
+            sessions, index = import_nse_historical_range(
+                staging_root=root / "staging",
+                archive_root=root / "source-archives",
+                store=store,
+                start=LEGACY_SESSION,
+                end=LEGACY_SESSION,
+                observed_at=OBSERVED_AT,
+            )
+            self.assertEqual(sessions[0].evidence_profile, EVIDENCE_PROFILE_UNRECONCILED)
+            self.assertEqual(sessions[0].record_count, 1)
+
+            verified = load_verified_nse_historical_archive_range(
+                store,
+                index_snapshot_id=index.manifest.snapshot_id,
+            )
+            self.assertEqual(
+                verified.evidence_profile_counts[EVIDENCE_PROFILE_UNRECONCILED],
+                1,
+            )
+            self.assertEqual(verified.identity_issue_count, 1)
+            self.assertEqual(verified.record_count, 1)
+
+    def test_zero_padded_control_totals_and_differing_settlement_date_stage(self) -> None:
+        # Matches the real file's exact conventions: zero-padded control
+        # fields (e.g. "0001716") and a Settlement Date that genuinely
+        # differs from Trade Date (T+n settlement) -- neither is rejected.
+        mto_payload = _mto_bytes(
+            [_mto_row()],
+            record_count="0000001",
+            total_deliverable_quantity="0006789",
+            settlement_type="T",
+            settlement_no="0002019002",
+            settlement_date_text="04-JAN-2019",
+        )
+        parsed = parse_nse_historical_archive_bytes(
+            _legacy_outer_zip_bytes(mto_payload=mto_payload),
+            original_filename=f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip",
+        )
+        self.assertEqual(len(parsed.normalized_payload["records"]), 1)
+        self.assertEqual(
+            parsed.normalized_payload["records"][0]["delivery_quantity"], 6789
+        )
+
+    def test_outer_entry_set_missing_extra_mixed_duplicate_fail_closed(self) -> None:
+        modern_name = f"sec_bhavdata_full_{LEGACY_SESSION:%d%m%Y}.csv"
+        cases = {
+            "missing_mto": _legacy_outer_zip_bytes(omit_mto=True),
+            "missing_zip": _legacy_outer_zip_bytes(omit_zip=True),
+            "extra_entry": _legacy_outer_zip_bytes(
+                extra_entries=(("unexpected.txt", b"unsafe"),)
+            ),
+            "mixed_with_modern_single_file": _legacy_outer_zip_bytes(
+                extra_entries=(
+                    (
+                        modern_name,
+                        _csv(
+                            FULL_BHAVCOPY_DELIVERY_HEADER,
+                            [_full_row(trade_date=LEGACY_SESSION)],
+                        ),
+                    ),
+                )
+            ),
+        }
+        for label, payload in cases.items():
+            with self.subTest(label), self.assertRaises(
+                NseHistoricalArchiveIntegrityError
+            ):
+                parse_nse_historical_archive_bytes(
+                    payload,
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+
+        legacy_zip_name, mto_name = _expected_legacy_names(LEGACY_SESSION)
+        duplicate_stream_entries = [
+            (legacy_zip_name, _legacy_zip_bytes(LEGACY_SESSION)),
+            (mto_name, _mto_bytes([_mto_row()])),
+        ]
+        # Duplicate outer entry names: build the zip by hand since _zip()
+        # de-duplicates nothing but ZipFile.writestr allows repeats.
+        stream = io.BytesIO(_zip(duplicate_stream_entries))
+        with zipfile.ZipFile(stream, "a") as archive:
+            archive.writestr(legacy_zip_name, _legacy_zip_bytes(LEGACY_SESSION))
+        with self.subTest("duplicate_entry"), self.assertRaises(
+            NseHistoricalArchiveIntegrityError
+        ):
+            parse_nse_historical_archive_bytes(
+                stream.getvalue(),
+                original_filename=(
+                    f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                ),
+            )
+
+    def test_nested_zip_structural_violations_fail_closed(self) -> None:
+        legacy_zip_name, _ = _expected_legacy_names(LEGACY_SESSION)
+        inner_name = legacy_zip_name[: -len(".zip")]
+        good_csv = _csv(
+            _LEGACY_FULL_BHAVCOPY_HEADER, [_legacy_bhavcopy_row()]
+        )
+
+        empty_inner = _zip([])
+        extra_inner = _zip([(inner_name, good_csv), ("extra.csv", good_csv)])
+        wrong_name_inner = _zip([("wrong_name.csv", good_csv)])
+        empty_content_inner = _zip([(inner_name, b"")])
+        oversized_inner = _zip([(inner_name, b"A" * (64 * 1024 * 1024 + 1024))])
+        invalid_container = b"not a zip file at all"
+
+        directory_stream = io.BytesIO(_zip([]))
+        with zipfile.ZipFile(directory_stream, "a") as archive:
+            archive.writestr(zipfile.ZipInfo(f"{inner_name}/"), b"")
+        directory_inner = directory_stream.getvalue()
+
+        encrypted_buffer = _zip([(inner_name, good_csv)])
+        # Simulate an encrypted entry by setting the encryption flag bit
+        # directly on the local/central-directory metadata.
+        raw = bytearray(encrypted_buffer)
+        # Central directory general-purpose bit flag is a 2-byte field at
+        # offset 8 within each 46-byte central-directory file header; set
+        # bit 0 (encrypted) there. Locate it by the local file header
+        # signature's matching general-purpose flag at offset 6 instead,
+        # which is simpler and sufficient for zipfile to see flag_bits & 1.
+        local_signature = b"PK\x03\x04"
+        index = raw.find(local_signature)
+        self.assertNotEqual(index, -1)
+        raw[index + 6] |= 0x01
+        central_signature = b"PK\x01\x02"
+        central_index = raw.find(central_signature)
+        self.assertNotEqual(central_index, -1)
+        raw[central_index + 8] |= 0x01
+        encrypted_inner = bytes(raw)
+
+        cases = {
+            "empty_inner_zip": empty_inner,
+            "extra_inner_entry": extra_inner,
+            "wrong_inner_name": wrong_name_inner,
+            "empty_inner_content": empty_content_inner,
+            "oversized_inner_content": oversized_inner,
+            "invalid_container": invalid_container,
+            "directory_inner_entry": directory_inner,
+            "encrypted_inner_entry": encrypted_inner,
+        }
+        for label, legacy_zip_payload in cases.items():
+            with self.subTest(label), self.assertRaises(
+                NseHistoricalArchiveIntegrityError
+            ):
+                parse_nse_historical_archive_bytes(
+                    _legacy_outer_zip_bytes(legacy_zip_payload=legacy_zip_payload),
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+
+    def test_legacy_bhavcopy_row_violations_fail_closed(self) -> None:
+        bad_header = _csv(
+            tuple(_LEGACY_FULL_BHAVCOPY_HEADER[:-1]) + ("EXTRA",),
+            [_legacy_bhavcopy_row()],
+        )
+        bad_row_width = _csv(
+            _LEGACY_FULL_BHAVCOPY_HEADER,
+            [_legacy_bhavcopy_row()[:-1]],
+        )
+        wrong_date = _csv(
+            _LEGACY_FULL_BHAVCOPY_HEADER,
+            [_legacy_bhavcopy_row(timestamp="01-JAN-2019")],
+        )
+        invalid_date_text = _csv(
+            _LEGACY_FULL_BHAVCOPY_HEADER,
+            [_legacy_bhavcopy_row(timestamp="2019-01-02")],
+        )
+        duplicate_key = _csv(
+            _LEGACY_FULL_BHAVCOPY_HEADER,
+            [_legacy_bhavcopy_row(), _legacy_bhavcopy_row()],
+        )
+        malformed_numeric = _csv(
+            _LEGACY_FULL_BHAVCOPY_HEADER,
+            [_legacy_bhavcopy_row(open_price="not-a-number")],
+        )
+        bad_ohlc = _csv(
+            _LEGACY_FULL_BHAVCOPY_HEADER,
+            [_legacy_bhavcopy_row(high="10.00")],
+        )
+        no_data_rows = _csv(_LEGACY_FULL_BHAVCOPY_HEADER, [])
+        invalid_utf8 = (
+            _csv(_LEGACY_FULL_BHAVCOPY_HEADER, [_legacy_bhavcopy_row()])
+            + b"\xff"
+        )
+        non_empty_terminal_field = _csv(
+            _LEGACY_FULL_BHAVCOPY_HEADER,
+            [_legacy_bhavcopy_row(terminal_field="X")],
+        )
+
+        cases = {
+            "bad_header": bad_header,
+            "bad_row_width": bad_row_width,
+            "wrong_date": wrong_date,
+            "invalid_date_text": invalid_date_text,
+            "duplicate_key": duplicate_key,
+            "malformed_numeric": malformed_numeric,
+            "bad_ohlc": bad_ohlc,
+            "no_data_rows": no_data_rows,
+            "invalid_utf8": invalid_utf8,
+            "non_empty_terminal_field": non_empty_terminal_field,
+        }
+        for label, csv_bytes in cases.items():
+            with self.subTest(label), self.assertRaises(
+                NseHistoricalArchiveIntegrityError
+            ):
+                parse_nse_historical_archive_bytes(
+                    _legacy_outer_zip_bytes(
+                        legacy_zip_payload=_legacy_zip_bytes(csv_bytes=csv_bytes)
+                    ),
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+
+    def test_non_eq_bhavcopy_row_anomaly_is_excluded_without_weakening_eq_validation(
+        self,
+    ) -> None:
+        # Mirrors a real observed case in the official 02-Jan-2019 archive:
+        # a non-EQ row (there, SRTRANSFIN/YT with LAST=0.0) must never
+        # block the EQ session. Only the EQ-gated business constraints
+        # (strictly positive prices, OHLC consistency, strictly positive
+        # traded quantity/trade count) are relaxed for excluded rows --
+        # every structural check still runs on them (see the next test).
+        rows = [
+            _legacy_bhavcopy_row(),
+            _legacy_bhavcopy_row(
+                symbol="BADROW",
+                series="YT",
+                last="0.0",
+                isin="INE467B01029",
+            ),
+        ]
+        parsed = parse_nse_historical_archive_bytes(
+            _legacy_outer_zip_bytes(
+                legacy_zip_payload=_legacy_zip_bytes(
+                    csv_bytes=_csv(_LEGACY_FULL_BHAVCOPY_HEADER, rows)
+                )
+            ),
+            original_filename=f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip",
+        )
+        self.assertEqual(len(parsed.normalized_payload["records"]), 1)
+        self.assertEqual(
+            parsed.normalized_payload["records"][0]["symbol"], "20MICRONS"
+        )
+
+    def test_non_eq_bhavcopy_row_structural_violations_fail_closed(self) -> None:
+        # The adversarial gap Codex's probe found in revision 2: an
+        # excluded non-EQ row must still be structurally validated (wrong
+        # date, invalid symbol/series/ISIN, duplicate key, malformed
+        # numeric text) -- none of these are "business" constraints, and
+        # none may slip through unnoticed just because the row is excluded
+        # from the EQ join.
+        def _archive_with_bad_row(bad_row: list[str]) -> bytes:
+            rows = [_legacy_bhavcopy_row(), bad_row]
+            return _legacy_outer_zip_bytes(
+                legacy_zip_payload=_legacy_zip_bytes(
+                    csv_bytes=_csv(_LEGACY_FULL_BHAVCOPY_HEADER, rows)
+                )
+            )
+
+        wrong_date = _archive_with_bad_row(
+            _legacy_bhavcopy_row(
+                symbol="BADROW", series="YT", timestamp="01-JAN-1900",
+                isin="INE467B01029",
+            )
+        )
+        invalid_symbol = _archive_with_bad_row(
+            _legacy_bhavcopy_row(
+                symbol="bad symbol!", series="YT", isin="INE467B01029",
+            )
+        )
+        invalid_series = _archive_with_bad_row(
+            _legacy_bhavcopy_row(
+                symbol="BADROW", series="too-long-series", isin="INE467B01029",
+            )
+        )
+        invalid_isin = _archive_with_bad_row(
+            _legacy_bhavcopy_row(symbol="BADROW", series="YT", isin="not an isin")
+        )
+        duplicate_key = _legacy_outer_zip_bytes(
+            legacy_zip_payload=_legacy_zip_bytes(
+                csv_bytes=_csv(
+                    _LEGACY_FULL_BHAVCOPY_HEADER,
+                    [
+                        _legacy_bhavcopy_row(),
+                        _legacy_bhavcopy_row(series="YT", isin="INE467B01029"),
+                        _legacy_bhavcopy_row(series="YT", isin="INE467B01029"),
+                    ],
+                )
+            )
+        )
+        malformed_numeric = _archive_with_bad_row(
+            _legacy_bhavcopy_row(
+                symbol="BADROW",
+                series="YT",
+                open_price="not-a-number",
+                isin="INE467B01029",
+            )
+        )
+
+        cases = {
+            "wrong_date": wrong_date,
+            "invalid_symbol": invalid_symbol,
+            "invalid_series": invalid_series,
+            "invalid_isin": invalid_isin,
+            "duplicate_key": duplicate_key,
+            "malformed_numeric": malformed_numeric,
+        }
+        for label, payload in cases.items():
+            with self.subTest(label), self.assertRaises(
+                NseHistoricalArchiveIntegrityError
+            ):
+                parse_nse_historical_archive_bytes(
+                    payload,
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+
+    def test_mto_structure_and_accounting_violations_fail_closed(self) -> None:
+        bad_title = _mto_bytes([_mto_row()], title_line="Wrong Title Line")
+        bad_control_record_type = _mto_bytes([_mto_row()]).replace(
+            b"10,MTO,", b"99,MTO,", 1
+        )
+        bad_control_literal = _mto_bytes([_mto_row()]).replace(
+            b"10,MTO,", b"10,XXX,", 1
+        )
+        wrong_control_date = _mto_bytes([_mto_row()], control_date_text="01011900")
+        invalid_control_date_text = _mto_bytes(
+            [_mto_row()], control_date_text="2019-01-02"
+        )
+        bad_settlement_structure = _mto_bytes([_mto_row()]).replace(
+            b"Trade Date <02-JAN-2019>", b"Trade Date 02-JAN-2019", 1
+        )
+        wrong_trade_date = _mto_bytes([_mto_row()], trade_date_text="01-JAN-2019")
+        invalid_trade_date_text = _mto_bytes(
+            [_mto_row()], trade_date_text="2019-01-02"
+        )
+        invalid_settlement_date_text = _mto_bytes(
+            [_mto_row()], settlement_date_text="not-a-date"
+        )
+        bad_header = _mto_bytes([_mto_row()]).replace(
+            b"Record Type", b"RecordType", 1
+        )
+        bad_record_type = _mto_bytes([_mto_row(record_type="10")])
+        bad_serial = _mto_bytes(
+            [_mto_row(serial=1), _mto_row(serial=3, symbol="OTHERCO")]
+        )
+        duplicate_key = _mto_bytes(
+            [_mto_row(serial=1), _mto_row(serial=2)]
+        )
+        malformed_row_width = _mto_bytes([_mto_row()]).replace(
+            b"20,1,20MICRONS,EQ,10000,6789,67.89",
+            b"20,1,20MICRONS,EQ,10000,6789",
+            1,
+        )
+        deliverable_exceeds_traded = _mto_bytes(
+            [_mto_row(deliverable_quantity=99999, percent="100.00")]
+        )
+        percent_mismatch = _mto_bytes([_mto_row(percent="1.23")])
+        bad_record_count = _mto_bytes([_mto_row()], record_count=5)
+        bad_total_deliverable_quantity = _mto_bytes(
+            [_mto_row()], total_deliverable_quantity=1
+        )
+        no_data_rows = _csv(
+            (_MTO_TITLE_LINE,),
+            [
+                [
+                    _MTO_CONTROL_RECORD_TYPE,
+                    "MTO",
+                    f"{LEGACY_SESSION:%d%m%Y}",
+                    "0",
+                    "0",
+                ],
+                [
+                    f"Trade Date <{_legacy_date_text(LEGACY_SESSION)}>",
+                    "Settlement Type <N>",
+                    "Settlement No <2019002>",
+                    f"Settlement Date <{_legacy_date_text(LEGACY_SESSION)}>",
+                ],
+                list(_MTO_HEADER_RECORD),
+            ],
+        )
+
+        cases = {
+            "bad_title": bad_title,
+            "bad_control_record_type": bad_control_record_type,
+            "bad_control_literal": bad_control_literal,
+            "wrong_control_date": wrong_control_date,
+            "invalid_control_date_text": invalid_control_date_text,
+            "bad_settlement_structure": bad_settlement_structure,
+            "wrong_trade_date": wrong_trade_date,
+            "invalid_trade_date_text": invalid_trade_date_text,
+            "invalid_settlement_date_text": invalid_settlement_date_text,
+            "bad_header": bad_header,
+            "bad_record_type": bad_record_type,
+            "bad_serial": bad_serial,
+            "duplicate_key": duplicate_key,
+            "malformed_row_width": malformed_row_width,
+            "deliverable_exceeds_traded": deliverable_exceeds_traded,
+            "percent_mismatch": percent_mismatch,
+            "bad_record_count": bad_record_count,
+            "bad_total_deliverable_quantity": bad_total_deliverable_quantity,
+            "no_data_rows": no_data_rows,
+        }
+        for label, mto_payload in cases.items():
+            with self.subTest(label), self.assertRaises(
+                NseHistoricalArchiveIntegrityError
+            ):
+                parse_nse_historical_archive_bytes(
+                    _legacy_outer_zip_bytes(mto_payload=mto_payload),
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+
+    def test_eq_key_coverage_and_traded_quantity_disagreement_fail_closed(self) -> None:
+        missing_mto_key = _legacy_zip_bytes(
+            csv_bytes=_csv(
+                _LEGACY_FULL_BHAVCOPY_HEADER,
+                [
+                    _legacy_bhavcopy_row(),
+                    _legacy_bhavcopy_row(symbol="OTHERCO", isin="INE467B01029"),
+                ],
+            )
+        )
+        extra_mto_key = _mto_bytes(
+            [_mto_row(), _mto_row(serial=2, symbol="OTHERCO")]
+        )
+        traded_quantity_disagrees = _mto_bytes(
+            [_mto_row(traded_quantity=9999, deliverable_quantity=6789, percent="67.90")]
+        )
+
+        cases = {
+            "bhavcopy_has_extra_eq_key": (missing_mto_key, None),
+            "mto_has_extra_eq_key": (None, extra_mto_key),
+            "traded_quantity_disagreement": (None, traded_quantity_disagrees),
+        }
+        for label, (legacy_zip_payload, mto_payload) in cases.items():
+            with self.subTest(label), self.assertRaises(
+                NseHistoricalArchiveIntegrityError
+            ):
+                parse_nse_historical_archive_bytes(
+                    _legacy_outer_zip_bytes(
+                        legacy_zip_payload=legacy_zip_payload,
+                        mto_payload=mto_payload,
+                    ),
+                    original_filename=(
+                        f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                    ),
+                )
+
+    def test_decimal_results_are_invariant_under_hostile_global_context(self) -> None:
+        # Build the fixture under the normal ambient context first -- only
+        # the parse call itself runs under the hostile context, so a
+        # mis-isolated production computation (not a corrupted fixture) is
+        # what would make this test fail.
+        archive_payload = _legacy_outer_zip_bytes()
+        original_prec = decimal.getcontext().prec
+        original_traps = dict(decimal.getcontext().traps)
+        try:
+            decimal.getcontext().prec = 1
+            for trap in decimal.getcontext().traps:
+                decimal.getcontext().traps[trap] = False
+            parsed = parse_nse_historical_archive_bytes(
+                archive_payload,
+                original_filename=(
+                    f"Reports-Archives-Multiple-{LEGACY_SESSION:%d%m%Y}.zip"
+                ),
+            )
+        finally:
+            decimal.getcontext().prec = original_prec
+            for trap, value in original_traps.items():
+                decimal.getcontext().traps[trap] = value
+
+        record = parsed.normalized_payload["records"][0]
+        self.assertEqual(record["average_price"], Decimal("30.50"))
+        self.assertEqual(record["turnover_lacs"], Decimal("3.05"))
+        self.assertEqual(record["delivery_percent"], Decimal("67.89"))
 
 
 if __name__ == "__main__":

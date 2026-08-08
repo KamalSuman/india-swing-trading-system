@@ -75,6 +75,48 @@ def _write_two_file_zip(
     return destination
 
 
+_LEGACY_MONTH_ABBR = {
+    1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
+    7: "JUL", 8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC",
+}
+
+
+def _legacy_pair_names(*, day: int, month: int, year: int) -> tuple[str, str]:
+    legacy_zip_name = (
+        f"cm{day:02d}{_LEGACY_MONTH_ABBR[month]}{year:04d}bhav.csv.zip"
+    )
+    mto_name = f"MTO_{day:02d}{month:02d}{year:04d}.DAT"
+    return legacy_zip_name, mto_name
+
+
+def _write_legacy_pair_zip(
+    download_directory: Path,
+    *,
+    day: int,
+    month: int,
+    year: int,
+    include_zip: bool = True,
+    include_mto: bool = True,
+    extra_name: str | None = None,
+    extra_full_name: bool = False,
+) -> Path:
+    outer_name = f"Reports-Archives-Multiple-{day:02d}{month:02d}{year:04d}.zip"
+    legacy_zip_name, mto_name = _legacy_pair_names(day=day, month=month, year=year)
+    destination = download_directory / outer_name
+    with zipfile.ZipFile(destination, "w") as archive:
+        if include_zip:
+            archive.writestr(legacy_zip_name, b"legacy-bhavcopy-placeholder-bytes")
+        if include_mto:
+            archive.writestr(mto_name, b"mto-placeholder-bytes")
+        if extra_name is not None:
+            archive.writestr(extra_name, b"extra-placeholder-bytes")
+        if extra_full_name:
+            date_text = f"{day:02d}-{_MONTH_ABBR[month]}-{year:04d}"
+            full_name = f"sec_bhavdata_full_{day:02d}{month:02d}{year:04d}.csv"
+            archive.writestr(full_name, _full_bhavcopy_csv([date_text]))
+    return destination
+
+
 def _run_stage_script(
     *, year: int, download_directory: Path, data_root: Path
 ) -> subprocess.CompletedProcess[str]:
@@ -452,6 +494,92 @@ class StageNseHistoricalYearTests(unittest.TestCase):
         self.assertTrue(
             (staging_dir / "BhavCopy_NSE_CM_0_0_0_20220318_F_0000.csv.zip").is_file()
         )
+
+    def test_legacy_pair_stages_idempotently(self) -> None:
+        legacy_zip_name, mto_name = _legacy_pair_names(day=19, month=3, year=2022)
+        _write_legacy_pair_zip(self.downloads, day=19, month=3, year=2022)
+
+        first = _run_stage_script(
+            year=2022, download_directory=self.downloads, data_root=self.data_root
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        first_payload = _stage_result(first)
+        self.assertEqual(first_payload["validated_session_count"], 1)
+        self.assertEqual(first_payload["quarantined_wrapper_count"], 0)
+
+        session_dir = self.data_root / "source-archives" / "2022-03-19"
+        staging_dir = self.data_root / "staging" / "2022-03-19"
+        self.assertTrue(
+            (session_dir / "Reports-Archives-Multiple-19032022.zip").is_file()
+        )
+        self.assertTrue((staging_dir / legacy_zip_name).is_file())
+        self.assertTrue((staging_dir / mto_name).is_file())
+
+        second = _run_stage_script(
+            year=2022, download_directory=self.downloads, data_root=self.data_root
+        )
+        self.assertEqual(second.returncode, 0, second.stderr)
+        second_payload = _stage_result(second)
+        self.assertEqual(second_payload["validated_session_count"], 1)
+        self.assertEqual(second_payload["quarantined_wrapper_count"], 0)
+        self.assertEqual(second_payload["already_present_archive_count"], 1)
+
+    def test_legacy_pair_missing_mto_quarantines(self) -> None:
+        _write_legacy_pair_zip(
+            self.downloads, day=20, month=3, year=2022, include_mto=False
+        )
+        result = _run_stage_script(
+            year=2022, download_directory=self.downloads, data_root=self.data_root
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = _stage_result(result)
+        self.assertEqual(payload["quarantined_wrapper_count"], 1)
+        self.assertEqual(payload["validated_session_count"], 0)
+        self._assert_no_session_paths(2022, 3, 20)
+
+    def test_legacy_pair_missing_zip_quarantines(self) -> None:
+        _write_legacy_pair_zip(
+            self.downloads, day=21, month=3, year=2022, include_zip=False
+        )
+        result = _run_stage_script(
+            year=2022, download_directory=self.downloads, data_root=self.data_root
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = _stage_result(result)
+        self.assertEqual(payload["quarantined_wrapper_count"], 1)
+        self._assert_no_session_paths(2022, 3, 21)
+
+    def test_legacy_pair_extra_entry_quarantines(self) -> None:
+        _write_legacy_pair_zip(
+            self.downloads,
+            day=22,
+            month=3,
+            year=2022,
+            extra_name="unexpected-extra-file.txt",
+        )
+        result = _run_stage_script(
+            year=2022, download_directory=self.downloads, data_root=self.data_root
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = _stage_result(result)
+        self.assertEqual(payload["quarantined_wrapper_count"], 1)
+        self._assert_no_session_paths(2022, 3, 22)
+
+    def test_legacy_pair_mixed_with_modern_file_quarantines(self) -> None:
+        _write_legacy_pair_zip(
+            self.downloads,
+            day=23,
+            month=3,
+            year=2022,
+            extra_full_name=True,
+        )
+        result = _run_stage_script(
+            year=2022, download_directory=self.downloads, data_root=self.data_root
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = _stage_result(result)
+        self.assertEqual(payload["quarantined_wrapper_count"], 1)
+        self._assert_no_session_paths(2022, 3, 23)
 
 
 if __name__ == "__main__":

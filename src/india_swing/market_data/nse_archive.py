@@ -17,6 +17,13 @@ from india_swing.daily_reports.models import BundleEntryDisposition, DailyReport
 from india_swing.daily_reports.parser import (
     REG1_SURVEILLANCE_HEADER,
     NseDailyBundleParser,
+    _RAW_IDENTIFIER,
+    _SERIES,
+    _SYMBOL,
+    _date_from_digits,
+    _decimal,
+    _nse_text_date,
+    _unsigned_integer,
 )
 from india_swing.identity import content_id
 from india_swing.reference_data.models import ReferenceArtifactIntegrityError
@@ -37,7 +44,7 @@ NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2 = (
 NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION = (
     "nse-historical-archive-eq-index/v3"
 )
-NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION = "nse-archive-eq-importer/v3"
+NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION = "nse-archive-eq-importer/v4"
 NSE_HISTORICAL_ARCHIVE_PROVIDER = "NSE_ARCHIVE"
 MAXIMUM_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAXIMUM_ENTRY_BYTES = 64 * 1024 * 1024
@@ -206,6 +213,76 @@ def _expected_names(session: date) -> tuple[str, str, str, str]:
     )
 
 
+_LEGACY_MONTH_ABBREVIATIONS = (
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+)
+_LEGACY_FULL_BHAVCOPY_HEADER = (
+    # The official file has a trailing comma after ISIN, producing a
+    # canonical 14th, always-empty column on the header and every row.
+    "SYMBOL",
+    "SERIES",
+    "OPEN",
+    "HIGH",
+    "LOW",
+    "CLOSE",
+    "LAST",
+    "PREVCLOSE",
+    "TOTTRDQTY",
+    "TOTTRDVAL",
+    "TIMESTAMP",
+    "TOTALTRADES",
+    "ISIN",
+    "",
+)
+_MTO_TITLE_LINE = "Security Wise Delivery Position - Compulsory Rolling Settlement"
+_MTO_CONTROL_RECORD_TYPE = "10"
+_MTO_DATA_RECORD_TYPE = "20"
+_MTO_HEADER_RECORD = (
+    # The real file omits a "Series" label even though every type-20 data
+    # row carries series as its fourth field.
+    "Record Type",
+    "Sr No",
+    "Name of Security",
+    "Quantity Traded",
+    "Deliverable Quantity(gross across client level)",
+    "% of Deliverable Quantity to Traded Quantity",
+)
+_MTO_TRADE_DATE_FIELD = re.compile(r"Trade Date <(?P<value>[^>]+)>\Z")
+_MTO_SETTLEMENT_TYPE_FIELD = re.compile(r"Settlement Type <(?P<value>[A-Z0-9]{1,10})>\Z")
+_MTO_SETTLEMENT_NO_FIELD = re.compile(r"Settlement No <(?P<value>[0-9]+)>\Z")
+_MTO_SETTLEMENT_DATE_FIELD = re.compile(r"Settlement Date <(?P<value>[^>]+)>\Z")
+_ZERO_PADDED_INTEGER = re.compile(r"[0-9]+\Z")
+
+
+def _zero_padded_unsigned_integer(value: str, field_name: str) -> int:
+    # The real control record's total/count fields are zero-padded (e.g.
+    # "0001716"), which the strict daily_reports _unsigned_integer (no
+    # leading zeros) legitimately rejects.
+    if _ZERO_PADDED_INTEGER.fullmatch(value) is None:
+        raise NseHistoricalArchiveIntegrityError(
+            f"{field_name} is not an unsigned integer"
+        )
+    return int(value)
+
+
+def _legacy_bhavcopy_stem(session: date) -> str:
+    # Locale-independent: never depends on strftime's %b, which is bound to
+    # the process's C-library locale.
+    return (
+        f"cm{session.day:02d}"
+        f"{_LEGACY_MONTH_ABBREVIATIONS[session.month - 1]}"
+        f"{session.year:04d}bhav"
+    )
+
+
+def _expected_legacy_names(session: date) -> tuple[str, str]:
+    return (
+        f"{_legacy_bhavcopy_stem(session)}.csv.zip",
+        f"MTO_{session:%d%m%Y}.DAT",
+    )
+
+
 def _evidence_profile_for_names(
     names: object,
     *,
@@ -216,6 +293,7 @@ def _evidence_profile_for_names(
             "historical archive entry set is invalid"
         )
     expected = _expected_names(session)
+    legacy = _expected_legacy_names(session)
     actual = set(names)
     profiles = {
         frozenset(expected[:1]): EVIDENCE_PROFILE_UNRECONCILED,
@@ -224,13 +302,15 @@ def _evidence_profile_for_names(
             EVIDENCE_PROFILE_PRICE_UDIFF_SECURITY
         ),
         frozenset(expected): EVIDENCE_PROFILE_COMPLETE,
+        frozenset(legacy): EVIDENCE_PROFILE_UNRECONCILED,
     }
     profile = profiles.get(frozenset(actual))
     if profile is None or len(actual) != len(names):
         raise NseHistoricalArchiveIntegrityError(
             "historical archive entry set is not an accepted evidence profile"
         )
-    return profile, tuple(name for name in expected if name in actual)
+    selected = legacy if frozenset(actual) == frozenset(legacy) else expected
+    return profile, tuple(name for name in selected if name in actual)
 
 
 def _session_from_archive_name(original_filename: str) -> date:
@@ -582,6 +662,431 @@ def _unreconciled_eq_records(
     return records, identity_issues
 
 
+def _legacy_full_bhavcopy_csv(payload: bytes, *, session: date) -> bytes:
+    inner_name = f"{_legacy_bhavcopy_stem(session)}.csv"
+    validator = NseDailyBundleParser()
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            infos = archive.infolist()
+            if len(infos) != 1 or infos[0].is_dir() or infos[0].filename != inner_name:
+                raise NseHistoricalArchiveIntegrityError(
+                    "legacy Bhavcopy container must contain exactly its canonical CSV"
+                )
+            validator._validate_zip_entry_info(infos[0])
+            if infos[0].file_size > MAXIMUM_ENTRY_BYTES:
+                raise NseHistoricalArchiveIntegrityError(
+                    "legacy Bhavcopy inner CSV exceeds its size limit"
+                )
+            if archive.testzip() is not None:
+                raise NseHistoricalArchiveIntegrityError(
+                    "legacy Bhavcopy CRC verification failed"
+                )
+            inner_payload = archive.read(infos[0])
+    except NseHistoricalArchiveIntegrityError:
+        raise
+    except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile):
+        raise NseHistoricalArchiveIntegrityError(
+            "legacy Bhavcopy container is invalid"
+        ) from None
+    if not inner_payload:
+        raise NseHistoricalArchiveIntegrityError("legacy Bhavcopy inner CSV is empty")
+    return inner_payload
+
+
+def _parse_legacy_full_bhavcopy(
+    payload: bytes, *, session: date
+) -> tuple[dict[str, object], ...]:
+    try:
+        text = payload.decode("utf-8-sig", errors="strict")
+        rows = list(csv.reader(io.StringIO(text, newline=""), strict=True))
+    except (UnicodeDecodeError, csv.Error):
+        raise NseHistoricalArchiveIntegrityError(
+            "legacy Bhavcopy is not strict UTF-8 CSV"
+        ) from None
+    if not rows:
+        raise NseHistoricalArchiveIntegrityError("legacy Bhavcopy is empty")
+    if tuple(rows[0]) != _LEGACY_FULL_BHAVCOPY_HEADER:
+        raise NseHistoricalArchiveIntegrityError(
+            "legacy Bhavcopy header is not canonical"
+        )
+    header = _LEGACY_FULL_BHAVCOPY_HEADER
+    data_rows = rows[1:]
+    if not data_rows:
+        raise NseHistoricalArchiveIntegrityError("legacy Bhavcopy contains no data rows")
+
+    # Every row -- EQ or not -- is structurally validated: exact width and
+    # terminal empty field, canonical symbol/series, exact session
+    # TIMESTAMP, unique (symbol, series), valid ISIN shape, and numeric
+    # parseability of every price/value/quantity/trade-count field. Only
+    # the stricter business constraints (strictly positive prices, OHLC
+    # consistency, strictly positive traded quantity/trade count) are
+    # gated to the declared EQ lane, so a real excluded non-EQ business
+    # anomaly (observed officially: a "YT" row with LAST=0) stays excluded
+    # rather than rejecting the session, while a malformed or wrong-dated
+    # non-EQ row (e.g. TIMESTAMP 01-JAN-1900) still fails closed. Excluded
+    # rows are never normalized, retained, or joined.
+    seen_keys: set[tuple[str, str]] = set()
+    eq_rows: list[dict[str, object]] = []
+    try:
+        for row in data_rows:
+            if len(row) != len(header):
+                raise NseHistoricalArchiveIntegrityError(
+                    "legacy Bhavcopy row width is inconsistent"
+                )
+            if row[-1] != "":
+                raise NseHistoricalArchiveIntegrityError(
+                    "legacy Bhavcopy row has a non-empty terminal field"
+                )
+            values = _field_map(header, tuple(row))
+            row_date = _nse_text_date(values["TIMESTAMP"], "legacy Bhavcopy TIMESTAMP")
+            if row_date != session:
+                raise NseHistoricalArchiveIntegrityError(
+                    "legacy Bhavcopy row date disagrees with its session"
+                )
+            if _SYMBOL.fullmatch(values["SYMBOL"]) is None:
+                raise NseHistoricalArchiveIntegrityError("legacy Bhavcopy symbol is invalid")
+            if _SERIES.fullmatch(values["SERIES"]) is None:
+                raise NseHistoricalArchiveIntegrityError("legacy Bhavcopy series is invalid")
+            key = (values["SYMBOL"], values["SERIES"])
+            if key in seen_keys:
+                raise NseHistoricalArchiveIntegrityError(
+                    "legacy Bhavcopy contains a duplicate listing key"
+                )
+            seen_keys.add(key)
+            if _RAW_IDENTIFIER.fullmatch(values["ISIN"]) is None:
+                raise NseHistoricalArchiveIntegrityError("legacy Bhavcopy ISIN is invalid")
+            prices = {
+                field_name: _decimal(values[field_name], f"legacy Bhavcopy {field_name}")
+                for field_name in ("OPEN", "HIGH", "LOW", "CLOSE", "LAST", "PREVCLOSE")
+            }
+            traded_quantity = _unsigned_integer(
+                values["TOTTRDQTY"], "legacy Bhavcopy traded quantity"
+            )
+            total_traded_value = _decimal(
+                values["TOTTRDVAL"], "legacy Bhavcopy traded value"
+            )
+            total_trades = _unsigned_integer(
+                values["TOTALTRADES"], "legacy Bhavcopy trade count"
+            )
+
+            if values["SERIES"] != "EQ":
+                continue
+
+            if any(price <= 0 for price in prices.values()):
+                raise NseHistoricalArchiveIntegrityError(
+                    "legacy Bhavcopy prices must be positive"
+                )
+            if prices["HIGH"] < max(
+                prices["OPEN"], prices["LOW"], prices["LAST"], prices["CLOSE"]
+            ) or prices["LOW"] > min(
+                prices["OPEN"], prices["HIGH"], prices["LAST"], prices["CLOSE"]
+            ):
+                raise NseHistoricalArchiveIntegrityError(
+                    "legacy Bhavcopy OHLC values are inconsistent"
+                )
+            if traded_quantity < 1:
+                raise NseHistoricalArchiveIntegrityError(
+                    "legacy Bhavcopy traded quantity must be positive"
+                )
+            if total_trades < 1:
+                raise NseHistoricalArchiveIntegrityError(
+                    "legacy Bhavcopy trade count must be positive"
+                )
+            eq_rows.append(
+                {
+                    "symbol": values["SYMBOL"],
+                    "series": values["SERIES"],
+                    "open": prices["OPEN"],
+                    "high": prices["HIGH"],
+                    "low": prices["LOW"],
+                    "close": prices["CLOSE"],
+                    "last": prices["LAST"],
+                    "previous_close": prices["PREVCLOSE"],
+                    "traded_quantity": traded_quantity,
+                    "total_traded_value": total_traded_value,
+                    "total_trades": total_trades,
+                }
+            )
+    except DailyReportError:
+        raise NseHistoricalArchiveIntegrityError(
+            "legacy Bhavcopy row validation failed"
+        ) from None
+    if not eq_rows:
+        raise NseHistoricalArchiveIntegrityError("legacy Bhavcopy contains no EQ rows")
+    return tuple(eq_rows)
+
+
+def _parse_legacy_mto(payload: bytes, *, session: date) -> tuple[dict[str, object], ...]:
+    # Real grammar (confirmed against the authorized official sample):
+    #   line 0: a plain title line, one field, no CSV structure otherwise.
+    #   line 1: "10,MTO,DDMMYYYY,<total deliverable qty>,<record count>" --
+    #     the fourth field is the sum of every data row's DELIVERABLE
+    #     quantity, not traded quantity, despite the field's position
+    #     suggesting otherwise.
+    #   line 2: "Trade Date <dd-Mon-yyyy>,Settlement Type <..>,
+    #     Settlement No <..>,Settlement Date <dd-Mon-yyyy>".
+    #   line 3: a fixed 6-label header (no "Series" label, even though
+    #     every data row carries series as its fourth field).
+    #   line 4..EOF: exact 7-field type-20 rows. There is no trailing
+    #     control/trailer record.
+    try:
+        text = payload.decode("utf-8-sig", errors="strict")
+        rows = list(csv.reader(io.StringIO(text, newline=""), strict=True))
+    except (UnicodeDecodeError, csv.Error):
+        raise NseHistoricalArchiveIntegrityError("MTO is not strict UTF-8 CSV") from None
+    if len(rows) < 4:
+        raise NseHistoricalArchiveIntegrityError("MTO is missing its required structure")
+
+    title_row = rows[0]
+    if len(title_row) != 1 or title_row[0] != _MTO_TITLE_LINE:
+        raise NseHistoricalArchiveIntegrityError("MTO title line is not canonical")
+
+    control_row = rows[1]
+    if (
+        len(control_row) != 5
+        or control_row[0] != _MTO_CONTROL_RECORD_TYPE
+        or control_row[1] != "MTO"
+    ):
+        raise NseHistoricalArchiveIntegrityError("MTO control record is not canonical")
+    try:
+        control_date = _date_from_digits(
+            control_row[2], "%d%m%Y", "MTO control record date"
+        )
+    except DailyReportError:
+        raise NseHistoricalArchiveIntegrityError(
+            "MTO control record date is invalid"
+        ) from None
+    if control_date != session:
+        raise NseHistoricalArchiveIntegrityError(
+            "MTO control record date disagrees with its session"
+        )
+    total_deliverable_quantity = _zero_padded_unsigned_integer(
+        control_row[3], "MTO control total deliverable quantity"
+    )
+    record_count = _zero_padded_unsigned_integer(
+        control_row[4], "MTO control record count"
+    )
+
+    settlement_row = rows[2]
+    if len(settlement_row) != 4:
+        raise NseHistoricalArchiveIntegrityError("MTO settlement line is not canonical")
+    trade_date_match = _MTO_TRADE_DATE_FIELD.fullmatch(settlement_row[0])
+    settlement_type_match = _MTO_SETTLEMENT_TYPE_FIELD.fullmatch(settlement_row[1])
+    settlement_no_match = _MTO_SETTLEMENT_NO_FIELD.fullmatch(settlement_row[2])
+    settlement_date_match = _MTO_SETTLEMENT_DATE_FIELD.fullmatch(settlement_row[3])
+    if (
+        trade_date_match is None
+        or settlement_type_match is None
+        or settlement_no_match is None
+        or settlement_date_match is None
+    ):
+        raise NseHistoricalArchiveIntegrityError("MTO settlement line is not canonical")
+    try:
+        trade_date = _nse_text_date(trade_date_match.group("value"), "MTO trade date")
+        # Settlement date is a genuinely different date (T+n settlement);
+        # only well-formedness is required, never equality to the session.
+        _nse_text_date(settlement_date_match.group("value"), "MTO settlement date")
+    except DailyReportError:
+        raise NseHistoricalArchiveIntegrityError(
+            "MTO settlement line dates are invalid"
+        ) from None
+    if trade_date != session:
+        raise NseHistoricalArchiveIntegrityError(
+            "MTO trade date disagrees with its session"
+        )
+
+    if tuple(rows[3]) != _MTO_HEADER_RECORD:
+        raise NseHistoricalArchiveIntegrityError("MTO header record is not canonical")
+
+    data_rows = rows[4:]
+    if not data_rows:
+        raise NseHistoricalArchiveIntegrityError("MTO contains no data rows")
+
+    seen_keys: set[tuple[str, str]] = set()
+    parsed_rows: list[dict[str, object]] = []
+    total_deliverable_seen = 0
+    try:
+        for index, row in enumerate(data_rows, start=1):
+            if len(row) != 7:
+                raise NseHistoricalArchiveIntegrityError("MTO row width is inconsistent")
+            (
+                record_type,
+                serial_text,
+                symbol,
+                series,
+                traded_text,
+                deliverable_text,
+                percent_text,
+            ) = row
+            if record_type != _MTO_DATA_RECORD_TYPE:
+                raise NseHistoricalArchiveIntegrityError("MTO record type is not canonical")
+            serial = _unsigned_integer(serial_text, "MTO serial number", minimum=1)
+            if serial != index:
+                raise NseHistoricalArchiveIntegrityError(
+                    "MTO serial numbers are not sequential"
+                )
+            if _SYMBOL.fullmatch(symbol) is None:
+                raise NseHistoricalArchiveIntegrityError("MTO symbol is invalid")
+            if _SERIES.fullmatch(series) is None:
+                raise NseHistoricalArchiveIntegrityError("MTO series is invalid")
+            key = (symbol, series)
+            if key in seen_keys:
+                raise NseHistoricalArchiveIntegrityError(
+                    "MTO contains a duplicate listing key"
+                )
+            seen_keys.add(key)
+            traded_quantity = _unsigned_integer(
+                traded_text, "MTO traded quantity", minimum=1
+            )
+            deliverable_quantity = _unsigned_integer(
+                deliverable_text, "MTO deliverable quantity", minimum=0
+            )
+            percent = _decimal(
+                percent_text, "MTO delivery percent", maximum=Decimal("100")
+            )
+            if deliverable_quantity > traded_quantity:
+                raise NseHistoricalArchiveIntegrityError(
+                    "MTO deliverable quantity exceeds traded quantity"
+                )
+            with localcontext() as context:
+                context.prec = 50
+                expected_percent = (
+                    Decimal(100)
+                    * Decimal(deliverable_quantity)
+                    / Decimal(traded_quantity)
+                ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if percent != expected_percent:
+                raise NseHistoricalArchiveIntegrityError(
+                    "MTO delivery percent disagrees with its traded and "
+                    "deliverable quantities"
+                )
+            total_deliverable_seen += deliverable_quantity
+            parsed_rows.append(
+                {
+                    "symbol": symbol,
+                    "series": series,
+                    "traded_quantity": traded_quantity,
+                    "deliverable_quantity": deliverable_quantity,
+                    "percent": percent,
+                }
+            )
+    except DailyReportError:
+        raise NseHistoricalArchiveIntegrityError("MTO row validation failed") from None
+    if (
+        record_count != len(parsed_rows)
+        or total_deliverable_quantity != total_deliverable_seen
+    ):
+        raise NseHistoricalArchiveIntegrityError(
+            "MTO control accounting disagrees with its data rows"
+        )
+    return tuple(parsed_rows)
+
+
+def _legacy_unreconciled_eq_records(
+    legacy_zip_payload: bytes,
+    mto_payload: bytes,
+    *,
+    session: date,
+) -> tuple[tuple[dict[str, object], ...], tuple[dict[str, object], ...]]:
+    # _parse_legacy_full_bhavcopy already returns EQ-only rows (mirroring
+    # the modern format's _eq_only_csv precedent); _parse_legacy_mto
+    # returns every series, filtered to EQ below.
+    bhavcopy_rows = _parse_legacy_full_bhavcopy(
+        _legacy_full_bhavcopy_csv(legacy_zip_payload, session=session),
+        session=session,
+    )
+    mto_rows = _parse_legacy_mto(mto_payload, session=session)
+
+    bhavcopy_eq = {(row["symbol"], row["series"]): row for row in bhavcopy_rows}
+    mto_eq = {
+        (row["symbol"], row["series"]): row
+        for row in mto_rows
+        if row["series"] == "EQ"
+    }
+    if not bhavcopy_eq or not mto_eq:
+        raise NseHistoricalArchiveIntegrityError("legacy pair contains no EQ rows")
+    if set(bhavcopy_eq) != set(mto_eq):
+        raise NseHistoricalArchiveIntegrityError(
+            "EQ coverage differs between legacy Bhavcopy and MTO"
+        )
+
+    records: list[dict[str, object]] = []
+    identity_issues: list[dict[str, object]] = []
+    with localcontext() as context:
+        context.prec = 50
+        for key in sorted(bhavcopy_eq):
+            bhav = bhavcopy_eq[key]
+            mto = mto_eq[key]
+            if bhav["traded_quantity"] != mto["traded_quantity"]:
+                raise NseHistoricalArchiveIntegrityError(
+                    "EQ traded quantity disagrees between legacy Bhavcopy and MTO"
+                )
+            symbol, series = key
+            total_value = bhav["total_traded_value"]
+            volume = bhav["traded_quantity"]
+            average_price = (total_value / Decimal(volume)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            turnover_lacs = (total_value / Decimal(100_000)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            issue = {
+                "session": session,
+                "listing_key": f"NSE:{symbol}",
+                "series": series,
+                "udiff_financial_instrument_id": None,
+                "security_master_financial_instrument_id": None,
+                "security_master_source_identifier": None,
+                "udiff_source_identifier": None,
+                "status": IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE,
+            }
+            issue["issue_id"] = content_id(
+                {"schema": "nse-historical-archive-identity-issue/v1", **issue},
+                length=64,
+            )
+            identity_issues.append(issue)
+            record: dict[str, object] = {
+                "session": session,
+                "listing_key": f"NSE:{symbol}",
+                "symbol": symbol,
+                "series": series,
+                "financial_instrument_id": None,
+                "security_master_financial_instrument_id": None,
+                "security_source_record_id": None,
+                "security_master_source_identifier": None,
+                "udiff_source_identifier": None,
+                "identity_status": IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE,
+                "validated_isin": None,
+                "normal_market_status": None,
+                "normal_market_eligible": None,
+                "permitted_to_trade": None,
+                "delete_flag": None,
+                "previous_close": bhav["previous_close"],
+                "open": bhav["open"],
+                "high": bhav["high"],
+                "low": bhav["low"],
+                "last": bhav["last"],
+                "close": bhav["close"],
+                "average_price": average_price,
+                "volume": volume,
+                "turnover_lacs": turnover_lacs,
+                "trade_count": bhav["total_trades"],
+                "delivery_quantity": mto["deliverable_quantity"],
+                "delivery_percent": mto["percent"],
+                "surveillance_indicators": {},
+            }
+            record["record_id"] = content_id(
+                {"schema": "nse-historical-archive-eq-record/v1", **record},
+                length=64,
+            )
+            records.append(record)
+    if not records or len(records) > MAXIMUM_RECORDS:
+        raise NseHistoricalArchiveIntegrityError(
+            "historical archive EQ record count is outside limits"
+        )
+    return tuple(records), tuple(identity_issues)
+
+
 def parse_nse_historical_archive_entries(
     entries: Mapping[str, bytes],
     *,
@@ -603,6 +1108,49 @@ def parse_nse_historical_archive_entries(
         raise NseHistoricalArchiveIntegrityError(
             "historical archive entry mapping is not exact"
         )
+
+    legacy_names = _expected_legacy_names(session)
+    if present_names == legacy_names:
+        records, identity_issues = _legacy_unreconciled_eq_records(
+            entries[legacy_names[0]],
+            entries[legacy_names[1]],
+            session=session,
+        )
+        records = tuple(records)
+        identity_issues = tuple(identity_issues)
+        source_entry_sha256 = tuple(
+            (name, _sha256(entries[name])) for name in sorted(present_names)
+        )
+        normalized_payload: dict[str, object] = {
+            "schema_version": NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION,
+            "session": session,
+            "exchange": "NSE",
+            "series_scope": ("EQ",),
+            "evidence_profile": evidence_profile,
+            "missing_evidence": _EVIDENCE_PROFILE_MISSING[evidence_profile],
+            "source_mode": source_mode,
+            "source_container_sha256": source_container_sha256,
+            "source_entry_sha256": source_entry_sha256,
+            "security_master_source_schema_version": None,
+            "security_master_header_sha256": None,
+            "scope_exclusion_policy": "ALL_NON_EQ_ROWS_EXCLUDED",
+            "reg1_row_count": None,
+            "identity_issue_count": len(identity_issues),
+            "identity_issues": identity_issues,
+            "collection_only": True,
+            "actionable": False,
+            "training_eligible": False,
+            "knowledge_time_status": "MANUAL_HISTORICAL_IMPORT_UNVERIFIED",
+            "records": records,
+        }
+        return ParsedNseHistoricalArchiveSession(
+            session=session,
+            source_mode=source_mode,
+            source_container_sha256=source_container_sha256,
+            source_entry_sha256=source_entry_sha256,
+            normalized_payload=normalized_payload,
+        )
+
     parser = NseDailyBundleParser()
     try:
         full = parser._parse_full_delivery(

@@ -119,6 +119,35 @@ collection-only, non-actionable, and training-ineligible, and it is
 permanently ineligible for promotion until a separately reviewed, independent
 same-session evidence process exists to reconcile it.
 
+The `PRICE_DELIVERY_UNRECONCILED` lane accepts a second, equally weak
+source-name shape for the pre-July-2020 official archive: the exact pair
+`cmDDMMMYYYYbhav.csv.zip` (a nested ZIP containing exactly one
+`cmDDMMMYYYYbhav.csv`) plus `MTO_DDMMYYYY.DAT`, never a mixture with any
+modern name. The legacy Bhavcopy carries OHLC, traded quantity, traded value,
+trade count, and an uncorroborated ISIN but no delivery figures; the MTO file
+is NSE's separate legacy delivery-position report, and its own title,
+session-date, header, and record-count/quantity control-total structure are
+validated exactly. `average_price` and `turnover_lacs` are derived
+deterministically from the legacy Bhavcopy's traded value and quantity under
+an explicit local `Decimal` context, never the caller's ambient one, using the
+same `ROUND_HALF_UP` two-decimal policy as every other profile. Delivery
+quantity and percentage come from the MTO file, joined to the Bhavcopy by an
+exact one-to-one `(symbol, series)` key match and exact traded-quantity
+agreement over the declared `EQ` rows only; any missing, extra, or
+quantity-disagreeing key rejects the whole session rather than dropping or
+coercing a row. Every field this profile cannot corroborate -- including the
+Bhavcopy's own ISIN -- is recorded exactly as unresolved, the same as the
+single-file shape; a real, verifiable NSE holiday wrapper genuinely predating
+July 2020 exists and must resolve to `PRICE_DELIVERY_UNRECONCILED` the same
+way, never as a fabricated or coerced modern-format session. Like every other
+profile it remains collection-only, non-actionable, training-ineligible, and
+permanently ineligible for promotion until a separately reviewed, independent
+same-session evidence process exists to reconcile it. Locally downloaded
+Bhavcopy/MTO pairs sitting in a Downloads folder are not canonical evidence by
+virtue of matching this naming convention; they become part of the record
+only once staged, imported, and their range successfully replayed through
+`verify-range`.
+
 The immutable range index reports both `identity_issue_count` and
 `identity_quarantined_session_count`. These counts are operational alarms, not
 permission to repair history from a later session. A later NSE file may explain

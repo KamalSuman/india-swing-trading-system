@@ -67,6 +67,10 @@ is quarantined):
 - Two files: adds `BhavCopy_NSE_CM_0_0_0_YYYYMMDD_F_0000.csv.zip`.
 - Three files: adds `NSE_CM_security_DDMMYYYY.csv.gz`.
 - Four files: adds `REG1_INDDDMMYY.csv`.
+- Legacy pair: exactly `cmDDMMMYYYYbhav.csv.zip` (month abbreviation
+  generated from a fixed locale-independent table, e.g. `cm02JAN2019bhav.csv.zip`)
+  plus `MTO_DDMMYYYY.DAT` — the pre-July-2020 official archive shape. Never
+  a mixture with any other profile's names.
 
 **One-file profile content guard.** A one-entry archive is staged only if
 its CSV is read and validated in memory, before any `source-archives` or
@@ -79,8 +83,11 @@ Any failure — mixed dates, a wrapper reporting the *preceding* session
 (the real NSE holiday-wrapper pattern), missing/duplicate `DATE1` headers,
 malformed rows or quoting, invalid date text, or empty data — routes the
 whole archive to quarantine; it never partially populates
-`source-archives` or `staging`. The two/three/four-file profiles are
-unchanged and are not content-validated by this script.
+`source-archives` or `staging`. The two/three/four-file profiles and the
+legacy pair are unchanged and are not content-validated by this script —
+their content-level validation (nested-ZIP integrity, Bhavcopy/MTO strict
+parsing, and the exact EQ key/quantity join) is the canonical Python
+importer's job, not the stager's.
 
 **Raw downloads are never deleted or modified.** The script only copies
 and extracts; `downloads_retained` in its JSON output is always `true`.

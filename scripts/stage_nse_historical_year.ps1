@@ -213,6 +213,11 @@ function Test-CanonicalFullBhavcopySession {
     return $true
 }
 
+$LegacyMonthAbbreviations = @(
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"
+)
+
 $downloads = [IO.Path]::GetFullPath($DownloadDirectory)
 $data = [IO.Path]::GetFullPath($DataRoot)
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $data "source-archives"))
@@ -264,7 +269,13 @@ foreach ($archive in $archives) {
     $udiffName = "BhavCopy_NSE_CM_0_0_0_${yearText}${month}${day}_F_0000.csv.zip"
     $reg1Name = "REG1_IND${day}${month}${shortYear}.csv"
     $securityName = "NSE_CM_security_${day}${month}${yearText}.csv.gz"
+    # Locale-independent: never depends on ToString("MMM"), which is bound
+    # to the current culture.
+    $legacyMonthAbbreviation = $LegacyMonthAbbreviations[$sessionDate.Month - 1]
+    $legacyZipName = "cm${day}${legacyMonthAbbreviation}${yearText}bhav.csv.zip"
+    $mtoName = "MTO_${day}${month}${yearText}.DAT"
     $oneFileSignature = (@($fullName) | Sort-Object) -join "|"
+    $legacyPairSignature = (@($legacyZipName, $mtoName) | Sort-Object) -join "|"
 
     $zip = [IO.Compression.ZipFile]::OpenRead($archive.FullName)
     try {
@@ -279,6 +290,7 @@ foreach ($archive in $archives) {
             (@($fullName, $udiffName) | Sort-Object) -join "|"
             (@($fullName, $udiffName, $securityName) | Sort-Object) -join "|"
             (@($fullName, $udiffName, $reg1Name, $securityName) | Sort-Object) -join "|"
+            $legacyPairSignature
         )
 
         $isUnsupported = ($accepted -notcontains $signature)

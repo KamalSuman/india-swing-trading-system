@@ -21,6 +21,7 @@ from .nse_archive import (
     NSE_HISTORICAL_ARCHIVE_PROVIDER,
     NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION,
     NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1,
+    _expected_legacy_names,
 )
 from .codec import decode_market_payload
 from .snapshot_store import StoredMarketSnapshot
@@ -224,31 +225,35 @@ def _verify_source_entries(
         f"REG1_IND{session:%d%m%y}.csv",
         f"NSE_CM_security_{session:%d%m%Y}.csv.gz",
     )
-    names_by_profile = {
-        EVIDENCE_PROFILE_UNRECONCILED: expected[:1],
-        EVIDENCE_PROFILE_PRICE_UDIFF: expected[:2],
+    legacy = _expected_legacy_names(session)
+    # EVIDENCE_PROFILE_UNRECONCILED accepts exactly one of two canonical
+    # source-name shapes -- the single modern file, or the legacy
+    # Bhavcopy/MTO pair -- never a mixture of the two.
+    accepted_shapes_by_profile = {
+        EVIDENCE_PROFILE_UNRECONCILED: (expected[:1], legacy),
+        EVIDENCE_PROFILE_PRICE_UDIFF: (expected[:2],),
         EVIDENCE_PROFILE_PRICE_UDIFF_SECURITY: (
-            expected[0],
-            expected[1],
-            expected[3],
+            (expected[0], expected[1], expected[3]),
         ),
-        EVIDENCE_PROFILE_COMPLETE: expected,
+        EVIDENCE_PROFILE_COMPLETE: (expected,),
     }
     if type(value) is not tuple:
         _fail("archive range source entries are invalid")
     pairs = value
     if any(
-        type(pair) is not tuple
-        or len(pair) != 2
-        or type(pair[0]) is not str
-        or pair[0] not in names_by_profile[evidence_profile]
+        type(pair) is not tuple or len(pair) != 2 or type(pair[0]) is not str
         for pair in pairs
     ):
         _fail("archive range source entries are invalid")
+    shapes = accepted_shapes_by_profile[evidence_profile]
+    names = {pair[0] for pair in pairs}
+    matching_shape = next(
+        (shape for shape in shapes if names == set(shape)), None
+    )
     if (
-        len(pairs) != len(names_by_profile[evidence_profile])
+        matching_shape is None
+        or len(pairs) != len(matching_shape)
         or pairs != tuple(sorted(pairs))
-        or {pair[0] for pair in pairs} != set(names_by_profile[evidence_profile])
     ):
         _fail("archive range source entries are invalid")
     for _, digest in pairs:
