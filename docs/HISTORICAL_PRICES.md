@@ -82,6 +82,32 @@ pinned corroboration/admission decision promotes it. Sessions stored under
 the earlier `v1`/`v2` schemas, and non-legacy `v3` sessions, carry no such
 claims and never have one inferred or fabricated on replay.
 
+### Research-only identity admission
+
+`india_swing.evaluation.nse_archive_research_identity` is that separately
+pinned admission decision. It streams one already-replayed research session
+at a time and grades each EQ record into a deterministic, research-only
+ISIN-based join key ("research identity") -- never a production
+`financial_instrument_id` and never an authorization. Admission uses only
+two positive bases: a modern same-session validated match, or one retained
+legacy source-claimed ISIN; a record with neither is `BLOCKED_UNRESOLVED`,
+and a record carrying both is an impossible shape that rejects its entire
+session rather than guessing.
+
+Two distinct listing lanes admissibly claiming the same ISIN in one session
+are both `BLOCKED_SAME_SESSION_ISIN_COLLISION` -- no winner is ever
+selected by order, liquidity, or symbol. Across sessions, the layer emits
+past-only `LISTING_KEY_REBOUND` and `IDENTITY_SYMBOL_CHANGED` transitions
+from bounded latest-observation state (keyed by listing key and by research
+identity, never the whole corpus); a rebound never blocks the new identity
+and never rewrites an earlier decision -- the identity key itself, not a
+lookup-time check, is what prevents price continuity across a rebound.
+
+`research_identity_admission_complete` grades only this admission step. It
+never implies production identity resolution, corporate-action adjustment,
+or any training/feature/label/alert/paper/execution authority -- those
+remain separate, not-yet-built stages.
+
 ## Cross-session promoted history panel
 
 `india_swing.historical_prices.promoted_history` assembles multiple verified
