@@ -72,6 +72,25 @@ def _sorted_counts(counts: Mapping[str, int]) -> tuple[tuple[str, int], ...]:
     return tuple(sorted(counts.items()))
 
 
+def _range_gap_is_weekend_only(previous_end: date, next_start: date) -> bool:
+    """Return true when the open interval contains only Saturday/Sunday.
+
+    Archive indexes bind their first and last accepted market sessions, not
+    arbitrary calendar-year endpoints.  A Friday-ending index followed by a
+    Monday-starting index is therefore continuous in trading-session time even
+    though the declared date envelopes are not calendar-adjacent.  Weekday
+    gaps remain rejected until an exact exchange-calendar artifact can attest
+    that they were non-trading sessions.
+    """
+
+    current = previous_end + timedelta(days=1)
+    while current < next_start:
+        if current.weekday() < 5:
+            return False
+        current += timedelta(days=1)
+    return True
+
+
 class ResearchArchiveExclusionReason(Enum):
     SOURCE_ACCOUNTING_FAILED = "SOURCE_ACCOUNTING_FAILED"
     SOURCE_CROSS_SOURCE_JOIN_FAILED = "SOURCE_CROSS_SOURCE_JOIN_FAILED"
@@ -584,8 +603,10 @@ class NseArchiveResearchDataset:
             if previous is not None:
                 if binding.range_start <= previous.range_end:
                     _fail("research dataset range bindings overlap or reorder")
-                if binding.range_start != previous.range_end + timedelta(days=1):
-                    _fail("research dataset range bindings are not calendar-adjacent")
+                if not _range_gap_is_weekend_only(
+                    previous.range_end, binding.range_start
+                ):
+                    _fail("research dataset range binding gap contains a weekday")
             combined_sessions.extend(binding.accepted_sessions)
             combined_session_snapshot_ids.extend(binding.session_snapshot_ids)
             previous = binding
@@ -826,8 +847,10 @@ def build_nse_archive_research_dataset(
         if previous is not None:
             if binding.range_start <= previous.range_end:
                 _fail("research dataset range bindings overlap or reorder")
-            if binding.range_start != previous.range_end + timedelta(days=1):
-                _fail("research dataset range bindings are not calendar-adjacent")
+            if not _range_gap_is_weekend_only(
+                previous.range_end, binding.range_start
+            ):
+                _fail("research dataset range binding gap contains a weekday")
         accepted_sessions.extend(binding.accepted_sessions)
         session_snapshot_ids.extend(binding.session_snapshot_ids)
         previous = binding

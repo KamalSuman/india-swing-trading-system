@@ -22,6 +22,7 @@ from india_swing.evaluation.nse_archive_research_dataset import (
     ResearchArchiveExclusionReason,
     ResearchArchiveSplitPolicy,
     ResearchSplitRole,
+    _range_gap_is_weekend_only,
     build_nse_archive_research_dataset,
 )
 from india_swing.market_data.nse_archive import (
@@ -1045,6 +1046,20 @@ class NseArchiveResearchRangeBindingTests(unittest.TestCase):
 
 
 class NseArchiveResearchDatasetRangeAssemblyTests(unittest.TestCase):
+    def test_range_boundary_allows_weekends_but_rejects_weekdays(self) -> None:
+        self.assertTrue(
+            _range_gap_is_weekend_only(date(2021, 12, 31), date(2022, 1, 3))
+        )
+        self.assertTrue(
+            _range_gap_is_weekend_only(date(2022, 12, 30), date(2023, 1, 2))
+        )
+        self.assertTrue(
+            _range_gap_is_weekend_only(date(2023, 12, 29), date(2024, 1, 1))
+        )
+        self.assertFalse(
+            _range_gap_is_weekend_only(date(2024, 1, 3), date(2024, 1, 5))
+        )
+
     def test_reject_reordering_overlap_and_gap_between_range_bindings(self) -> None:
         first = _binding(
             (date(2024, 1, 1),), range_start=date(2024, 1, 1), range_end=date(2024, 1, 3)
@@ -1057,7 +1072,7 @@ class NseArchiveResearchDatasetRangeAssemblyTests(unittest.TestCase):
                 range_end=date(2024, 1, 6),
             )
             with self.assertRaisesRegex(
-                NseArchiveResearchDatasetError, "not calendar-adjacent"
+                NseArchiveResearchDatasetError, "gap contains a weekday"
             ):
                 _dataset_from_bindings((first, second))
 
