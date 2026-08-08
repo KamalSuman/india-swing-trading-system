@@ -75,6 +75,13 @@ from .historical_corpus_adapter import (
     HistoricalCorpusAdapterError,
     point_in_time_price_sessions_from_historical_corpus,
 )
+from .nse_archive_research_replay import (
+    REPLAY_SESSION_SCHEMA_VERSION,
+    NseArchiveResearchReplayError,
+    NseArchiveResearchReplayRecord,
+    NseArchiveResearchReplaySession,
+    iter_verified_nse_archive_research_sessions,
+)
 from .lifecycle import (
     HOLDOUT_ACCESS_EVENT_TYPES,
     HOLDOUT_EVENT_TYPES,
@@ -230,6 +237,11 @@ __all__ = [
     "LocalTrialEvaluationComparisonStore",
     "MINIMUM_SWING_LABEL_HORIZON_SESSIONS",
     "MomentumBaselineConfig",
+    "REPLAY_SESSION_SCHEMA_VERSION",
+    "NseArchiveResearchReplayError",
+    "NseArchiveResearchReplayRecord",
+    "NseArchiveResearchReplaySession",
+    "iter_verified_nse_archive_research_sessions",
     "EvaluationPlanError",
     "EvaluationPlanIntegrityError",
     "PurgedWalkForwardPlan",

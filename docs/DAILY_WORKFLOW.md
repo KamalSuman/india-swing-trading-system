@@ -294,6 +294,29 @@ record. Neither command changes the research-only boundary above: sealing
 the manifest is still not model training, feature/label/alert generation, or
 any action on the promoted engine.
 
+`src/india_swing/evaluation/nse_archive_research_replay.py` adds the typed
+replay boundary immediately above one already-sealed
+`NseArchiveResearchDataset`:
+`iter_verified_nse_archive_research_sessions(dataset, reader)` replays only
+the dataset's explicitly pinned range and session snapshot IDs -- in their
+exact stored order, one `load_verified_nse_historical_archive_range` call
+per exact range index ID, never a list/latest/discovery lookup -- into an
+iterator of immutable `NseArchiveResearchReplaySession` values, each holding
+its ordered `NseArchiveResearchReplayRecord` projection with lossless
+Decimal/int/None fields (unresolved identity, missing security-master
+evidence, and incomplete-evidence sessions are retained, never filtered).
+Only the one archive range currently being replayed is ever held in memory:
+the iterator never accumulates multiple ranges, so consuming it partially or
+stopping early never triggers a later range's load and never itself
+constitutes a completed or publishable research artifact -- normal iterator
+exhaustion after the dataset's final session is the only completion signal
+this module provides. Every replayed session and record keeps the dataset's
+exact safety posture (`collection_only=True`; `actionable`,
+`training_eligible`, `feature_eligible`, `label_eligible`, `alert_eligible`,
+and `execution_eligible` all `False`): this is a typed replay boundary for
+later research feature materialization, not an authority upgrade, and it
+still does not connect to the promoted engine.
+
 ## Deliberate boundary
 
 This workflow closes the automated **EOD paper-outcome leg**. It does not yet
