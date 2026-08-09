@@ -27,6 +27,17 @@ from .canonical_response import (
     encode_observation,
     replay_verify,
 )
+from .observation_store import (
+    QUALITY_OBSERVATION_CONTENT_TYPE,
+    QUALITY_OBSERVATION_STORE_POLICY_VERSION,
+    LoadedQualityPilotObservation,
+    PinnedQualityPilotObservationRequest,
+    PublishedQualityPilotObservation,
+    QualityPilotObservationStoreError,
+    canonical_observation_object_name,
+    publish_quality_pilot_observation,
+    read_pinned_quality_pilot_observation,
+)
 
 __all__ = [
     "CANONICAL_RESPONSE_SCHEMA_VERSION",
@@ -49,4 +60,13 @@ __all__ = [
     "decode_observation",
     "encode_observation",
     "replay_verify",
+    "QUALITY_OBSERVATION_CONTENT_TYPE",
+    "QUALITY_OBSERVATION_STORE_POLICY_VERSION",
+    "LoadedQualityPilotObservation",
+    "PinnedQualityPilotObservationRequest",
+    "PublishedQualityPilotObservation",
+    "QualityPilotObservationStoreError",
+    "canonical_observation_object_name",
+    "publish_quality_pilot_observation",
+    "read_pinned_quality_pilot_observation",
 ]
