@@ -12,6 +12,7 @@ from india_swing.market_data.models import InstrumentBatch
 from .canonical_response import (
     MAXIMUM_CATALOG_INSTRUMENTS,
     PILOT_PROTOCOL_SHA256,
+    ObservationWindowSpec,
     ResponseClassification,
     ScheduledWindowKind,
 )
@@ -169,16 +170,27 @@ def _route_key(spec: QualityPilotCaptureSpec) -> tuple[date, int, int]:
     )
 
 
-def _window_is_inside_authorized_schedule(spec: QualityPilotCaptureSpec) -> bool:
+def is_window_inside_authorized_schedule(window: object) -> bool:
+    """Public, stateless, fail-closed schedule gate for one caller-pinned
+    ``ObservationWindowSpec``. Returns ``False`` (never raises) for any
+    wrong-typed or malformed window; never invents, widens, or reads a
+    calendar/clock of its own -- it only compares the window's own already
+    caller-pinned opens_at/closes_at against the accepted IST times for its
+    own window_kind. This is the sole authority for the accepted schedule
+    gate; the exact accepted times are unchanged from the original private
+    rule this function replaces."""
+
+    if type(window) is not ObservationWindowSpec:
+        return False
     valid = False
     try:
-        opens_at = spec.window.opens_at.astimezone(INDIA_STANDARD_TIME)
-        closes_at = spec.window.closes_at.astimezone(INDIA_STANDARD_TIME)
+        opens_at = window.opens_at.astimezone(INDIA_STANDARD_TIME)
+        closes_at = window.closes_at.astimezone(INDIA_STANDARD_TIME)
         opens = opens_at.time().replace(tzinfo=None)
         closes = closes_at.time().replace(tzinfo=None)
         if not opens < closes:
             return False
-        kind = spec.window.window_kind
+        kind = window.window_kind
         if kind is ScheduledWindowKind.CATALOG_PREOPEN:
             valid = time(8, 45) <= opens and closes <= time(9, 0)
         elif kind is ScheduledWindowKind.QUOTE_0920:
@@ -190,6 +202,10 @@ def _window_is_inside_authorized_schedule(spec: QualityPilotCaptureSpec) -> bool
     except Exception:
         valid = False
     return valid
+
+
+def _window_is_inside_authorized_schedule(spec: QualityPilotCaptureSpec) -> bool:
+    return is_window_inside_authorized_schedule(spec.window)
 
 
 def _group_specs(

@@ -268,6 +268,30 @@ class CampaignPlanTests(unittest.TestCase):
         with self.assertRaises(QualityPilotCampaignLedgerError):
             QualityPilotCampaignPlan(plan.campaign, specs)
 
+    def test_public_schedule_validator_accepts_and_rejects_the_same_gates(self) -> None:
+        from india_swing.quality_pilot.campaign_ledger import is_window_inside_authorized_schedule
+
+        plan = _plan()
+        good_window = plan.capture_specs[0].window
+        self.assertTrue(is_window_inside_authorized_schedule(good_window))
+
+        bad_window = ObservationWindowSpec(
+            pilot_run_id=PILOT_RUN_ID,
+            market_session=good_window.market_session,
+            window_kind=ScheduledWindowKind.CATALOG_PREOPEN,
+            endpoint_family=EndpointFamily.CATALOG,
+            opens_at=_at(good_window.market_session, 0, 1),
+            closes_at=_at(good_window.market_session, 0, 2),
+            protocol_sha256=PILOT_PROTOCOL_SHA256,
+        )
+        self.assertFalse(is_window_inside_authorized_schedule(bad_window))
+
+    def test_public_schedule_validator_fails_closed_on_wrong_type(self) -> None:
+        from india_swing.quality_pilot.campaign_ledger import is_window_inside_authorized_schedule
+
+        self.assertFalse(is_window_inside_authorized_schedule(None))
+        self.assertFalse(is_window_inside_authorized_schedule("not-a-window"))
+
     def test_rejects_cross_route_universe_or_provider_token_mismatch(self) -> None:
         plan = _plan()
         close_index = 2
