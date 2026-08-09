@@ -61,3 +61,83 @@ broker statement or realized account result.
 
 There is no broker client, credential access, notification sender, GCP writer,
 order method, or authority flag in this package.
+
+## Upstream: raw current-cross-section history window
+
+Before any paper trade can be registered, a prospective decision needs its
+current-universe subjects' raw price history assembled under an explicit
+cutoff. `src/india_swing/forward_paper/history.py` is that bridge. It is
+collection-only and several stages upstream of a `ShadowAlert`: it computes
+no return, feature, label, rank, signal, or confidence, and grants no
+training/feature/label/ranking/alert/paper-trade/notification/execution
+authority.
+
+A `ForwardPaperHistoryWindowSpec` pins one `dataset_id`, one `signal_session`
+(the prospective decision's current-universe date), one canonical UTC
+`decision_cutoff`, and one ordered tuple of exactly 60 unique,
+strictly-increasing `expected_market_sessions` ending on `signal_session`.
+Current-universe membership is defined solely by `signal_session` — the
+spec never treats appearing in the earlier 59 sessions as proof of current
+membership, and never treats current membership as proof of historical
+availability.
+
+`build_forward_paper_raw_history_window` consumes one caller-supplied
+iterator of already-verified
+`NseArchiveResearchPriceStreamSession` values (obtained from the accepted
+`iter_nse_archive_research_price_stream_sessions` seam) exactly once. It may
+skip sessions strictly before the first expected date, but from the first
+expected date onward every session must agree exactly, one-for-one, with the
+next pinned date and must have been observed no later than
+`decision_cutoff` — a missing, duplicate, reordered, substituted, or
+future-observed session fails closed immediately. Consumption stops the
+instant the exact signal session is consumed; no later session is ever
+pulled.
+
+Every observation on the signal session — in its stored order, none dropped
+— becomes exactly one outcome in the resulting `ForwardPaperRawHistoryWindow`:
+
+- A `ForwardPaperHistoryCandidate` requires a resolved `research_identity_id`
+  on the signal-session row and exactly one observation carrying that same
+  identity in every one of the 60 expected sessions, retained in
+  expected-session order by reference (prices, delivery, surveillance,
+  identity, and transitions are never copied or recalculated). A symbol
+  change for the same research identity is followed; a listing-key rebound
+  to a *different* research identity is never joined, because matching is by
+  research identity, never by listing key or symbol.
+- A `ForwardPaperHistoryVeto` explains, with a fixed enum reason and exact
+  lineage IDs, why a signal-session subject could not become a candidate:
+  `SIGNAL_IDENTITY_UNRESOLVED` (the signal row itself is unresolved or a
+  same-session ISIN collision), `REQUIRED_SESSION_MISSING` (the identity is
+  absent from at least one of the 60 required sessions), or
+  `REQUIRED_SESSION_DUPLICATED` (the identity appears more than once in one
+  required session — checked before `REQUIRED_SESSION_MISSING`, so a subject
+  with both problems is always reported as duplicated). No current subject
+  ever silently disappears from the cross-section. Each veto also carries
+  canonical, fixed-shape evidence IDs auditing its reason — never free text:
+  the exact retained `price_stream_session_id` of every affected required
+  session, plus (for `REQUIRED_SESSION_DUPLICATED` only) every duplicate
+  `observation_id`, in deterministic expected-session/stored-observation
+  order. The window independently re-derives the complete expected evidence
+  by scanning all 60 retained sessions itself and requires exact tuple
+  equality with what the veto carries, so a veto can never carry a real but
+  unrelated session or observation ID, and can never pass by naming only a
+  valid subset of a multi-session anomaly.
+
+`ForwardPaperRawHistoryWindow` retains, by reference, the exact ordered
+tuple of all 60 consumed `NseArchiveResearchPriceStreamSession` values — one
+per pinned expected date, in that order, with the signal session always the
+final entry. Every retained session is independently re-verified against
+the spec's dataset and cutoff, and every candidate observation is
+cross-checked against the exact observation actually present in its
+claimed retained session — never merely another self-consistent object with
+a matching date and identity. The window exposes exact aggregate counts
+(`expected_session_count=60`, `consumed_session_count=60`,
+`signal_subject_count`, `complete_candidate_count`, `veto_count`) and binds
+all 60 session IDs, every candidate/veto ID, and dataset/spec lineage into
+its own content identity, alongside the same fixed `collection_only=True` /
+all-else-`False` posture reported by every type in this module.
+
+Raw history assembled here is still `RAW_UNADJUSTED` and per-record
+non-actionable. The next required stage, not implemented here, is
+cutoff-aware corporate-action and tick-size adjustment before any
+deterministic feature may be computed from this window.
