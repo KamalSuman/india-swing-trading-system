@@ -1,6 +1,6 @@
 """Production-shaped, quality-only HYP-002 window-job process entrypoint.
 
-Two commands:
+Three commands:
 
 - ``prepare-genesis`` reads one exact absolute local runbook JSON file and
   publishes only the campaign's first confirmed session's catalog action
@@ -12,6 +12,14 @@ Two commands:
   environment values with ``maximum_attempts == 1``, a
   ``KiteQualityPilotCollector``, and invokes
   ``QualityPilotWindowService.run`` exactly once.
+- ``run-due-window`` is the scheduler-safe entrypoint every fixed lane
+  invokes identically: it reads one exact mounted runbook and arming
+  manifest, checks the ``INDIA_SWING_QUALITY_PILOT_ARMED`` kill switch
+  before any credential or GCP capability, reads the injected clock exactly
+  once to select the due window, and delegates a genuinely DUE window to
+  the same ``run-window`` composition exactly once. Every other posture
+  (disarmed, not scheduled, already complete, pilot complete, or a missed
+  window) returns before a Kite credential is ever loaded.
 
 This module never reproduces any capture/completeness/lineage logic
 already owned by ``quality_pilot/*.py`` -- it is only the missing process
@@ -36,6 +44,16 @@ from india_swing.market_data.config import KiteCredentials
 from india_swing.market_data.kite import KiteMarketDataAdapter
 from india_swing.market_data.provider import RetryPolicy
 
+from india_swing.quality_pilot.arming import (
+    MAXIMUM_MANIFEST_BYTES,
+    QualityPilotOrderedCompletionProof,
+    QualityPilotWindowCompletionEvidence,
+    QualityPilotWindowCompletionProbeResult,
+    QualityPilotWindowPosture,
+    assess_quality_pilot_window_posture,
+    decode_quality_pilot_arming_manifest,
+    quality_pilot_window_completion_probe_targets,
+)
 from india_swing.quality_pilot.canonical_response import ScheduledWindowKind
 from india_swing.quality_pilot.invocation_control_plane import (
     GoogleCloudStorageQualityPilotClaimWriter,
@@ -45,6 +63,8 @@ from india_swing.quality_pilot.invocation_control_plane import (
     QualityPilotActionKind,
     QualityPilotWindowEntry,
     decode_quality_pilot_invocation_runbook,
+    load_current_quality_pilot_window_entry,
+    load_optional_quality_pilot_completion_receipt,
     pinned_quality_pilot_action_binding_request,
     publish_quality_pilot_action_binding,
     publish_quality_pilot_window_entry,
@@ -65,6 +85,8 @@ _ERR_JOB = "quality pilot window job call is invalid"
 
 _ENV_CODE_SHA256 = "INDIA_SWING_QUALITY_PILOT_CODE_SHA256"
 _ENV_ENVIRONMENT_SHA256 = "INDIA_SWING_QUALITY_PILOT_ENVIRONMENT_SHA256"
+_ENV_ARMED = "INDIA_SWING_QUALITY_PILOT_ARMED"
+_ARMED_LITERAL = "true"
 
 _PREPARE_GENESIS_OPTIONS = ("--runbook-file", "--bucket")
 _RUN_WINDOW_OPTIONS = (
@@ -74,7 +96,14 @@ _RUN_WINDOW_OPTIONS = (
     "--window-kind",
     "--maximum-actions-per-invocation",
 )
+_RUN_DUE_WINDOW_OPTIONS = ("--runbook-file", "--manifest-file")
 _DEFAULT_MAXIMUM_ACTIONS_PER_INVOCATION = MAXIMUM_ACTIONS_PER_INVOCATION_CEILING
+
+_NO_OP_POSTURES = (
+    QualityPilotWindowPosture.NOT_SCHEDULED,
+    QualityPilotWindowPosture.PILOT_COMPLETE,
+    QualityPilotWindowPosture.ALREADY_COMPLETE,
+)
 
 
 def _fail(message: str) -> None:
@@ -301,6 +330,55 @@ def _run_prepare_genesis(
     )
 
 
+def _compose_and_run_window(
+    *,
+    bucket: str,
+    pilot_run_id: str,
+    market_session: date,
+    window_kind: ScheduledWindowKind,
+    maximum_actions: int,
+    code_sha256: str,
+    environment_sha256: str,
+    environ: Mapping[str, str],
+    clock: Callable[[], datetime],
+    client: object,
+    kite_adapter_factory: Callable[[KiteCredentials, Callable[[], datetime]], object],
+    claim_writer_factory: Callable[[object], object],
+    window_service_callable: Callable[..., object],
+) -> object:
+    """The one shared, reusable composition: load Kite credentials, build
+    the collector and every GCS-shaped adapter from exactly one already-
+    constructed shared client, and invoke ``window_service_callable``
+    exactly once. Both ``run-window`` and ``run-due-window`` delegate here
+    unchanged -- this is the only place either command touches a Kite
+    credential. Returns the raw ``QualityPilotWindowServiceResult``."""
+
+    credentials = KiteCredentials.from_env(environ)
+    adapter = kite_adapter_factory(credentials, clock)
+    collector = KiteQualityPilotCollector(adapter, clock=clock)
+
+    writer = GoogleCloudStorageStateObjectWriter(client=client)
+    pinned_reader = GoogleCloudStorageObjectReader(client=client)
+    current_reader = GoogleCloudStorageQualityPilotCurrentObjectReader(client)
+    claim_writer = claim_writer_factory(client)
+
+    return window_service_callable(
+        pilot_run_id=pilot_run_id,
+        market_session=market_session,
+        window_kind=window_kind,
+        bucket=bucket,
+        maximum_actions_per_invocation=maximum_actions,
+        code_sha256=code_sha256,
+        environment_sha256=environment_sha256,
+        clock=clock,
+        current_reader=current_reader,
+        pinned_reader=pinned_reader,
+        writer=writer,
+        claim_writer=claim_writer,
+        collector=collector,
+    )
+
+
 def _run_window(
     args: Sequence[str],
     *,
@@ -348,34 +426,213 @@ def _run_window(
     if type(code_sha256) is not str or type(environment_sha256) is not str:
         _fail(_ERR_JOB)
 
-    credentials = KiteCredentials.from_env(environ)
-    adapter = kite_adapter_factory(credentials, clock)
-    collector = KiteQualityPilotCollector(adapter, clock=clock)
-
     client = gcs_client_factory()
     if client is None:
         _fail(_ERR_JOB)
-    writer = GoogleCloudStorageStateObjectWriter(client=client)
-    pinned_reader = GoogleCloudStorageObjectReader(client=client)
-    current_reader = GoogleCloudStorageQualityPilotCurrentObjectReader(client)
-    claim_writer = claim_writer_factory(client)
 
-    result = window_service_callable(
-        pilot_run_id=pilot_run_id,
-        market_session=market_session,
-        window_kind=window_kind,
-        bucket=bucket,
-        maximum_actions_per_invocation=maximum_actions,
-        code_sha256=code_sha256,
-        environment_sha256=environment_sha256,
-        clock=clock,
-        current_reader=current_reader,
-        pinned_reader=pinned_reader,
-        writer=writer,
-        claim_writer=claim_writer,
-        collector=collector,
+    result = _compose_and_run_window(
+        bucket=bucket, pilot_run_id=pilot_run_id, market_session=market_session, window_kind=window_kind,
+        maximum_actions=maximum_actions, code_sha256=code_sha256, environment_sha256=environment_sha256,
+        environ=environ, clock=clock, client=client,
+        kite_adapter_factory=kite_adapter_factory, claim_writer_factory=claim_writer_factory,
+        window_service_callable=window_service_callable,
     )
 
+    return _verified_run_window_envelope(result)
+
+
+def _probe_window_complete(
+    *,
+    pilot_run_id: str,
+    market_session: date,
+    window_kind: ScheduledWindowKind,
+    bucket: str,
+    current_reader: object,
+) -> bool:
+    """Independently probe whether the exact named window already has a
+    sealed terminal completion. Any failure -- an absent window entry (the
+    window-service chain has not reached this point yet), an absent
+    receipt, or a malformed record -- is treated as INCOMPLETE, never
+    COMPLETE. This never treats absence as success."""
+
+    probe_failed = False
+    complete = False
+    try:
+        entry = load_current_quality_pilot_window_entry(
+            pilot_run_id=pilot_run_id, market_session=market_session, window_kind=window_kind,
+            bucket=bucket, reader=current_reader,
+        )
+        receipt = load_optional_quality_pilot_completion_receipt(
+            pilot_run_id=pilot_run_id, action_id=entry.action_binding_pin.action_id, bucket=bucket, reader=current_reader,
+        )
+        complete = receipt is not None
+    except Exception:
+        probe_failed = True
+    if probe_failed:
+        return False
+    return complete
+
+
+def _run_due_window(
+    args: Sequence[str],
+    *,
+    environ: Mapping[str, str],
+    clock: Callable[[], datetime],
+    gcs_client_factory: Callable[[], object],
+    kite_adapter_factory: Callable[[KiteCredentials, Callable[[], datetime]], object],
+    claim_writer_factory: Callable[[object], object],
+    window_service_callable: Callable[..., object],
+) -> dict[str, object]:
+    """Scheduler-safe entrypoint for a single fixed schedule lane firing. Reads
+    one exact mounted runbook and arming manifest and verifies their full
+    agreement, checks the kill switch before any credential or GCS/Kite
+    capability, reads the injected clock exactly once, and delegates a
+    genuinely DUE window to the shared run-window composition exactly once.
+
+    A DUE posture requires every earlier window in canonical order (not
+    only the immediately preceding one) to have an independently probed
+    terminal completion: this builds one ordered ``QualityPilotOrderedCompletionProof``
+    entry per window ``quality_pilot_window_completion_probe_targets``
+    names, using exactly one shared read-only GCS client (constructed only
+    once the target tuple is non-empty, and reused unchanged for the DUE
+    delegation). NOT_SCHEDULED/PILOT_COMPLETE/ALREADY_COMPLETE emit a
+    compact no-op success and MISSED_WINDOW_BLOCKED emits a sanitized
+    failure -- both before any Kite credential, claim writer, collector, or
+    write-capable adapter is ever constructed."""
+
+    options = _parse_options(args, _RUN_DUE_WINDOW_OPTIONS)
+    runbook_path = _absolute_traversal_free_path(options["--runbook-file"])
+    manifest_path = _absolute_traversal_free_path(options["--manifest-file"])
+
+    runbook_read_failed = False
+    runbook_bytes = b""
+    try:
+        runbook_bytes = read_stable_regular_file(runbook_path, maximum_bytes=MAXIMUM_RUNBOOK_BYTES)
+    except Exception:
+        runbook_read_failed = True
+    if runbook_read_failed:
+        _fail(_ERR_JOB)
+    runbook_decode_failed = False
+    runbook: object = None
+    try:
+        runbook = decode_quality_pilot_invocation_runbook(runbook_bytes)
+    except Exception:
+        runbook_decode_failed = True
+    if runbook_decode_failed or runbook is None:
+        _fail(_ERR_JOB)
+
+    manifest_read_failed = False
+    manifest_bytes = b""
+    try:
+        manifest_bytes = read_stable_regular_file(manifest_path, maximum_bytes=MAXIMUM_MANIFEST_BYTES)
+    except Exception:
+        manifest_read_failed = True
+    if manifest_read_failed:
+        _fail(_ERR_JOB)
+    manifest_decode_failed = False
+    manifest: object = None
+    try:
+        manifest = decode_quality_pilot_arming_manifest(manifest_bytes, runbook=runbook)
+    except Exception:
+        manifest_decode_failed = True
+    if manifest_decode_failed or manifest is None:
+        _fail(_ERR_JOB)
+
+    # Kill switch: fail closed on anything except the exact lowercase
+    # literal "true". No credential, GCS, Kite, claim, collector, or writer
+    # capability exists above this line or below it in the disarmed branch.
+    if environ.get(_ENV_ARMED) != _ARMED_LITERAL:
+        return {
+            "status": "QUALITY_PILOT_DISARMED",
+            "pilot_run_id": runbook.campaign.pilot_run_id,
+            "quality_only": True,
+        }
+
+    observed_at = clock()
+
+    targets_failed = False
+    targets: tuple[object, ...] = ()
+    try:
+        targets = quality_pilot_window_completion_probe_targets(runbook, observed_at)
+    except Exception:
+        targets_failed = True
+    if targets_failed:
+        _fail(_ERR_JOB)
+
+    proof: QualityPilotOrderedCompletionProof | None = None
+    probe_client: object = None
+    if targets:
+        probe_client = gcs_client_factory()
+        if probe_client is None:
+            _fail(_ERR_JOB)
+        probe_current_reader = GoogleCloudStorageQualityPilotCurrentObjectReader(probe_client)
+        evidence_build_failed = False
+        evidence: list[object] = []
+        try:
+            for window in targets:
+                complete = _probe_window_complete(
+                    pilot_run_id=runbook.campaign.pilot_run_id, market_session=window.market_session,
+                    window_kind=window.window_kind, bucket=runbook.bucket, current_reader=probe_current_reader,
+                )
+                evidence.append(
+                    QualityPilotWindowCompletionEvidence(
+                        window_id=window.window_id,
+                        result=(
+                            QualityPilotWindowCompletionProbeResult.COMPLETE
+                            if complete
+                            else QualityPilotWindowCompletionProbeResult.INCOMPLETE
+                        ),
+                    )
+                )
+            proof = QualityPilotOrderedCompletionProof(tuple(evidence))
+        except Exception:
+            evidence_build_failed = True
+        if evidence_build_failed or proof is None:
+            _fail(_ERR_JOB)
+
+    assessment_failed = False
+    assessment: object = None
+    try:
+        assessment = assess_quality_pilot_window_posture(runbook, observed_at, proof)
+    except Exception:
+        assessment_failed = True
+    if assessment_failed or assessment is None:
+        _fail(_ERR_JOB)
+
+    if assessment.posture in _NO_OP_POSTURES:
+        return {
+            "status": f"QUALITY_PILOT_{assessment.posture.value}",
+            "pilot_run_id": runbook.campaign.pilot_run_id,
+            "market_session": assessment.market_session.isoformat() if assessment.market_session is not None else None,
+            "window_kind": assessment.window_kind.value if assessment.window_kind is not None else None,
+            "quality_only": True,
+        }
+    if assessment.posture is QualityPilotWindowPosture.MISSED_WINDOW_BLOCKED:
+        _fail(_ERR_JOB)
+
+    # DUE: manifest digests must equal the exact job environment digests
+    # before any credential is loaded or the window is ever delegated.
+    if (
+        manifest.code_sha256 != environ.get(_ENV_CODE_SHA256, "")
+        or manifest.environment_sha256 != environ.get(_ENV_ENVIRONMENT_SHA256, "")
+    ):
+        _fail(_ERR_JOB)
+
+    # DUE is only ever reached when target is not None, so probe_client was
+    # already constructed above; reuse it rather than building a second one.
+    if probe_client is None:
+        _fail(_ERR_JOB)
+    client = probe_client
+
+    result = _compose_and_run_window(
+        bucket=runbook.bucket, pilot_run_id=runbook.campaign.pilot_run_id,
+        market_session=assessment.market_session, window_kind=assessment.window_kind,
+        maximum_actions=_DEFAULT_MAXIMUM_ACTIONS_PER_INVOCATION,
+        code_sha256=manifest.code_sha256, environment_sha256=manifest.environment_sha256,
+        environ=environ, clock=clock, client=client,
+        kite_adapter_factory=kite_adapter_factory, claim_writer_factory=claim_writer_factory,
+        window_service_callable=window_service_callable,
+    )
     return _verified_run_window_envelope(result)
 
 
@@ -397,7 +654,7 @@ def main(
             _fail(_ERR_JOB)
         command = args[0]
         remaining = args[1:]
-        if command not in ("prepare-genesis", "run-window"):
+        if command not in ("prepare-genesis", "run-window", "run-due-window"):
             _fail(_ERR_JOB)
 
         active_clock = clock if clock is not None else _default_clock
@@ -426,9 +683,20 @@ def main(
 
         if command == "prepare-genesis":
             envelope = _run_prepare_genesis(remaining, gcs_client_factory=active_gcs_client_factory)
-        else:
+        elif command == "run-window":
             runtime_environ = os.environ if environ is None else environ
             envelope = _run_window(
+                remaining,
+                environ=runtime_environ,
+                clock=active_clock,
+                gcs_client_factory=active_gcs_client_factory,
+                kite_adapter_factory=active_kite_adapter_factory,
+                claim_writer_factory=active_claim_writer_factory,
+                window_service_callable=active_window_service_callable,
+            )
+        else:
+            runtime_environ = os.environ if environ is None else environ
+            envelope = _run_due_window(
                 remaining,
                 environ=runtime_environ,
                 clock=active_clock,
