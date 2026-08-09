@@ -94,6 +94,7 @@ from .control_plane_store import (
     encode_quality_pilot_campaign_plan,
     encode_quality_pilot_completeness_snapshot,
     encode_quality_pilot_ledger_transition,
+    pinned_quality_pilot_control_artifact_request,
     pinned_quality_pilot_ledger_transition_request,
     publish_quality_pilot_control_artifact,
     publish_quality_pilot_ledger_transition,
@@ -108,6 +109,14 @@ from .resumable_service import (
     QualityPilotResumableCaptureService,
     QualityPilotResumableServiceError,
     audit_replay_quality_pilot_completeness_snapshot,
+)
+from .session_bootstrap import (
+    QUALITY_PILOT_SESSION_BOOTSTRAP_REQUEST_SCHEMA_VERSION,
+    QUALITY_PILOT_SESSION_BOOTSTRAP_RESULT_SCHEMA_VERSION,
+    QualityPilotSessionBootstrapError,
+    QualityPilotSessionBootstrapRequest,
+    QualityPilotSessionBootstrapResult,
+    QualityPilotSessionBootstrapService,
 )
 from .deployment_preflight import (
     QUALITY_PILOT_DEPLOYMENT_PREFLIGHT_SCHEMA_VERSION,
@@ -199,6 +208,7 @@ __all__ = [
     "encode_quality_pilot_campaign_plan",
     "encode_quality_pilot_completeness_snapshot",
     "encode_quality_pilot_ledger_transition",
+    "pinned_quality_pilot_control_artifact_request",
     "pinned_quality_pilot_ledger_transition_request",
     "publish_quality_pilot_control_artifact",
     "publish_quality_pilot_ledger_transition",
@@ -211,6 +221,12 @@ __all__ = [
     "QualityPilotResumableCaptureService",
     "QualityPilotResumableServiceError",
     "audit_replay_quality_pilot_completeness_snapshot",
+    "QUALITY_PILOT_SESSION_BOOTSTRAP_REQUEST_SCHEMA_VERSION",
+    "QUALITY_PILOT_SESSION_BOOTSTRAP_RESULT_SCHEMA_VERSION",
+    "QualityPilotSessionBootstrapError",
+    "QualityPilotSessionBootstrapRequest",
+    "QualityPilotSessionBootstrapResult",
+    "QualityPilotSessionBootstrapService",
     "QUALITY_PILOT_DEPLOYMENT_PREFLIGHT_SCHEMA_VERSION",
     "QUALITY_PILOT_FOUNDER_AUTHORIZATION_ID",
     "QualityPilotCloudRunPreflightInput",

@@ -1047,6 +1047,30 @@ def _reconstruct_published_control_artifact(value: object) -> PublishedQualityPi
     return reconstructed
 
 
+def pinned_quality_pilot_control_artifact_request(
+    published: PublishedQualityPilotControlArtifact,
+) -> PinnedQualityPilotControlArtifactRequest:
+    """Deterministically derive a pin from an exact, independently reverified publication.
+
+    Symmetric with :func:`pinned_quality_pilot_ledger_transition_request` --
+    the published value is treated as untrusted and reconstructed/reverified
+    first via :func:`_reconstruct_published_control_artifact`.
+    """
+
+    reconstructed = _reconstruct_published_control_artifact(published)
+    return PinnedQualityPilotControlArtifactRequest(
+        storage_policy_version=reconstructed.storage_policy_version,
+        protocol_sha256=reconstructed.protocol_sha256,
+        kind=reconstructed.kind,
+        pilot_run_id=reconstructed.pilot_run_id,
+        artifact_id=reconstructed.artifact_id,
+        bucket=reconstructed.bucket,
+        object_name=reconstructed.object_name,
+        generation=reconstructed.generation,
+        expected_encoded_sha256=reconstructed.encoded_sha256,
+    )
+
+
 def canonical_quality_pilot_transition_object_name(
     pilot_run_id: str, plan_id: str, predecessor_token: str, capture_spec_id: str
 ) -> str:
