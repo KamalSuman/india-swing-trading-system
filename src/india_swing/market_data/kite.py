@@ -299,6 +299,12 @@ class KiteMarketDataAdapter:
     def provider_version(self) -> str:
         return self.model_version
 
+    @property
+    def maximum_attempts(self) -> int:
+        """Configured attempts per adapter call, exposed for audited collectors."""
+
+        return self._retry_policy.max_attempts
+
     def fetch_instruments(self, exchange: str = "NSE") -> InstrumentBatch:
         exchange = exchange.strip().upper()
         if not exchange:
