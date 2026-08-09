@@ -38,6 +38,19 @@ from .observation_store import (
     publish_quality_pilot_observation,
     read_pinned_quality_pilot_observation,
 )
+from .capture_runner import (
+    CONFIRMED_SESSION_COUNT,
+    QUALITY_PILOT_CAMPAIGN_SCHEMA_VERSION,
+    QUALITY_PILOT_CAPTURE_RUN_RESULT_SCHEMA_VERSION,
+    QUALITY_PILOT_CAPTURE_SPEC_SCHEMA_VERSION,
+    QualityPilotCampaignSpec,
+    QualityPilotCaptureRunner,
+    QualityPilotCaptureRunnerError,
+    QualityPilotCaptureRunResult,
+    QualityPilotCaptureSpec,
+    QualityPilotCollectionResult,
+    QualityPilotCollector,
+)
 
 __all__ = [
     "CANONICAL_RESPONSE_SCHEMA_VERSION",
@@ -69,4 +82,15 @@ __all__ = [
     "canonical_observation_object_name",
     "publish_quality_pilot_observation",
     "read_pinned_quality_pilot_observation",
+    "CONFIRMED_SESSION_COUNT",
+    "QUALITY_PILOT_CAMPAIGN_SCHEMA_VERSION",
+    "QUALITY_PILOT_CAPTURE_RUN_RESULT_SCHEMA_VERSION",
+    "QUALITY_PILOT_CAPTURE_SPEC_SCHEMA_VERSION",
+    "QualityPilotCampaignSpec",
+    "QualityPilotCaptureRunner",
+    "QualityPilotCaptureRunnerError",
+    "QualityPilotCaptureRunResult",
+    "QualityPilotCaptureSpec",
+    "QualityPilotCollectionResult",
+    "QualityPilotCollector",
 ]
