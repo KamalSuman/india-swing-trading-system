@@ -51,6 +51,7 @@ india-swing-promoted-graph-publish = "india_swing.promoted_graph_publisher_cli:m
 india-swing-promoted-research-run = "india_swing.promoted_research_run_cli:main"
 india-swing-promoted-operational-prepare = "india_swing.promoted_operational_preparation_cli:main"
 india-swing-promoted-operational-job = "india_swing.promoted_operational_job:main"
+india-swing-promoted-operational-cloud-job = "india_swing.promoted_operational_cloud_job:main"
 india-swing-promoted-operational-launch = "india_swing.promoted_operational_launch_cli:main"
 india-swing-promoted-portfolio-genesis = "india_swing.promoted_paper_portfolio_genesis_cli:main"
 india-swing-quality-pilot-job = "india_swing.quality_pilot_job:main"
