@@ -20,6 +20,12 @@ token refresh, and grants no real-capital authority.
 
 ## Offline-publish then hydrated-run flow
 
+0. **Prepare the source control offline:** run
+   `india-swing-promoted-operational-cloud-control-prepare` to load the exact
+   assembly and local stores, derive the operational-run-spec ID through the
+   accepted assembly boundary, and create the canonical source control. See
+   `docs/PROMOTED_OPERATIONAL_CLOUD_CONTROL_PREPARE.md`. No cloud or broker
+   capability is used in this step.
 1. **Offline, on an operator's machine (or CI):** run
    `india-swing-promoted-operational-input-publish` with an existing,
    already-accepted `PromotedOperationalCloudRunControl` file
