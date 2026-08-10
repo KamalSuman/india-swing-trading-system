@@ -366,6 +366,16 @@ domain reruns, and an empty active set produces one explicit paper-only
 heartbeat instead of a fabricated portfolio genesis. See
 `docs/DAILY_WORKFLOW.md`.
 
+The promoted engine now also has a manually triggered GCP paper-pilot boundary.
+It hydrates one exact session launch, obtains read-only Kite quotes through the
+accepted promoted runtime, publishes terminal state to GCS, creates a durable
+notification claim, and then sends the sealed advisory or `NO_TRADE` result to
+the configured private Telegram chat. A durable receipt suppresses ordinary
+replays; an ambiguous claim is never resent automatically. The deployment is
+image-digest and secret-version pinned and leaves scheduling disabled until a
+separate per-session rollover controller exists. See
+`docs/PROMOTED_PAPER_PILOT.md`.
+
 For the intended Rs 1,00,000 research pilot, the current quote-to-decision
 defaults are Rs 500 planned risk per trade, Rs 2,000 aggregate open risk, at most
 four open positions across runs, one new position per run, Rs 25,000 per

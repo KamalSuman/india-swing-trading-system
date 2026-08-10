@@ -55,6 +55,7 @@ india-swing-promoted-operational-cloud-job = "india_swing.promoted_operational_c
 india-swing-promoted-operational-cloud-control-prepare = "india_swing.promoted_operational_cloud_control_prepare_cli:main"
 india-swing-promoted-operational-input-publish = "india_swing.promoted_operational_input_publish_cli:main"
 india-swing-promoted-operational-hydrated-cloud-job = "india_swing.promoted_operational_hydrated_cloud_job:main"
+india-swing-promoted-paper-pilot-job = "india_swing.promoted_paper_pilot_job:main"
 india-swing-promoted-operational-launch = "india_swing.promoted_operational_launch_cli:main"
 india-swing-promoted-portfolio-genesis = "india_swing.promoted_paper_portfolio_genesis_cli:main"
 india-swing-quality-pilot-job = "india_swing.quality_pilot_job:main"

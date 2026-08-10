@@ -404,7 +404,11 @@ entry point too: `run_publish_and_anchor_promoted_operational_session`
 routes solely on the remote anchor, delegates every local-terminal/binding
 decision to the already-accepted publication service, and seals the
 binding only after a fresh terminal-last publication -- never before, and
-never on replay. The remaining milestone is explicitly authorized Telegram
-delivery plus real storage-client construction and deployment wiring
-around this now-complete restart-safe chain -- that wiring does not exist
-yet.
+never on replay. The explicitly authorized outer paper-pilot boundary is now
+implemented too: `india-swing-promoted-paper-pilot-job` composes the hydrated
+job with one durable GCS delivery claim, post-publication Telegram delivery,
+and a durable receipt (see `docs/PROMOTED_PAPER_PILOT.md`). A matching digest-
+pinned, exact-secret-version Cloud Run deployment script exists, but
+deliberately creates no scheduler. The remaining live-control milestone is safe
+per-session rollover and scheduling; a static one-session launch must never be
+replayed every day.

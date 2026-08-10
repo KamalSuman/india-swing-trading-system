@@ -61,13 +61,13 @@ COPY infra/ ./infra/
 COPY src/ ./src/
 
 # Create necessary directories for local workspace/auditing and set permissions
-RUN mkdir -p var/audit tmp/ input_drop && \
-    chmod -R 777 var tmp input_drop
+RUN mkdir -p var/audit tmp/ input_drop /tmp/india-swing && \
+    chmod -R 777 var tmp input_drop /tmp/india-swing
 
 # Create a non-root system user and group for security hardening
 RUN groupadd -g 10001 appgroup && \
     useradd -r -u 10001 -g appgroup -d /app -s /sbin/nologin appuser && \
-    chown -R appuser:appgroup /app
+    chown -R appuser:appgroup /app /tmp/india-swing
 
 # Switch to the non-root user
 USER appuser

@@ -18,6 +18,11 @@ paper-trading job:
 no scheduling, no Telegram delivery, no interactive/browser login, no
 token refresh, and grants no real-capital authority.
 
+The separately authorized outer paper-pilot boundary now composes this job
+with durable, post-publication Telegram delivery. See
+`docs/PROMOTED_PAPER_PILOT.md`. This hydrated job remains unchanged and has no
+notification capability of its own.
+
 ## Offline-publish then hydrated-run flow
 
 0. **Prepare the source control offline:** run
