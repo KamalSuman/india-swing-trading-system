@@ -1,0 +1,9 @@
+.gcloudignore
+.git
+.git/**
+#!include:.gitignore
+
+# Local-only working files that are intentionally not part of deployable images.
+combined_docs.md
+scripts/audit_nse_historical_year.ps1
+scripts/nse_archive_keyboard_download.ps1
