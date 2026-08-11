@@ -156,6 +156,30 @@ class MainTests(unittest.TestCase):
         self.assertFalse(envelope["feature_eligible"])
         self.assertTrue(stdout.getvalue().endswith("\n"))
 
+    def test_joined_index_ids_preserve_exact_supplied_order(self) -> None:
+        dataset = _baseline_dataset()
+        writer = _Writer()
+        first, second = "a" * 64, "b" * 64
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            module, "build_nse_archive_research_dataset", return_value=dataset
+        ) as build:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                code = module.main(
+                    [
+                        "--store-root", str(Path(directory).resolve()),
+                        "--bucket", "valid-research-bucket",
+                        "--index-snapshot-ids", f"{first};{second}",
+                        "--train-end", "2022-12-31",
+                        "--validation-start", "2023-01-01",
+                        "--validation-end", "2024-12-31",
+                        "--test-start", "2025-01-01",
+                        "--maximum-forward-label-horizon-sessions", "20",
+                    ],
+                    writer_factory=lambda: writer,
+                )
+        self.assertEqual(code, 0)
+        self.assertEqual(build.call_args.kwargs["index_snapshot_ids"], (first, second))
+
     def test_internal_failure_is_static_and_sanitized(self) -> None:
         marker = "SECRET-MARKER-never-echo"
         stdout, stderr = io.StringIO(), io.StringIO()

@@ -44,11 +44,10 @@ $jobArguments = @(
     "--store-root",
     "/mnt/india-swing-data/research/canonical-market-data",
     "--bucket",
-    $bucket
+    $bucket,
+    "--index-snapshot-ids",
+    ($indexIds -join ';')
 )
-foreach ($indexId in $indexIds) {
-    $jobArguments += @("--index-snapshot-id", $indexId)
-}
 $jobArguments += @(
     "--train-end", "2022-12-31",
     "--validation-start", "2023-01-01",
@@ -61,7 +60,7 @@ $jobArguments += @(
     --project=$projectId `
     --member="serviceAccount:$serviceAccount" `
     --role="roles/storage.objectUser" `
-    --quiet
+    --quiet *> $null
 if ($LASTEXITCODE -ne 0) { throw "Research-dataset bucket IAM failed." }
 
 $common = @(
@@ -82,8 +81,13 @@ $common = @(
     "--quiet"
 )
 
-& gcloud run jobs describe $jobName --region=$region --project=$projectId *> $null
-if ($LASTEXITCODE -eq 0) {
+$existingJob = & gcloud run jobs list `
+    --region=$region `
+    --project=$projectId `
+    --filter="metadata.name=$jobName" `
+    --format="value(metadata.name)"
+if ($LASTEXITCODE -ne 0) { throw "Research-dataset Cloud Run Job lookup failed." }
+if ($existingJob -eq $jobName) {
     & gcloud run jobs update $jobName @common
 } else {
     & gcloud run jobs create $jobName @common

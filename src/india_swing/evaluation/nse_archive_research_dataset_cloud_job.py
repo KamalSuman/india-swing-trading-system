@@ -63,9 +63,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--store-root", type=Path, required=True)
     parser.add_argument("--bucket", required=True)
-    parser.add_argument(
-        "--index-snapshot-id", dest="index_snapshot_ids", action="append", required=True
+    index_group = parser.add_mutually_exclusive_group(required=True)
+    index_group.add_argument(
+        "--index-snapshot-id", dest="index_snapshot_ids", action="append"
     )
+    index_group.add_argument("--index-snapshot-ids", dest="joined_index_snapshot_ids")
     parser.add_argument("--train-end", type=_iso_date, required=True)
     parser.add_argument("--validation-start", type=_iso_date, required=True)
     parser.add_argument("--validation-end", type=_iso_date, required=True)
@@ -105,6 +107,18 @@ def _exclusions(arguments: argparse.Namespace) -> tuple[ResearchArchiveExclusion
         for session in arguments.source_cross_source_join_failed_sessions
     )
     return tuple(sorted(values, key=lambda value: value.session))
+
+
+def _index_snapshot_ids(arguments: argparse.Namespace) -> tuple[str, ...]:
+    if arguments.index_snapshot_ids is not None:
+        return tuple(arguments.index_snapshot_ids)
+    joined = arguments.joined_index_snapshot_ids
+    if type(joined) is not str:
+        raise NseArchiveResearchDatasetCloudJobError(_ERROR)
+    values = tuple(joined.split(";"))
+    if not values or any(not value for value in values):
+        raise NseArchiveResearchDatasetCloudJobError(_ERROR)
+    return values
 
 
 def _default_writer_factory() -> StateObjectWriter:
@@ -179,7 +193,7 @@ def main(
         dataset, published = build_and_publish_nse_archive_research_dataset(
             store_root=arguments.store_root,
             bucket=arguments.bucket,
-            index_snapshot_ids=tuple(arguments.index_snapshot_ids),
+            index_snapshot_ids=_index_snapshot_ids(arguments),
             split_policy=split_policy,
             exclusions=_exclusions(arguments),
             writer=writer,
