@@ -19,6 +19,7 @@ from .nse_archive import (
     NSE_HISTORICAL_ARCHIVE_EQ_DATASET,
     NSE_HISTORICAL_ARCHIVE_INDEX_DATASET,
     NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION,
+    NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1,
     NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2,
     NSE_HISTORICAL_ARCHIVE_PROVIDER,
     NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION,
@@ -42,6 +43,15 @@ _IDENTITY_STATUSES = {
     "SOURCE_IDENTIFIER_MISMATCH",
     IDENTITY_STATUS_UDIFF_AND_SECURITY_MASTER_EVIDENCE_UNAVAILABLE,
 }
+_INDEX_KEYS_V1 = {
+    "schema_version",
+    "range_start",
+    "range_end",
+    "collection_only",
+    "actionable",
+    "training_eligible",
+    "records",
+}
 _INDEX_KEYS_V2 = {
     "schema_version",
     "range_start",
@@ -56,6 +66,12 @@ _INDEX_KEYS_V2 = {
 _INDEX_KEYS_V3 = _INDEX_KEYS_V2 | {
     "incomplete_evidence_session_count",
     "evidence_profile_counts",
+}
+_INDEX_RECORD_KEYS_V1 = {
+    "session",
+    "snapshot_id",
+    "record_count",
+    "source_container_sha256",
 }
 _INDEX_RECORD_KEYS_V2 = {
     "session",
@@ -486,8 +502,17 @@ def _verify_session(
     )
     records = payload["records"]
     issues = payload["identity_issues"]
+    claimed_identity_issue_count = payload["identity_issue_count"]
     if (
-        payload["session"] != session
+        # Exact-type/non-negativity is required before any numeric
+        # equality is evaluated: Python considers ``True == 1`` and
+        # ``False == 0``, so a bool claim here must be rejected on type
+        # alone -- it can never be allowed to reach (and silently satisfy)
+        # the count-equality checks below. This applies uniformly to every
+        # accepted session schema (v1/v2/v3), not just the legacy path.
+        type(claimed_identity_issue_count) is not int
+        or claimed_identity_issue_count < 0
+        or payload["session"] != session
         or payload["exchange"] != "NSE"
         or payload["series_scope"] != ("EQ",)
         or payload["collection_only"] is not True
@@ -498,8 +523,8 @@ def _verify_session(
         or type(issues) is not tuple
         or payload["source_container_sha256"]
         != index_record["source_container_sha256"]
-        or payload["identity_issue_count"] != index_record["identity_issue_count"]
-        or len(issues) != payload["identity_issue_count"]
+        or claimed_identity_issue_count != index_record["identity_issue_count"]
+        or len(issues) != claimed_identity_issue_count
     ):
         _fail("archive range session payload is invalid")
     if session_schema in (
@@ -618,6 +643,31 @@ def _verify_session(
     return evidence_profile
 
 
+def _derive_legacy_identity_issue_count(stored: StoredMarketSnapshot) -> int:
+    """The sole, independently-derived source of truth for one v1
+    session's identity-issue count -- computed as ``len(identity_issues)``
+    and never read back from the payload's own separate
+    ``identity_issue_count`` claim, even after that claim has been cross-
+    checked and matched inside ``_verify_session``. The caller retains
+    this exact int locally and uses it both as the value fed into
+    ``_verify_session``'s existing required field (so a tampered/
+    inconsistent claim inside the session payload still fails that
+    boundary's own cross-check against the real issue list length) and as
+    the value accumulated into the v1 range-level totals. Returns ``-1``
+    -- a value that can never equal a genuine non-negative count -- when
+    the session payload is not even shaped as a mapping with a tuple
+    ``identity_issues`` field, so a malformed session still fails closed
+    through that same existing comparison."""
+
+    payload = getattr(stored, "normalized_payload", None)
+    if not isinstance(payload, Mapping):
+        return -1
+    issues = payload.get("identity_issues")
+    if type(issues) is not tuple:
+        return -1
+    return len(issues)
+
+
 def load_verified_nse_historical_archive_range(
     reader: NseHistoricalArchiveSnapshotReader,
     *,
@@ -636,7 +686,10 @@ def load_verified_nse_historical_archive_range(
     if not isinstance(index.normalized_payload, Mapping):
         _fail("archive range index payload is invalid")
     index_schema = index.normalized_payload.get("schema_version")
-    if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2:
+    if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1:
+        index_keys = _INDEX_KEYS_V1
+        index_record_keys = _INDEX_RECORD_KEYS_V1
+    elif index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2:
         index_keys = _INDEX_KEYS_V2
         index_record_keys = _INDEX_RECORD_KEYS_V2
     elif index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION:
@@ -671,27 +724,35 @@ def load_verified_nse_historical_archive_range(
         _mapping(value, index_record_keys, "archive range index record is invalid")
         for value in records
     )
+    is_v1_index = index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1
     sessions = tuple(value["session"] for value in index_records)
     if (
         any(type(value) is not date for value in sessions)
         or sessions != tuple(sorted(set(sessions)))
         or any(not payload["range_start"] <= value <= payload["range_end"] for value in sessions)
         or any(type(value["record_count"]) is not int or value["record_count"] <= 0 for value in index_records)
-        or any(type(value["identity_issue_count"]) is not int or value["identity_issue_count"] < 0 for value in index_records)
     ):
         _fail("archive range index record is invalid")
+    if not is_v1_index:
+        if any(
+            type(value["identity_issue_count"]) is not int or value["identity_issue_count"] < 0
+            for value in index_records
+        ):
+            _fail("archive range index record is invalid")
     for value in index_records:
         _sha256(value["snapshot_id"], "archive range session snapshot id is invalid")
         _sha256(value["source_container_sha256"], "archive range source hash is invalid")
-    if (
-        payload["identity_issue_count"]
-        != sum(value["identity_issue_count"] for value in index_records)
-        or payload["identity_quarantined_session_count"]
-        != sum(value["identity_issue_count"] > 0 for value in index_records)
-    ):
-        _fail("archive range identity accounting is invalid")
+    if not is_v1_index:
+        if (
+            payload["identity_issue_count"]
+            != sum(value["identity_issue_count"] for value in index_records)
+            or payload["identity_quarantined_session_count"]
+            != sum(value["identity_issue_count"] > 0 for value in index_records)
+        ):
+            _fail("archive range identity accounting is invalid")
     loaded: list[StoredMarketSnapshot] = []
     loaded_profiles: list[str] = []
+    derived_legacy_identity_issue_counts: list[int] = []
     for value in index_records:
         try:
             stored = reader.get(
@@ -702,7 +763,22 @@ def load_verified_nse_historical_archive_range(
             raise NseHistoricalArchiveRangeError(
                 "archive range session snapshot could not be loaded"
             ) from None
-        evidence_profile = _verify_session(stored, value, manifest.observed_at)
+        if is_v1_index:
+            # v1 index records never declared identity_issue_count -- bind
+            # _verify_session's existing required field to a value derived
+            # independently from the session's own identity_issues list
+            # length (never a blind copy of its own separate claim), so a
+            # tampered/inconsistent claim inside the session payload still
+            # fails _verify_session's own existing len(issues) cross-check
+            # exactly as it would for v2/v3. This exact int is retained
+            # locally and reused below -- never reread from the payload's
+            # own claim after verification, even though it matched.
+            derived_count = _derive_legacy_identity_issue_count(stored)
+            session_record = dict(value)
+            session_record["identity_issue_count"] = derived_count
+        else:
+            session_record = value
+        evidence_profile = _verify_session(stored, session_record, manifest.observed_at)
         if (
             index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION
             and value["evidence_profile"] != evidence_profile
@@ -710,6 +786,13 @@ def load_verified_nse_historical_archive_range(
             _fail("archive range index evidence profile is inconsistent")
         loaded.append(stored)
         loaded_profiles.append(evidence_profile)
+        if is_v1_index:
+            # _verify_session has now independently verified this session
+            # end-to-end (identity, manifest, decode, and the cross-check
+            # of its own claimed identity_issue_count against derived_count
+            # itself) -- accumulate the same locally retained derived_count,
+            # never a fresh read of the payload's own claim.
+            derived_legacy_identity_issue_counts.append(derived_count)
     evidence_profile_counts = {
         profile: loaded_profiles.count(profile)
         for profile in _EVIDENCE_PROFILE_MISSING
@@ -721,13 +804,32 @@ def load_verified_nse_historical_archive_range(
         claimed_counts = payload["evidence_profile_counts"]
         if (
             not isinstance(claimed_counts, Mapping)
-            or set(claimed_counts) != set(_EVIDENCE_PROFILE_MISSING)
+            or not set(claimed_counts) <= set(_EVIDENCE_PROFILE_MISSING)
             or any(type(value) is not int or value < 0 for value in claimed_counts.values())
-            or dict(claimed_counts) != evidence_profile_counts
+        ):
+            _fail("archive range evidence-profile accounting is invalid")
+        # A missing known key is a claimed zero -- so an omitted key
+        # passes only when its independently derived count is actually
+        # zero; an omitted nonzero bucket still fails the exact-equality
+        # check just below, since the normalized mapping would then
+        # disagree with the derived one.
+        normalized_claimed_counts = {
+            profile: claimed_counts.get(profile, 0) for profile in _EVIDENCE_PROFILE_MISSING
+        }
+        if (
+            normalized_claimed_counts != evidence_profile_counts
             or payload["incomplete_evidence_session_count"]
             != incomplete_evidence_session_count
         ):
             _fail("archive range evidence-profile accounting is invalid")
+    if is_v1_index:
+        identity_issue_count = sum(derived_legacy_identity_issue_counts)
+        identity_quarantined_session_count = sum(
+            count > 0 for count in derived_legacy_identity_issue_counts
+        )
+    else:
+        identity_issue_count = payload["identity_issue_count"]
+        identity_quarantined_session_count = payload["identity_quarantined_session_count"]
     return VerifiedNseHistoricalArchiveRange(
         index_snapshot_id=index_snapshot_id,
         range_start=payload["range_start"],
@@ -735,10 +837,8 @@ def load_verified_nse_historical_archive_range(
         session_snapshot_ids=tuple(value["snapshot_id"] for value in index_records),
         sessions=tuple(loaded),
         record_count=sum(value["record_count"] for value in index_records),
-        identity_issue_count=payload["identity_issue_count"],
-        identity_quarantined_session_count=payload[
-            "identity_quarantined_session_count"
-        ],
+        identity_issue_count=identity_issue_count,
+        identity_quarantined_session_count=identity_quarantined_session_count,
         incomplete_evidence_session_count=incomplete_evidence_session_count,
         evidence_profile_counts=evidence_profile_counts,
     )

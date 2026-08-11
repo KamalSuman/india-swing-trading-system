@@ -317,6 +317,53 @@ and `execution_eligible` all `False`): this is a typed replay boundary for
 later research feature materialization, not an authority upgrade, and it
 still does not connect to the promoted engine.
 
+### Legacy index-schema compatibility (`nse-historical-archive-eq-index/v1`)
+
+`load_verified_nse_historical_archive_range` accepts three historical
+index shapes: the current `.../v3` (claims an `evidence_profile_counts`
+mapping and an `incomplete_evidence_session_count`), `.../v2` (claims a
+top-level identity aggregate but no evidence-profile accounting), and the
+oldest `.../v1` shape actually present in the imported local corpus
+(`schema_version`, `range_start`, `range_end`, `collection_only`,
+`actionable`, `training_eligible`, and `records`, each record carrying
+only `session`, `snapshot_id`, `record_count`, and
+`source_container_sha256` -- no claimed identity or evidence-profile
+field at all). For a v1 index, every derived total
+(`identity_issue_count`, `identity_quarantined_session_count`,
+`evidence_profile_counts`, `incomplete_evidence_session_count`) is
+computed by loading and independently re-verifying each pinned session
+snapshot through the same `_verify_session` boundary v2/v3 already use --
+never defaulted to zero and never trusted from an unverified claim,
+because v1 made no such claim to trust. The per-session count fed into
+that boundary, and accumulated into the v1 range total, is always the
+value independently derived as `len(identity_issues)` for that session --
+it is never reread from the session's own separate `identity_issue_count`
+claim after verification, even when that claim matched. `.../v3`'s own
+`evidence_profile_counts` mapping is normalized before comparison: a
+known profile key that is missing from the claimed mapping is treated as
+a claimed zero, so it agrees with the independently derived totals only
+when the real derived count for that profile is actually zero (this is
+exactly the shape of a real 2024 compact index, whose
+`PRICE_DELIVERY_UNRECONCILED` key was omitted because no session in that
+range ever needed it) -- an omitted key whose true derived count is
+nonzero still fails closed, as does any unknown key or a non-integer,
+negative, or boolean claimed value. `_verify_session` itself requires
+every accepted schema's own claimed `identity_issue_count` to have exact
+type `int` and be non-negative before any equality comparison runs, so a
+`bool` claim (`True`/`False`) is rejected on type alone -- Python
+considers `True == 1` and `False == 0`, so a naive numeric comparison
+could otherwise silently accept a boolean claim whenever its numeric
+value happened to match the real count.
+
+This is entirely a **read-side verification rule** over the exact,
+already-published, content-addressed snapshots already sitting in the
+canonical store: it never rebuilds, migrates, rewrites, or repairs a
+stored index or session snapshot, and it never widens what a
+`collection_only` result is eligible for -- a range verified through a
+legacy v1 index is exactly as `paper`/research-only, non-training,
+non-actionable, and non-execution-eligible as one verified through the
+current v3 shape.
+
 ## Deliberate boundary
 
 This workflow closes the automated **EOD paper-outcome leg**. It does not yet

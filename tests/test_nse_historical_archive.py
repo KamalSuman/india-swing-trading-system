@@ -28,6 +28,7 @@ from india_swing.market_data.nse_archive import (
     NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION,
     NSE_HISTORICAL_ARCHIVE_INDEX_DATASET,
     NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION,
+    NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1,
     NSE_HISTORICAL_ARCHIVE_PROVIDER,
     NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION,
     NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1,
@@ -220,6 +221,26 @@ def _one_file_archive_bytes(
 def _one_file_normalized_payload(session: date = SESSION) -> dict[str, object]:
     parsed = parse_nse_historical_archive_bytes(
         _one_file_archive_bytes(session),
+        original_filename=f"Reports-Archives-Multiple-{session:%d%m%Y}.zip",
+    )
+    payload = dict(parsed.normalized_payload)
+    payload["records"] = tuple(dict(record) for record in payload["records"])
+    payload["identity_issues"] = tuple(
+        dict(issue) for issue in payload["identity_issues"]
+    )
+    return payload
+
+
+def _matched_full_normalized_payload(session: date = SESSION) -> dict[str, object]:
+    # archive_bytes() with its own default security master (unlike the
+    # deliberately ISIN-mismatched override
+    # NseHistoricalArchiveV3EvidenceProfileNormalizationTests uses to force
+    # an identity issue under a COMPLETE evidence profile) reproduces the
+    # genuinely MATCHED_SAME_SESSION identity resolution already proven by
+    # NseHistoricalArchiveParserTests -- validated_isin is populated only
+    # for a matched record -- so this session has zero identity issues.
+    parsed = parse_nse_historical_archive_bytes(
+        archive_bytes(session),
         original_filename=f"Reports-Archives-Multiple-{session:%d%m%Y}.zip",
     )
     payload = dict(parsed.normalized_payload)
@@ -1011,6 +1032,505 @@ class NseHistoricalArchiveStoreTests(unittest.TestCase):
                             store,
                             index_snapshot_id=index_snapshot.manifest.snapshot_id,
                         )
+
+
+class NseHistoricalArchiveLegacyIndexTests(unittest.TestCase):
+    """Covers the historically-imported nse-historical-archive-eq-index/v1
+    shape: top-level schema_version/range_start/range_end/collection_only/
+    actionable/training_eligible/records, with each record carrying only
+    session/snapshot_id/record_count/source_container_sha256 -- no claimed
+    identity aggregate, per-record identity count, evidence profile, or
+    evidence-profile counts. Every derived total must come from replaying
+    the exact verified session snapshots through the existing, unmodified
+    _verify_session boundary -- never defaulted to zero."""
+
+    SESSION_A = SESSION
+    SESSION_B = SESSION + timedelta(days=1)
+
+    def _v1_index_payload(
+        self,
+        entries: tuple,
+        *,
+        range_start: date,
+        range_end: date,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1,
+            "range_start": range_start,
+            "range_end": range_end,
+            "collection_only": True,
+            "actionable": False,
+            "training_eligible": False,
+            "records": tuple(
+                {
+                    "session": entry_session,
+                    "snapshot_id": snapshot.manifest.snapshot_id,
+                    "record_count": snapshot.manifest.record_count,
+                    "source_container_sha256": source_hash,
+                }
+                for entry_session, snapshot, source_hash in entries
+            ),
+        }
+
+    def _store_v1_index(
+        self,
+        store: LocalMarketSnapshotStore,
+        payload: Mapping[str, object],
+        *,
+        observed_at: datetime = OBSERVED_AT,
+    ):
+        return store.put(
+            dataset=NSE_HISTORICAL_ARCHIVE_INDEX_DATASET,
+            selection_key=(
+                f"{payload['range_start'].isoformat()}:{payload['range_end'].isoformat()}"
+            ),
+            provider=NSE_HISTORICAL_ARCHIVE_PROVIDER,
+            provider_version=NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION,
+            observed_at=observed_at,
+            normalized_payload=payload,
+        )
+
+    def _single_session_setup(
+        self, store: LocalMarketSnapshotStore, session: date = SESSION
+    ):
+        payload = _one_file_normalized_payload(session)
+        session_snapshot = _store_one_file_session(store, payload, session=session)
+        return payload, session_snapshot
+
+    def test_v1_index_derives_nonzero_identity_counts_and_evidence_profile_from_sessions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalMarketSnapshotStore(Path(temporary))
+            payload, session_snapshot = self._single_session_setup(store)
+            index_payload = self._v1_index_payload(
+                [(SESSION, session_snapshot, payload["source_container_sha256"])],
+                range_start=SESSION,
+                range_end=SESSION,
+            )
+            index_snapshot = self._store_v1_index(store, index_payload)
+
+            verified = load_verified_nse_historical_archive_range(
+                store, index_snapshot_id=index_snapshot.manifest.snapshot_id,
+            )
+            self.assertEqual(verified.range_start, SESSION)
+            self.assertEqual(verified.range_end, SESSION)
+            self.assertEqual(
+                verified.session_snapshot_ids, (session_snapshot.manifest.snapshot_id,)
+            )
+            self.assertEqual(verified.record_count, session_snapshot.manifest.record_count)
+            # Nonzero and derived from the verified session payload -- v1
+            # never declared this total, so a defaulted-to-zero
+            # implementation would silently under-report real identity
+            # issues instead of failing loudly or reporting them exactly.
+            self.assertGreater(verified.identity_issue_count, 0)
+            self.assertEqual(
+                verified.identity_issue_count, len(payload["identity_issues"])
+            )
+            self.assertEqual(verified.identity_quarantined_session_count, 1)
+            self.assertEqual(
+                verified.evidence_profile_counts[EVIDENCE_PROFILE_UNRECONCILED], 1
+            )
+            self.assertEqual(verified.incomplete_evidence_session_count, 1)
+
+    def test_v1_index_payload_and_record_key_and_posture_mutations_fail_closed(
+        self,
+    ) -> None:
+        def extra_top_key(index_payload: dict, record: dict) -> None:
+            index_payload["identity_issue_count"] = 0
+
+        def missing_top_key(index_payload: dict, record: dict) -> None:
+            del index_payload["collection_only"]
+
+        def extra_record_key(index_payload: dict, record: dict) -> None:
+            record["identity_issue_count"] = 0
+
+        def missing_record_key(index_payload: dict, record: dict) -> None:
+            del record["record_count"]
+
+        def not_collection_only(index_payload: dict, record: dict) -> None:
+            index_payload["collection_only"] = False
+
+        def actionable(index_payload: dict, record: dict) -> None:
+            index_payload["actionable"] = True
+
+        def training_eligible(index_payload: dict, record: dict) -> None:
+            index_payload["training_eligible"] = True
+
+        def wrong_source_hash(index_payload: dict, record: dict) -> None:
+            record["source_container_sha256"] = "9" * 64
+
+        def wrong_snapshot_id(index_payload: dict, record: dict) -> None:
+            record["snapshot_id"] = "9" * 64
+
+        def record_count_mismatch(index_payload: dict, record: dict) -> None:
+            record["record_count"] = record["record_count"] + 1
+
+        cases = {
+            "extra_top_key": extra_top_key,
+            "missing_top_key": missing_top_key,
+            "extra_record_key": extra_record_key,
+            "missing_record_key": missing_record_key,
+            "not_collection_only": not_collection_only,
+            "actionable": actionable,
+            "training_eligible": training_eligible,
+            "wrong_source_hash": wrong_source_hash,
+            "wrong_snapshot_id": wrong_snapshot_id,
+            "record_count_mismatch": record_count_mismatch,
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as temporary:
+                    store = LocalMarketSnapshotStore(Path(temporary))
+                    payload, session_snapshot = self._single_session_setup(store)
+                    index_payload = self._v1_index_payload(
+                        [(SESSION, session_snapshot, payload["source_container_sha256"])],
+                        range_start=SESSION,
+                        range_end=SESSION,
+                    )
+                    record = dict(index_payload["records"][0])
+                    mutate(index_payload, record)
+                    index_payload["records"] = (record,)
+                    index_snapshot = self._store_v1_index(store, index_payload)
+
+                    with self.assertRaises(NseHistoricalArchiveRangeError):
+                        load_verified_nse_historical_archive_range(
+                            store, index_snapshot_id=index_snapshot.manifest.snapshot_id,
+                        )
+
+    def test_v1_index_reordered_and_duplicate_sessions_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalMarketSnapshotStore(Path(temporary))
+            payload_a, snapshot_a = self._single_session_setup(store, session=self.SESSION_A)
+            payload_b, snapshot_b = self._single_session_setup(store, session=self.SESSION_B)
+
+            reordered_payload = self._v1_index_payload(
+                [
+                    (self.SESSION_B, snapshot_b, payload_b["source_container_sha256"]),
+                    (self.SESSION_A, snapshot_a, payload_a["source_container_sha256"]),
+                ],
+                range_start=self.SESSION_A,
+                range_end=self.SESSION_B,
+            )
+            reordered_index = self._store_v1_index(store, reordered_payload)
+            with self.assertRaises(NseHistoricalArchiveRangeError):
+                load_verified_nse_historical_archive_range(
+                    store, index_snapshot_id=reordered_index.manifest.snapshot_id,
+                )
+
+            duplicate_payload = self._v1_index_payload(
+                [
+                    (self.SESSION_A, snapshot_a, payload_a["source_container_sha256"]),
+                    (self.SESSION_A, snapshot_a, payload_a["source_container_sha256"]),
+                ],
+                range_start=self.SESSION_A,
+                range_end=self.SESSION_A,
+            )
+            duplicate_index = self._store_v1_index(store, duplicate_payload)
+            with self.assertRaises(NseHistoricalArchiveRangeError):
+                load_verified_nse_historical_archive_range(
+                    store, index_snapshot_id=duplicate_index.manifest.snapshot_id,
+                )
+
+    def test_v1_index_wrong_manifest_lineage_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalMarketSnapshotStore(Path(temporary))
+            payload, session_snapshot = self._single_session_setup(store)
+            index_payload = self._v1_index_payload(
+                [(SESSION, session_snapshot, payload["source_container_sha256"])],
+                range_start=SESSION,
+                range_end=SESSION,
+            )
+            # A selection_key that disagrees with the payload's own
+            # declared range is a wrong-manifest-lineage case the existing
+            # generic index-manifest check already rejects for every
+            # index schema.
+            index_snapshot = store.put(
+                dataset=NSE_HISTORICAL_ARCHIVE_INDEX_DATASET,
+                selection_key=(
+                    f"{SESSION.isoformat()}:{(SESSION + timedelta(days=1)).isoformat()}"
+                ),
+                provider=NSE_HISTORICAL_ARCHIVE_PROVIDER,
+                provider_version=NSE_HISTORICAL_ARCHIVE_IMPORTER_VERSION,
+                observed_at=OBSERVED_AT,
+                normalized_payload=index_payload,
+            )
+            with self.assertRaises(NseHistoricalArchiveRangeError):
+                load_verified_nse_historical_archive_range(
+                    store, index_snapshot_id=index_snapshot.manifest.snapshot_id,
+                )
+
+    def test_v1_index_missing_session_snapshot_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalMarketSnapshotStore(Path(temporary))
+            payload, session_snapshot = self._single_session_setup(store)
+            index_payload = self._v1_index_payload(
+                [(SESSION, session_snapshot, payload["source_container_sha256"])],
+                range_start=SESSION,
+                range_end=SESSION,
+            )
+            record = dict(index_payload["records"][0])
+            record["snapshot_id"] = "e" * 64  # syntactically valid, never stored
+            index_payload["records"] = (record,)
+            index_snapshot = self._store_v1_index(store, index_payload)
+
+            with self.assertRaises(NseHistoricalArchiveRangeError):
+                load_verified_nse_historical_archive_range(
+                    store, index_snapshot_id=index_snapshot.manifest.snapshot_id,
+                )
+
+    def test_v1_index_tampered_session_snapshot_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LocalMarketSnapshotStore(Path(temporary))
+            payload, session_snapshot = self._single_session_setup(store)
+            index_payload = self._v1_index_payload(
+                [(SESSION, session_snapshot, payload["source_container_sha256"])],
+                range_start=SESSION,
+                range_end=SESSION,
+            )
+            index_snapshot = self._store_v1_index(store, index_payload)
+
+            stored = store.get(
+                NSE_HISTORICAL_ARCHIVE_EQ_DATASET, session_snapshot.manifest.snapshot_id
+            )
+            mutated_payload = dict(stored.normalized_payload)
+            record = dict(mutated_payload["records"][0])
+            record["close"] = record["open"]
+            mutated_payload["records"] = (record,)
+            mutated = replace(stored, normalized_payload=mutated_payload)
+
+            class Reader:
+                def get(self, dataset: str, snapshot_id: str):
+                    if dataset == NSE_HISTORICAL_ARCHIVE_EQ_DATASET:
+                        return mutated
+                    return index_snapshot
+
+            with self.assertRaises(NseHistoricalArchiveRangeError):
+                load_verified_nse_historical_archive_range(
+                    Reader(), index_snapshot_id=index_snapshot.manifest.snapshot_id,
+                )
+
+    def test_v1_index_malformed_session_identity_issue_count_fails_closed(self) -> None:
+        cases = {
+            "false_undercounts": False,
+            "wrong_int_count": 2,
+            "wrong_type_count": "1",
+        }
+        for label, malformed_count in cases.items():
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as temporary:
+                    store = LocalMarketSnapshotStore(Path(temporary))
+                    payload = _one_file_normalized_payload(SESSION)
+                    payload["identity_issue_count"] = malformed_count
+                    session_snapshot = _store_one_file_session(store, payload, session=SESSION)
+                    index_payload = self._v1_index_payload(
+                        [(SESSION, session_snapshot, payload["source_container_sha256"])],
+                        range_start=SESSION,
+                        range_end=SESSION,
+                    )
+                    index_snapshot = self._store_v1_index(store, index_payload)
+
+                    with self.assertRaises(NseHistoricalArchiveRangeError):
+                        load_verified_nse_historical_archive_range(
+                            store, index_snapshot_id=index_snapshot.manifest.snapshot_id,
+                        )
+
+    def test_v1_index_bool_identity_issue_count_precisely_reproduces_and_rejects_the_hole(
+        self,
+    ) -> None:
+        """Reproduces the exact revision-1 regression: Python considers
+        True == 1 and False == 0, so a naive numeric-equality check on a
+        session's own claimed identity_issue_count would silently accept a
+        bool claim whenever its int value happened to match. The hardened
+        boundary must reject bool on type alone, before any equality is
+        evaluated -- independent of whether the boolean's numeric value is
+        the exact correct count."""
+
+        with self.subTest("true_against_one_real_issue"):
+            with tempfile.TemporaryDirectory() as temporary:
+                store = LocalMarketSnapshotStore(Path(temporary))
+                payload = _one_file_normalized_payload(SESSION)
+                self.assertEqual(len(payload["identity_issues"]), 1)
+                payload["identity_issue_count"] = True
+                session_snapshot = _store_one_file_session(
+                    store, payload, session=SESSION
+                )
+                index_snapshot = self._store_v1_index(
+                    store,
+                    self._v1_index_payload(
+                        [(SESSION, session_snapshot, payload["source_container_sha256"])],
+                        range_start=SESSION,
+                        range_end=SESSION,
+                    ),
+                )
+
+                with self.assertRaises(NseHistoricalArchiveRangeError):
+                    load_verified_nse_historical_archive_range(
+                        store, index_snapshot_id=index_snapshot.manifest.snapshot_id,
+                    )
+
+        with self.subTest("false_against_zero_real_issues"):
+            with tempfile.TemporaryDirectory() as temporary:
+                store = LocalMarketSnapshotStore(Path(temporary))
+                payload = _matched_full_normalized_payload(SESSION)
+                self.assertEqual(len(payload["identity_issues"]), 0)
+                self.assertEqual(payload["identity_issue_count"], 0)
+                payload["identity_issue_count"] = False
+                session_snapshot = _store_one_file_session(
+                    store, payload, session=SESSION
+                )
+                index_snapshot = self._store_v1_index(
+                    store,
+                    self._v1_index_payload(
+                        [(SESSION, session_snapshot, payload["source_container_sha256"])],
+                        range_start=SESSION,
+                        range_end=SESSION,
+                    ),
+                )
+
+                with self.assertRaises(NseHistoricalArchiveRangeError):
+                    load_verified_nse_historical_archive_range(
+                        store, index_snapshot_id=index_snapshot.manifest.snapshot_id,
+                    )
+
+        with self.subTest("valid_exact_int_succeeds_and_remains_type_int"):
+            with tempfile.TemporaryDirectory() as temporary:
+                store = LocalMarketSnapshotStore(Path(temporary))
+                payload = _one_file_normalized_payload(SESSION)
+                self.assertEqual(len(payload["identity_issues"]), 1)
+                self.assertIs(type(payload["identity_issue_count"]), int)
+                session_snapshot = _store_one_file_session(
+                    store, payload, session=SESSION
+                )
+                index_snapshot = self._store_v1_index(
+                    store,
+                    self._v1_index_payload(
+                        [(SESSION, session_snapshot, payload["source_container_sha256"])],
+                        range_start=SESSION,
+                        range_end=SESSION,
+                    ),
+                )
+
+                verified = load_verified_nse_historical_archive_range(
+                    store, index_snapshot_id=index_snapshot.manifest.snapshot_id,
+                )
+                self.assertEqual(verified.identity_issue_count, 1)
+                self.assertIs(type(verified.identity_issue_count), int)
+
+
+class NseHistoricalArchiveV3EvidenceProfileNormalizationTests(unittest.TestCase):
+    """Reproduces the real 2024 compact v3 shape (a known profile key
+    omitted from evidence_profile_counts because its independently derived
+    count is zero) and its adversarial boundary: an omitted key passes
+    only when the actual derived count for that profile is zero."""
+
+    def _build_complete_profile_index(self, temporary: str):
+        root = Path(temporary)
+        staging = root / "staging" / SESSION.isoformat()
+        archives = root / "source-archives" / SESSION.isoformat()
+        staging.mkdir(parents=True)
+        archives.mkdir(parents=True)
+        payload = archive_bytes(
+            security_master=security_master_bytes([security_row(ISIN="INE467B01029")])
+        )
+        archive_path = archives / "Reports-Archives-Multiple-15072026.zip"
+        archive_path.write_bytes(payload)
+        with zipfile.ZipFile(archive_path) as archive:
+            for name in archive.namelist():
+                (staging / name).write_bytes(archive.read(name))
+        store = LocalMarketSnapshotStore(root / "canonical")
+        _sessions, index = import_nse_historical_range(
+            staging_root=root / "staging",
+            archive_root=root / "source-archives",
+            store=store,
+            start=SESSION,
+            end=SESSION,
+            observed_at=OBSERVED_AT,
+        )
+        return store, index
+
+    def _restore_with_mutated_counts(self, store, index, mutate) -> object:
+        mutated_payload = dict(index.normalized_payload)
+        counts = dict(mutated_payload["evidence_profile_counts"])
+        mutate(counts)
+        mutated_payload["evidence_profile_counts"] = counts
+        return store.put(
+            dataset=NSE_HISTORICAL_ARCHIVE_INDEX_DATASET,
+            selection_key=index.manifest.selection_key,
+            provider=index.manifest.provider,
+            provider_version=index.manifest.provider_version,
+            observed_at=index.manifest.observed_at,
+            normalized_payload=mutated_payload,
+        )
+
+    def test_v3_omitted_zero_count_key_succeeds_with_normalized_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store, index = self._build_complete_profile_index(temporary)
+            self.assertEqual(
+                index.normalized_payload["evidence_profile_counts"][
+                    EVIDENCE_PROFILE_UNRECONCILED
+                ],
+                0,
+            )
+            mutated_index = self._restore_with_mutated_counts(
+                store, index, lambda counts: counts.pop(EVIDENCE_PROFILE_UNRECONCILED)
+            )
+            verified = load_verified_nse_historical_archive_range(
+                store, index_snapshot_id=mutated_index.manifest.snapshot_id,
+            )
+            self.assertEqual(
+                verified.evidence_profile_counts[EVIDENCE_PROFILE_UNRECONCILED], 0
+            )
+            self.assertEqual(verified.evidence_profile_counts[EVIDENCE_PROFILE_COMPLETE], 1)
+
+    def test_v3_omitted_nonzero_count_key_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store, index = self._build_complete_profile_index(temporary)
+            self.assertEqual(
+                index.normalized_payload["evidence_profile_counts"][EVIDENCE_PROFILE_COMPLETE], 1
+            )
+            mutated_index = self._restore_with_mutated_counts(
+                store, index, lambda counts: counts.pop(EVIDENCE_PROFILE_COMPLETE)
+            )
+            with self.assertRaises(NseHistoricalArchiveRangeError):
+                load_verified_nse_historical_archive_range(
+                    store, index_snapshot_id=mutated_index.manifest.snapshot_id,
+                )
+
+    def test_v3_unknown_key_and_malformed_values_fail_closed(self) -> None:
+        cases = {
+            "unknown_key": lambda counts: counts.__setitem__("SOMETHING_ELSE", 0),
+            "bool_value": lambda counts: counts.__setitem__(EVIDENCE_PROFILE_COMPLETE, True),
+            "negative_value": lambda counts: counts.__setitem__(EVIDENCE_PROFILE_COMPLETE, -1),
+            "string_value": lambda counts: counts.__setitem__(EVIDENCE_PROFILE_COMPLETE, "1"),
+            "wrong_value": lambda counts: counts.__setitem__(EVIDENCE_PROFILE_COMPLETE, 2),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as temporary:
+                    store, index = self._build_complete_profile_index(temporary)
+                    mutated_index = self._restore_with_mutated_counts(store, index, mutate)
+                    with self.assertRaises(NseHistoricalArchiveRangeError):
+                        load_verified_nse_historical_archive_range(
+                            store, index_snapshot_id=mutated_index.manifest.snapshot_id,
+                        )
+
+    def test_v3_full_four_key_canonical_mapping_still_succeeds_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store, index = self._build_complete_profile_index(temporary)
+            verified = load_verified_nse_historical_archive_range(
+                store, index_snapshot_id=index.manifest.snapshot_id,
+            )
+            self.assertEqual(
+                set(verified.evidence_profile_counts),
+                {
+                    EVIDENCE_PROFILE_PRICE_UDIFF,
+                    EVIDENCE_PROFILE_PRICE_UDIFF_SECURITY,
+                    EVIDENCE_PROFILE_COMPLETE,
+                    EVIDENCE_PROFILE_UNRECONCILED,
+                },
+            )
+            self.assertEqual(verified.evidence_profile_counts[EVIDENCE_PROFILE_COMPLETE], 1)
 
 
 LEGACY_SESSION = date(2019, 1, 2)

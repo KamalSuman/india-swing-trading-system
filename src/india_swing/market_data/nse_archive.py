@@ -39,6 +39,9 @@ NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1 = (
 )
 NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V2 = "nse-historical-archive-eq-session/v2"
 NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION = "nse-historical-archive-eq-session/v3"
+NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1 = (
+    "nse-historical-archive-eq-index/v1"
+)
 NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2 = (
     "nse-historical-archive-eq-index/v2"
 )
