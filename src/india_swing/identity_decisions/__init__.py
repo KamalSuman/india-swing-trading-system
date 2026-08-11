@@ -43,6 +43,10 @@ from .snapshot_store import (
     decode_adjudicated_identity_snapshot,
     encode_adjudicated_identity_snapshot,
 )
+from .stable_ids import (
+    stable_instrument_id_for_isin,
+    stable_listing_id_for_series,
+)
 
 __all__ = [
     "ADJUDICATED_IDENTITY_CODEC_VERSION",
@@ -81,5 +85,7 @@ __all__ = [
     "encode_adjudicated_identity_snapshot",
     "encode_identity_review_bundle",
     "materialize_adjudicated_identity_snapshot",
+    "stable_instrument_id_for_isin",
+    "stable_listing_id_for_series",
     "verify_stored_identity_review_provenance",
 ]

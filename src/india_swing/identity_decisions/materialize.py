@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from india_swing.identity import content_id
 from india_swing.identity_evidence import (
     StoredIdentityEvidenceArtifact,
     verify_stored_identity_evidence_provenance,
@@ -17,8 +16,6 @@ from india_swing.identity_registry import (
 )
 
 from .models import (
-    STABLE_INSTRUMENT_ID_SCHEME,
-    STABLE_LISTING_ID_SCHEME,
     AdjudicatedIdentitySnapshot,
     CandidateIdentityResolution,
     EffectiveStableListingObservation,
@@ -29,6 +26,10 @@ from .models import (
     StoredIdentityReviewBundle,
 )
 from .artifact_store import verify_stored_identity_review_provenance
+from .stable_ids import (
+    stable_instrument_id_for_isin,
+    stable_listing_id_for_series,
+)
 
 
 def _utc(value: datetime) -> datetime:
@@ -40,28 +41,11 @@ def _utc(value: datetime) -> datetime:
 
 
 def _stable_instrument_id(validated_isin: str) -> str:
-    return content_id(
-        {
-            "scheme": STABLE_INSTRUMENT_ID_SCHEME,
-            "exchange": "NSE",
-            "segment": "CM",
-            "validated_isin": validated_isin,
-        },
-        length=64,
-    )
+    return stable_instrument_id_for_isin(validated_isin)
 
 
 def _stable_listing_id(stable_instrument_id: str, series: str) -> str:
-    return content_id(
-        {
-            "scheme": STABLE_LISTING_ID_SCHEME,
-            "stable_instrument_id": stable_instrument_id,
-            "exchange": "NSE",
-            "segment": "CM",
-            "series": series,
-        },
-        length=64,
-    )
+    return stable_listing_id_for_series(stable_instrument_id, series)
 
 
 def _accepted_effective_isin(

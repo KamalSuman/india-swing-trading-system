@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 
-from india_swing.identity import content_id
+from india_swing.identity import canonical_identity, content_id
 from india_swing.paper_outcomes import validate_paper_outcome_state_bucket
 
 
-WORKFLOW_SPEC_SCHEMA = "daily-paper-workflow-spec/v1"
-WORKFLOW_OUTPUT_SCHEMA = "daily-paper-workflow-output/v1"
+LEGACY_WORKFLOW_SPEC_SCHEMA = "daily-paper-workflow-spec/v1"
+WORKFLOW_SPEC_SCHEMA = "daily-paper-workflow-spec/v2"
+LEGACY_WORKFLOW_OUTPUT_SCHEMA = "daily-paper-workflow-output/v1"
+WORKFLOW_OUTPUT_SCHEMA = "daily-paper-workflow-output/v2"
 WORKFLOW_EVENT_SCHEMA = "daily-paper-workflow-event/v1"
 WORKFLOW_TERMINAL_SCHEMA = "daily-paper-workflow-terminal/v1"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -99,6 +103,8 @@ class DailyPaperWorkflowSpec:
     run_id: str
     derived_evidence_id: str
     state_bucket: str
+    portfolio_genesis_artifact_id: str | None = None
+    previous_rollover_id: str | None = None
     daily_loss_limit: Decimal = Decimal("1000")
     cumulative_loss_limit: Decimal = Decimal("2000")
     maximum_attempts: int = 3
@@ -114,6 +120,17 @@ class DailyPaperWorkflowSpec:
         except Exception:
             raise DailyPaperWorkflowError("workflow state bucket is invalid") from None
         object.__setattr__(self, "state_bucket", bucket)
+        for value, name in (
+            (self.portfolio_genesis_artifact_id, "portfolio_genesis_artifact_id"),
+            (self.previous_rollover_id, "previous_rollover_id"),
+        ):
+            if value is not None:
+                _sha(value, name)
+        if (
+            self.previous_rollover_id is not None
+            and self.portfolio_genesis_artifact_id is None
+        ):
+            raise DailyPaperWorkflowError("workflow rollover lineage is incomplete")
         _positive_decimal(self.daily_loss_limit, "daily_loss_limit")
         _positive_decimal(self.cumulative_loss_limit, "cumulative_loss_limit")
         if (
@@ -122,16 +139,29 @@ class DailyPaperWorkflowSpec:
             or not 1 <= self.maximum_attempts <= 10
         ):
             raise DailyPaperWorkflowError("maximum_attempts is invalid")
-        if self.mode != "PAPER_ONLY" or self.schema_version != WORKFLOW_SPEC_SCHEMA:
+        if self.mode != "PAPER_ONLY" or self.schema_version not in {
+            LEGACY_WORKFLOW_SPEC_SCHEMA,
+            WORKFLOW_SPEC_SCHEMA,
+        }:
             raise DailyPaperWorkflowError("workflow authority boundary is invalid")
+        if self.schema_version == LEGACY_WORKFLOW_SPEC_SCHEMA and (
+            self.portfolio_genesis_artifact_id is not None
+            or self.previous_rollover_id is not None
+        ):
+            raise DailyPaperWorkflowError("legacy workflow cannot carry rollover lineage")
         object.__setattr__(self, "workflow_id", self._calculated_id())
 
     def _calculated_id(self) -> str:
+        omitted = {"workflow_id"}
+        if self.schema_version == LEGACY_WORKFLOW_SPEC_SCHEMA:
+            omitted.update(
+                {"portfolio_genesis_artifact_id", "previous_rollover_id"}
+            )
         return content_id(
             {
                 item.name: getattr(self, item.name)
                 for item in fields(self)
-                if item.name != "workflow_id"
+                if item.name not in omitted
             },
             length=64,
         )
@@ -150,6 +180,9 @@ class DailyPaperWorkflowOutput:
     outcome_manifest_pins: tuple[PublishedManifestPin, ...]
     portfolio_manifest_pin: PublishedManifestPin | None
     telegram_receipt_id: str
+    rollover_request_id: str | None = None
+    rollover_id: str | None = None
+    rollover_manifest_pin: PublishedManifestPin | None = None
     schema_version: str = WORKFLOW_OUTPUT_SCHEMA
     output_id: str = field(init=False)
 
@@ -178,6 +211,25 @@ class DailyPaperWorkflowOutput:
             if type(self.portfolio_manifest_pin) is not PublishedManifestPin:
                 raise DailyPaperWorkflowError("portfolio manifest pin is invalid")
             self.portfolio_manifest_pin.verify_content_identity()
+        for value, name in (
+            (self.rollover_request_id, "rollover_request_id"),
+            (self.rollover_id, "rollover_id"),
+        ):
+            if value is not None:
+                _sha(value, name)
+        if self.rollover_manifest_pin is not None:
+            if type(self.rollover_manifest_pin) is not PublishedManifestPin:
+                raise DailyPaperWorkflowError("rollover manifest pin is invalid")
+            self.rollover_manifest_pin.verify_content_identity()
+        rollover_values = (
+            self.rollover_request_id,
+            self.rollover_id,
+            self.rollover_manifest_pin,
+        )
+        if any(value is None for value in rollover_values) and any(
+            value is not None for value in rollover_values
+        ):
+            raise DailyPaperWorkflowError("workflow rollover output is incomplete")
         _sha(self.telegram_receipt_id, "telegram_receipt_id")
         if self.status is DailyPaperWorkflowOutputStatus.COMPLETE:
             if (
@@ -195,19 +247,34 @@ class DailyPaperWorkflowOutput:
                 self.batch_id,
                 self.state_id,
                 self.portfolio_manifest_pin,
+                self.rollover_request_id,
+                self.rollover_id,
+                self.rollover_manifest_pin,
             )
         ) or self.outcome_manifest_pins:
             raise DailyPaperWorkflowError("no-position workflow output implies portfolio work")
-        if self.schema_version != WORKFLOW_OUTPUT_SCHEMA:
+        if self.schema_version not in {
+            LEGACY_WORKFLOW_OUTPUT_SCHEMA,
+            WORKFLOW_OUTPUT_SCHEMA,
+        }:
             raise DailyPaperWorkflowError("workflow output schema is unsupported")
+        if self.schema_version == LEGACY_WORKFLOW_OUTPUT_SCHEMA and any(
+            value is not None for value in rollover_values
+        ):
+            raise DailyPaperWorkflowError("legacy workflow output cannot carry rollover lineage")
         object.__setattr__(self, "output_id", self._calculated_id())
 
     def _calculated_id(self) -> str:
+        omitted = {"output_id"}
+        if self.schema_version == LEGACY_WORKFLOW_OUTPUT_SCHEMA:
+            omitted.update(
+                {"rollover_request_id", "rollover_id", "rollover_manifest_pin"}
+            )
         return content_id(
             {
                 item.name: getattr(self, item.name)
                 for item in fields(self)
-                if item.name != "output_id"
+                if item.name not in omitted
             },
             length=64,
         )
@@ -240,14 +307,35 @@ class DailyPaperWorkflowTerminal:
         object.__setattr__(self, "terminal_id", self._calculated_id())
 
     def _calculated_id(self) -> str:
-        return content_id(
-            {
-                item.name: getattr(self, item.name)
-                for item in fields(self)
-                if item.name != "terminal_id"
-            },
-            length=64,
-        )
+        material = {
+            item.name: getattr(self, item.name)
+            for item in fields(self)
+            if item.name != "terminal_id"
+        }
+        if self.output.schema_version == LEGACY_WORKFLOW_OUTPUT_SCHEMA:
+            # v1 terminal identity embedded the then-smaller output dataclass.
+            # Remove only the v2 fields from its canonical node so historical
+            # terminal IDs remain exactly reproducible and verifiable.
+            canonical = canonical_identity(material)
+            for key, value in canonical["$mapping"]:
+                if key == "output":
+                    output_fields = value["fields"]
+                    for name in (
+                        "rollover_request_id",
+                        "rollover_id",
+                        "rollover_manifest_pin",
+                    ):
+                        output_fields.pop(name, None)
+                    break
+            payload = json.dumps(
+                canonical,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            return hashlib.sha256(payload).hexdigest()
+        return content_id(material, length=64)
 
     def verify_content_identity(self) -> None:
         if self.terminal_id != self._calculated_id():

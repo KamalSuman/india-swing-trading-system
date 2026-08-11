@@ -33,6 +33,7 @@ class CorporateActionType(str, Enum):
     SYMBOL_CHANGE = "SYMBOL_CHANGE"
     ISIN_CHANGE = "ISIN_CHANGE"
     DELISTING = "DELISTING"
+    BUYBACK = "BUYBACK"
 
 
 class CorporateActionStatus(str, Enum):

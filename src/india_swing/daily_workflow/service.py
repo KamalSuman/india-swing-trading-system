@@ -23,6 +23,7 @@ from india_swing.paper_outcomes import (
     LocalPaperPortfolioPreparationStore,
     LocalPaperPortfolioStateStore,
     PaperPortfolioPipelineBridgeError,
+    PaperPortfolioRolloverLineage,
     prepare_paper_portfolio_from_daily_pipeline,
     run_paper_portfolio_operational_service,
 )
@@ -164,6 +165,14 @@ class LocalDailyPaperWorkflowWorker:
             telegram_config=self.telegram_config,
             telegram_transport=self.telegram_transport,
             clock=self.clock,
+            rollover_lineage=(
+                None
+                if spec.portfolio_genesis_artifact_id is None
+                else PaperPortfolioRolloverLineage(
+                    genesis_artifact_id=spec.portfolio_genesis_artifact_id,
+                    previous_rollover_id=spec.previous_rollover_id,
+                )
+            ),
         )
         outcome_pins = tuple(
             sorted(
@@ -179,6 +188,18 @@ class LocalDailyPaperWorkflowWorker:
             )
         )
         portfolio_object = completed.portfolio_publication.manifest_object
+        rollover_manifest_pin = None
+        rollover_request_id = None
+        rollover_id = None
+        if completed.rollover is not None:
+            rollover_object = completed.rollover_publication.manifest_object
+            rollover_manifest_pin = PublishedManifestPin(
+                object_name=rollover_object.object_name,
+                generation=rollover_object.generation,
+                sha256=rollover_object.sha256,
+            )
+            rollover_request_id = completed.rollover_request_id
+            rollover_id = completed.rollover.rollover_id
         return DailyPaperWorkflowOutput(
             status=DailyPaperWorkflowOutputStatus.COMPLETE,
             preparation_id=prepared.preparation.preparation_id,
@@ -191,4 +212,7 @@ class LocalDailyPaperWorkflowWorker:
                 sha256=portfolio_object.sha256,
             ),
             telegram_receipt_id=completed.telegram_receipt.receipt_id,
+            rollover_request_id=rollover_request_id,
+            rollover_id=rollover_id,
+            rollover_manifest_pin=rollover_manifest_pin,
         )

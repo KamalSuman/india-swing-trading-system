@@ -30,6 +30,10 @@ from india_swing.daily_workflow.store import (
     encode_workflow_spec,
     encode_workflow_terminal,
 )
+from india_swing.daily_workflow.models import (
+    LEGACY_WORKFLOW_OUTPUT_SCHEMA,
+    LEGACY_WORKFLOW_SPEC_SCHEMA,
+)
 
 
 UTC = timezone.utc
@@ -354,6 +358,88 @@ class DailyWorkflowTests(unittest.TestCase):
                 telegram_receipt_id="f" * 64,
             )
 
+    def test_rollover_lineage_and_manifest_pin_are_canonical_and_legacy_safe(self) -> None:
+        spec = DailyPaperWorkflowSpec(
+            run_id="a" * 64,
+            derived_evidence_id="b" * 64,
+            state_bucket="paper-state-bucket",
+            portfolio_genesis_artifact_id="1" * 64,
+            previous_rollover_id="2" * 64,
+        )
+        output = DailyPaperWorkflowOutput(
+            status=DailyPaperWorkflowOutputStatus.COMPLETE,
+            preparation_id="c" * 64,
+            batch_id="d" * 64,
+            state_id="e" * 64,
+            outcome_manifest_pins=(
+                _pin("paper-outcomes/a/manifests/a.json", "4"),
+            ),
+            portfolio_manifest_pin=_pin(
+                "paper-portfolios/d/manifests/e.json", "5"
+            ),
+            telegram_receipt_id="f" * 64,
+            rollover_request_id="6" * 64,
+            rollover_id="7" * 64,
+            rollover_manifest_pin=_pin(
+                "paper-portfolio-rollovers/e/manifests/f.json", "8"
+            ),
+        )
+        self.assertEqual(decode_workflow_spec(encode_workflow_spec(spec)), spec)
+        terminal = DailyPaperWorkflowTerminal(
+            workflow_id=spec.workflow_id,
+            output=output,
+            started_at=NOW,
+            completed_at=NOW + timedelta(seconds=1),
+        )
+        self.assertEqual(
+            decode_workflow_terminal(encode_workflow_terminal(terminal)),
+            terminal,
+        )
+        with self.assertRaisesRegex(DailyPaperWorkflowError, "incomplete"):
+            DailyPaperWorkflowOutput(
+                status=DailyPaperWorkflowOutputStatus.COMPLETE,
+                preparation_id="c" * 64,
+                batch_id="d" * 64,
+                state_id="e" * 64,
+                outcome_manifest_pins=(
+                    _pin("paper-outcomes/a/manifests/a.json", "4"),
+                ),
+                portfolio_manifest_pin=_pin(
+                    "paper-portfolios/d/manifests/e.json", "5"
+                ),
+                telegram_receipt_id="f" * 64,
+                rollover_request_id="6" * 64,
+            )
+
+        legacy_spec = DailyPaperWorkflowSpec(
+            run_id="a" * 64,
+            derived_evidence_id="b" * 64,
+            state_bucket="paper-state-bucket",
+            schema_version=LEGACY_WORKFLOW_SPEC_SCHEMA,
+        )
+        legacy_output = DailyPaperWorkflowOutput(
+            status=DailyPaperWorkflowOutputStatus.NO_ACTIVE_POSITIONS,
+            preparation_id=None,
+            batch_id=None,
+            state_id=None,
+            outcome_manifest_pins=(),
+            portfolio_manifest_pin=None,
+            telegram_receipt_id="9" * 64,
+            schema_version=LEGACY_WORKFLOW_OUTPUT_SCHEMA,
+        )
+        self.assertEqual(
+            decode_workflow_spec(encode_workflow_spec(legacy_spec)), legacy_spec
+        )
+        legacy_terminal = DailyPaperWorkflowTerminal(
+            workflow_id=legacy_spec.workflow_id,
+            output=legacy_output,
+            started_at=NOW,
+            completed_at=NOW,
+        )
+        self.assertEqual(
+            decode_workflow_terminal(encode_workflow_terminal(legacy_terminal)),
+            legacy_terminal,
+        )
     def test_concrete_worker_sends_one_idempotent_no_position_heartbeat(self) -> None:
         evidence_root = self.root / "evidence"
         state_root = self.root / "state"

@@ -21,7 +21,13 @@ from india_swing.notifications import TelegramBotConfig, UrllibTelegramHTTPTrans
 
 def _arguments(argv: Sequence[str]) -> dict[str, str]:
     required = {"--run-id", "--derived-evidence-id", "--evidence-root", "--state-root"}
-    optional = {"--daily-loss-limit", "--cumulative-loss-limit", "--maximum-attempts"}
+    optional = {
+        "--daily-loss-limit",
+        "--cumulative-loss-limit",
+        "--maximum-attempts",
+        "--portfolio-genesis-artifact-id",
+        "--previous-rollover-id",
+    }
     allowed = required | optional
     values: dict[str, str] = {}
     index = 0
@@ -51,6 +57,10 @@ def main(
             run_id=values["--run-id"],
             derived_evidence_id=values["--derived-evidence-id"],
             state_bucket=runtime["INDIA_SWING_PAPER_OUTCOME_STATE_BUCKET"],
+            portfolio_genesis_artifact_id=values.get(
+                "--portfolio-genesis-artifact-id"
+            ),
+            previous_rollover_id=values.get("--previous-rollover-id"),
             daily_loss_limit=Decimal(values.get("--daily-loss-limit", "1000")),
             cumulative_loss_limit=Decimal(
                 values.get("--cumulative-loss-limit", "2000")
@@ -81,6 +91,23 @@ def main(
                     "derived_evidence_id": spec.derived_evidence_id,
                     "output_id": output.output_id,
                     "run_id": spec.run_id,
+                    "rollover_id": output.rollover_id,
+                    "rollover_manifest_generation": (
+                        None
+                        if output.rollover_manifest_pin is None
+                        else output.rollover_manifest_pin.generation
+                    ),
+                    "rollover_manifest_object_name": (
+                        None
+                        if output.rollover_manifest_pin is None
+                        else output.rollover_manifest_pin.object_name
+                    ),
+                    "rollover_manifest_sha256": (
+                        None
+                        if output.rollover_manifest_pin is None
+                        else output.rollover_manifest_pin.sha256
+                    ),
+                    "rollover_request_id": output.rollover_request_id,
                     "state_id": output.state_id,
                     "status": output.status.value,
                     "telegram_receipt_id": output.telegram_receipt_id,

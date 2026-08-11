@@ -24,6 +24,8 @@ from .models import (
     DailyPaperWorkflowOutputStatus,
     DailyPaperWorkflowSpec,
     DailyPaperWorkflowTerminal,
+    LEGACY_WORKFLOW_OUTPUT_SCHEMA,
+    LEGACY_WORKFLOW_SPEC_SCHEMA,
     PublishedManifestPin,
 )
 
@@ -128,9 +130,7 @@ def encode_workflow_spec(value: DailyPaperWorkflowSpec) -> bytes:
     if type(value) is not DailyPaperWorkflowSpec:
         raise DailyPaperWorkflowError("workflow spec must be exact")
     value.verify_content_identity()
-    return _dumps(
-        "SPEC",
-        {
+    body = {
             "cumulative_loss_limit": str(value.cumulative_loss_limit),
             "daily_loss_limit": str(value.daily_loss_limit),
             "derived_evidence_id": value.derived_evidence_id,
@@ -140,17 +140,27 @@ def encode_workflow_spec(value: DailyPaperWorkflowSpec) -> bytes:
             "schema_version": value.schema_version,
             "state_bucket": value.state_bucket,
             "workflow_id": value.workflow_id,
-        },
-    )
+    }
+    if value.schema_version != LEGACY_WORKFLOW_SPEC_SCHEMA:
+        body["portfolio_genesis_artifact_id"] = value.portfolio_genesis_artifact_id
+        body["previous_rollover_id"] = value.previous_rollover_id
+    return _dumps("SPEC", body)
 
 
 def decode_workflow_spec(payload: bytes) -> DailyPaperWorkflowSpec:
     raw = _envelope(payload, "SPEC")
-    expected = {
+    legacy_expected = {
         "cumulative_loss_limit", "daily_loss_limit", "derived_evidence_id",
         "maximum_attempts", "mode", "run_id", "schema_version", "state_bucket",
         "workflow_id",
     }
+    if raw.get("schema_version") == LEGACY_WORKFLOW_SPEC_SCHEMA:
+        expected = legacy_expected
+    else:
+        expected = legacy_expected | {
+            "portfolio_genesis_artifact_id",
+            "previous_rollover_id",
+        }
     if set(raw) != expected:
         raise DailyPaperWorkflowError("stored workflow spec fields are invalid")
     try:
@@ -158,6 +168,8 @@ def decode_workflow_spec(payload: bytes) -> DailyPaperWorkflowSpec:
             run_id=raw["run_id"],
             derived_evidence_id=raw["derived_evidence_id"],
             state_bucket=raw["state_bucket"],
+            portfolio_genesis_artifact_id=raw.get("portfolio_genesis_artifact_id"),
+            previous_rollover_id=raw.get("previous_rollover_id"),
             daily_loss_limit=Decimal(raw["daily_loss_limit"]),
             cumulative_loss_limit=Decimal(raw["cumulative_loss_limit"]),
             maximum_attempts=raw["maximum_attempts"],
@@ -175,7 +187,7 @@ def decode_workflow_spec(payload: bytes) -> DailyPaperWorkflowSpec:
 
 def _output_data(value: DailyPaperWorkflowOutput) -> dict[str, object]:
     value.verify_content_identity()
-    return {
+    body = {
         "batch_id": value.batch_id,
         "outcome_manifest_pins": [_pin_data(item) for item in value.outcome_manifest_pins],
         "output_id": value.output_id,
@@ -188,14 +200,31 @@ def _output_data(value: DailyPaperWorkflowOutput) -> dict[str, object]:
         "status": value.status.value,
         "telegram_receipt_id": value.telegram_receipt_id,
     }
+    if value.schema_version != LEGACY_WORKFLOW_OUTPUT_SCHEMA:
+        body["rollover_id"] = value.rollover_id
+        body["rollover_manifest_pin"] = (
+            None
+            if value.rollover_manifest_pin is None
+            else _pin_data(value.rollover_manifest_pin)
+        )
+        body["rollover_request_id"] = value.rollover_request_id
+    return body
 
 
 def _output(raw: object) -> DailyPaperWorkflowOutput:
-    expected = {
+    legacy_expected = {
         "batch_id", "outcome_manifest_pins", "output_id", "portfolio_manifest_pin",
         "preparation_id", "schema_version", "state_id", "status",
         "telegram_receipt_id",
     }
+    if type(raw) is dict and raw.get("schema_version") == LEGACY_WORKFLOW_OUTPUT_SCHEMA:
+        expected = legacy_expected
+    else:
+        expected = legacy_expected | {
+            "rollover_id",
+            "rollover_manifest_pin",
+            "rollover_request_id",
+        }
     if type(raw) is not dict or set(raw) != expected or type(raw["outcome_manifest_pins"]) is not list:
         raise DailyPaperWorkflowError("stored workflow output is invalid")
     value = DailyPaperWorkflowOutput(
@@ -208,6 +237,13 @@ def _output(raw: object) -> DailyPaperWorkflowOutput:
             None if raw["portfolio_manifest_pin"] is None else _pin(raw["portfolio_manifest_pin"])
         ),
         telegram_receipt_id=raw["telegram_receipt_id"],
+        rollover_request_id=raw.get("rollover_request_id"),
+        rollover_id=raw.get("rollover_id"),
+        rollover_manifest_pin=(
+            None
+            if raw.get("rollover_manifest_pin") is None
+            else _pin(raw["rollover_manifest_pin"])
+        ),
         schema_version=raw["schema_version"],
     )
     if value.output_id != raw["output_id"]:

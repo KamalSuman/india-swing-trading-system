@@ -46,6 +46,15 @@ class SwingPortfolioEvidenceKind(str, Enum):
 
 class SwingPortfolioVerificationStatus(str, Enum):
     MANUAL_RECONCILED_PAPER_ONLY = "MANUAL_RECONCILED_PAPER_ONLY"
+    DERIVED_RECONCILED_PAPER_ONLY = "DERIVED_RECONCILED_PAPER_ONLY"
+
+
+_MANUAL_EVIDENCE_KINDS = (
+    SwingPortfolioEvidenceKind.BROKER_FUNDS,
+    SwingPortfolioEvidenceKind.BROKER_POSITIONS,
+    SwingPortfolioEvidenceKind.ENGINE_RISK_LEDGER,
+    SwingPortfolioEvidenceKind.ENGINE_PNL_LEDGER,
+)
 
 
 def _sha(value: object, name: str) -> str:
@@ -131,7 +140,24 @@ class SwingPortfolioSnapshotArtifact:
             or any(type(value) is not SwingPortfolioEvidenceBinding for value in self.evidence)
         ):
             raise SwingPortfolioArtifactError("portfolio evidence must be an exact tuple")
-        expected_kinds = tuple(SwingPortfolioEvidenceKind)
+        if type(self.verification_status) is not SwingPortfolioVerificationStatus:
+            raise SwingPortfolioArtifactError("portfolio verification status must be exact")
+        if (
+            self.verification_status
+            is SwingPortfolioVerificationStatus.MANUAL_RECONCILED_PAPER_ONLY
+        ):
+            expected_kinds = _MANUAL_EVIDENCE_KINDS
+        elif (
+            self.verification_status
+            is SwingPortfolioVerificationStatus.DERIVED_RECONCILED_PAPER_ONLY
+        ):
+            # The existing evidence vocabulary is retained for codec and API
+            # compatibility. In derived paper mode these two broker-shaped
+            # lanes contain virtual cash and virtual position-mark statements,
+            # never live broker balances or holdings.
+            expected_kinds = _MANUAL_EVIDENCE_KINDS
+        else:
+            raise SwingPortfolioArtifactError("portfolio verification status is unsupported")
         if tuple(value.kind for value in self.evidence) != expected_kinds:
             raise SwingPortfolioArtifactError(
                 "portfolio evidence must contain every required kind in canonical order"
@@ -146,12 +172,8 @@ class SwingPortfolioSnapshotArtifact:
             or any(value.observed_at > self.reconciled_at for value in self.evidence)
         ):
             raise SwingPortfolioArtifactError("portfolio reconciliation time is inconsistent")
-        if type(self.verification_status) is not SwingPortfolioVerificationStatus:
-            raise SwingPortfolioArtifactError("portfolio verification status must be exact")
         if (
-            self.verification_status
-            is not SwingPortfolioVerificationStatus.MANUAL_RECONCILED_PAPER_ONLY
-            or self.mode != "PAPER_ONLY"
+            self.mode != "PAPER_ONLY"
             or self.schema_version != PORTFOLIO_ARTIFACT_SCHEMA_VERSION
         ):
             raise SwingPortfolioArtifactError("portfolio artifact authority is invalid")
