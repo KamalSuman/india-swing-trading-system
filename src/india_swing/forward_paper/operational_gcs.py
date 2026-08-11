@@ -24,8 +24,9 @@ from india_swing.forward_paper.operational import (
     assemble_forward_paper_operational_research_graph,
 )
 from india_swing.identity import content_id
-from india_swing.tick_sizes.effective_session import (
-    VerifiedPromotedEffectiveSessionTickPanel,
+from india_swing.forward_paper.signal_tick import (
+    ForwardPaperTickPanel,
+    is_forward_paper_tick_panel,
 )
 
 
@@ -56,7 +57,7 @@ class ForwardPaperCorporateActionSnapshotResolver(Protocol):
 
 
 class ForwardPaperEffectiveTickPanelResolver(Protocol):
-    def get(self, panel_id: str) -> VerifiedPromotedEffectiveSessionTickPanel: ...
+    def get(self, panel_id: str) -> ForwardPaperTickPanel: ...
 
 
 def _fail(message: str) -> None:
@@ -496,7 +497,7 @@ def restore_forward_paper_operational_graph(
             or source.spec.spec_id != manifest.source_spec_id
             or type(actions) is not CorporateActionSnapshot
             or actions.snapshot_id != manifest.corporate_action_snapshot_id
-            or type(ticks) is not VerifiedPromotedEffectiveSessionTickPanel
+            or not is_forward_paper_tick_panel(ticks)
             or ticks.panel_id != manifest.tick_panel_id
         ):
             raise ValueError

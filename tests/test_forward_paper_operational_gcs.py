@@ -22,7 +22,10 @@ from india_swing.forward_paper.operational_gcs import (
     restore_forward_paper_operational_graph,
 )
 
-from tests.test_forward_paper_operational import _operational_artifacts
+from tests.test_forward_paper_operational import (
+    _direct_tick_panel,
+    _operational_artifacts,
+)
 
 
 class FakeWriter:
@@ -101,7 +104,7 @@ class ForwardPaperOperationalGCSTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.temporary = tempfile.TemporaryDirectory()
-        raw, actions, ticks, _ = _operational_artifacts(Path(cls.temporary.name))
+        raw, actions, ticks, first = _operational_artifacts(Path(cls.temporary.name))
         cls.raw = raw
         cls.actions = actions
         cls.ticks = ticks
@@ -109,6 +112,12 @@ class ForwardPaperOperationalGCSTests(unittest.TestCase):
             source_window=raw,
             corporate_actions=actions,
             tick_panel=ticks,
+        )
+        cls.direct_ticks = _direct_tick_panel(raw, ticks, first)
+        cls.direct_graph = assemble_forward_paper_operational_research_graph(
+            source_window=raw,
+            corporate_actions=actions,
+            tick_panel=cls.direct_ticks,
         )
         cls.bucket = "india-swing-test-state"
 
@@ -166,6 +175,27 @@ class ForwardPaperOperationalGCSTests(unittest.TestCase):
         self.assertEqual(history.calls, [self.raw.spec.spec_id])
         self.assertEqual(actions.calls, [self.actions.snapshot_id])
         self.assertEqual(ticks.calls, [self.ticks.panel_id])
+
+    def test_direct_signal_tick_panel_survives_publish_and_exact_restore(self) -> None:
+        writer = FakeWriter()
+        completed = publish_forward_paper_operational_graph(
+            graph=self.direct_graph,
+            bucket=self.bucket,
+            writer=writer,
+        )
+        restored = restore_forward_paper_operational_graph(
+            expected_graph_id=self.direct_graph.graph_id,
+            bucket=self.bucket,
+            manifest_object_name=completed.manifest_object.object_name,
+            manifest_generation=completed.manifest_object.generation,
+            manifest_sha256=completed.manifest_object.sha256,
+            reader=FakeReader(writer),
+            history_windows=ExactResolver(self.raw),
+            corporate_actions=ExactResolver(self.actions),
+            tick_panels=ExactResolver(self.direct_ticks),
+        )
+        self.assertEqual(restored.graph_id, self.direct_graph.graph_id)
+        self.assertEqual(restored.tick_panel.panel_id, self.direct_ticks.panel_id)
 
     def test_wrong_pin_and_wrong_exact_resolver_fail_closed(self) -> None:
         writer, completed = self._publication()

@@ -7,11 +7,14 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from india_swing.forward_paper.operational_cloud_job import (
     ForwardPaperOperationalCloudRuntime,
+    _default_runtime_factory,
     main,
 )
+from india_swing.forward_paper.signal_tick import ExactForwardPaperTickPanelResolver
 from india_swing.forward_paper.operational_job import (
     NseArchiveForwardPaperHistoryBuilder,
 )
@@ -132,6 +135,36 @@ class ForwardPaperOperationalCloudJobTests(unittest.TestCase):
             code = main(argv, runtime_factory=lambda value: calls.append(value))
         self.assertEqual(code, 2)
         self.assertEqual(calls, [])
+
+    def test_default_runtime_uses_signal_first_exact_tick_resolver(self) -> None:
+        arguments = type("Arguments", (), {})()
+        values = self._argv()
+        parser_values = {}
+        for index in range(0, len(values), 2):
+            parser_values[values[index][2:].replace("-", "_")] = values[index + 1]
+        for name, value in parser_values.items():
+            if name.endswith("_root"):
+                value = Path(value)
+            elif name == "dataset_generation":
+                value = int(value)
+            setattr(arguments, name, value)
+        legacy = object()
+        with patch(
+            "india_swing.forward_paper.operational_cloud_job."
+            "read_pinned_nse_archive_research_dataset",
+            return_value=self.dataset,
+        ), patch(
+            "india_swing.forward_paper.operational_cloud_job."
+            "build_promoted_engine_stores",
+            return_value=SimpleNamespace(effective_session_ticks=legacy),
+        ):
+            runtime = _default_runtime_factory(arguments, dataset_reader=object())
+        self.assertIsInstance(runtime.tick_panels, ExactForwardPaperTickPanelResolver)
+        self.assertIs(runtime.tick_panels.promoted_ticks, legacy)
+        self.assertEqual(
+            runtime.tick_panels.signal_ticks.root,
+            arguments.promoted_root / "forward-paper-signal-ticks",
+        )
 
 
 if __name__ == "__main__":

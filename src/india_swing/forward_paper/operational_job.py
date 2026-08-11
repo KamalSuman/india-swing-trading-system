@@ -34,8 +34,8 @@ from india_swing.identity import content_id
 from india_swing.market_data.nse_archive_range import (
     NseHistoricalArchiveSnapshotReader,
 )
-from india_swing.tick_sizes.effective_session import (
-    VerifiedPromotedEffectiveSessionTickPanel,
+from india_swing.forward_paper.signal_tick import (
+    is_forward_paper_tick_panel,
 )
 
 
@@ -296,7 +296,7 @@ def run_forward_paper_operational_job(
         if (
             type(actions) is not CorporateActionSnapshot
             or actions.snapshot_id != request.corporate_action_snapshot_id
-            or type(ticks) is not VerifiedPromotedEffectiveSessionTickPanel
+            or not is_forward_paper_tick_panel(ticks)
             or ticks.panel_id != request.tick_panel_id
         ):
             raise ValueError

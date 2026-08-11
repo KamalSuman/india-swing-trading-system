@@ -31,6 +31,10 @@ from india_swing.forward_paper.operational_job import (
     NseArchiveForwardPaperHistoryBuilder,
     run_forward_paper_operational_job,
 )
+from india_swing.forward_paper.signal_tick import (
+    ExactForwardPaperTickPanelResolver,
+    LocalForwardPaperSignalTickPanelStore,
+)
 from india_swing.market_data.snapshot_store import LocalMarketSnapshotStore
 from india_swing.promoted_engine import build_promoted_engine_stores
 
@@ -171,7 +175,10 @@ def _default_runtime_factory(
             reader=LocalMarketSnapshotStore(market_data_root),
         ),
         corporate_actions=LocalCorporateActionSnapshotStore(promoted_root),
-        tick_panels=engine_stores.effective_session_ticks,
+        tick_panels=ExactForwardPaperTickPanelResolver(
+            LocalForwardPaperSignalTickPanelStore(promoted_root),
+            engine_stores.effective_session_ticks,
+        ),
     )
 
 

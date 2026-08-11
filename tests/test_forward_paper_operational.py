@@ -4,6 +4,7 @@ import inspect
 import tempfile
 import unittest
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 
 from india_swing.corporate_actions.models import CorporateActionSnapshot
@@ -12,6 +13,10 @@ from india_swing.forward_paper.operational import (
     ForwardPaperOperationalGraphError,
     assemble_forward_paper_operational_research_graph,
 )
+from india_swing.forward_paper.signal_tick import (
+    materialize_forward_paper_signal_tick_panel,
+)
+from india_swing.reference_data.security_master import NseCmSecurityMasterParser
 from india_swing.reference.models import ReferenceReadiness
 from india_swing.tick_sizes.effective_session import PromotedEffectiveSessionTickService
 
@@ -19,6 +24,7 @@ from tests.test_forward_paper_history import _window_for
 from tests.test_nse_archive_research_dataset import _baseline_dataset, _fake_sha256
 from tests.test_nse_archive_research_identity import _record, _session
 from tests.test_promoted_feature_inputs import _panels
+from tests.test_reference_data_import import security_master_bytes, security_row
 
 
 def _operational_artifacts(root: Path):
@@ -64,6 +70,26 @@ def _operational_artifacts(root: Path):
         reason_codes=(),
     )
     return raw, snapshot, tick_panel, first
+
+
+def _direct_tick_panel(raw, legacy_tick_panel, first):
+    source_tick = first.source_observation.tick_entry
+    assert source_tick is not None
+    isin = source_tick.frame_entry.universe_entry.validated_isin
+    signal_session = raw.spec.signal_session
+    parsed = NseCmSecurityMasterParser().parse_bytes(
+        security_master_bytes(
+            [security_row(TckrSymb="OPTEST", ISIN=isin, BidIntrvl="5")]
+        ),
+        original_filename=(
+            f"NSE_CM_security_{signal_session.strftime('%d%m%Y')}.csv.gz"
+        ),
+    )
+    return materialize_forward_paper_signal_tick_panel(
+        parsed,
+        knowledge_time=legacy_tick_panel.knowledge_time,
+        cutoff=raw.spec.decision_cutoff,
+    )
 
 
 class ForwardPaperOperationalResearchGraphTests(unittest.TestCase):
@@ -132,6 +158,20 @@ class ForwardPaperOperationalResearchGraphTests(unittest.TestCase):
             tick_panel=tick_panel,
         )
         self.assertEqual(first.graph_id, second.graph_id)
+
+    def test_direct_signal_session_master_panel_assembles_the_same_candidate(self) -> None:
+        raw, snapshot, tick_panel, first = self._artifacts()
+        direct = _direct_tick_panel(raw, tick_panel, first)
+        graph = assemble_forward_paper_operational_research_graph(
+            source_window=raw,
+            corporate_actions=snapshot,
+            tick_panel=direct,
+        )
+        self.assertEqual(len(graph.identity_bindings), 1)
+        self.assertEqual(len(graph.tick_specifications), 1)
+        self.assertEqual(graph.tick_specifications[0].tick_size, Decimal("0.05"))
+        self.assertEqual(graph.unmatched_tick_result_count, 0)
+        graph.verify_content_identity()
 
     def test_future_known_tick_panel_fails_closed(self) -> None:
         raw, snapshot, tick_panel, _ = self._artifacts()

@@ -31,16 +31,20 @@ from india_swing.forward_paper.history import (
     ForwardPaperHistoryCandidate,
     ForwardPaperRawHistoryWindow,
 )
+from india_swing.forward_paper.signal_tick import (
+    ForwardPaperSignalTickPanel,
+    ForwardPaperTickPanel,
+    is_forward_paper_tick_panel,
+)
 from india_swing.identity import content_id
 from india_swing.tick_sizes.effective_session import (
     PromotedEffectiveSessionTickStatus,
-    VerifiedPromotedEffectiveSessionTickPanel,
 )
 
 
-FORWARD_PAPER_OPERATIONAL_GRAPH_SCHEMA_VERSION = "forward-paper-operational-graph-v1"
+FORWARD_PAPER_OPERATIONAL_GRAPH_SCHEMA_VERSION = "forward-paper-operational-graph-v2"
 FORWARD_PAPER_OPERATIONAL_GRAPH_POLICY_VERSION = (
-    "exact-pinned-evidence-collection-only-v1"
+    "exact-pinned-signal-session-tick-evidence-collection-only-v2"
 )
 
 
@@ -84,7 +88,7 @@ def _source_isin(result: object) -> str:
 def _derive_inputs(
     *,
     source_window: ForwardPaperRawHistoryWindow,
-    tick_panel: VerifiedPromotedEffectiveSessionTickPanel,
+    tick_panel: ForwardPaperTickPanel,
 ) -> tuple[
     tuple[ForwardPaperCorporateActionIdentityBinding, ...],
     tuple[EffectiveTickSize, ...],
@@ -102,40 +106,66 @@ def _derive_inputs(
     selected: dict[str, EffectiveTickSize] = {}
     unmatched = 0
 
-    for result in tick_panel.results:
-        if (
-            result.status
-            is not PromotedEffectiveSessionTickStatus.VERIFIED_EXACT_SESSION_ONLY
-        ):
-            unmatched += 1
-            continue
-        specification = result.tick_specification
-        if specification is None:
-            _fail("forward paper operational verified tick is incomplete")
-        failed = False
-        research_identity_id = None
-        try:
-            research_identity_id = research_identity_id_for_isin(_source_isin(result))
-        except ForwardPaperOperationalGraphError:
-            raise
-        except Exception:
-            failed = True
-        if failed or research_identity_id is None:
-            _fail("forward paper operational tick identity evidence is invalid")
-        if research_identity_id not in candidate_ids:
-            unmatched += 1
-            continue
-        mapping = (result.stable_instrument_id, result.stable_listing_id)
-        mappings.setdefault(research_identity_id, set()).add(mapping)
-        if result.market_session not in expected_sessions:
-            unmatched += 1
-            continue
-        if result.market_session != signal_session:
-            unmatched += 1
-            continue
-        if specification.specification_id in selected:
-            _fail("forward paper operational tick evidence is duplicated")
-        selected[specification.specification_id] = specification
+    if type(tick_panel) is ForwardPaperSignalTickPanel:
+        if tick_panel.signal_session != signal_session:
+            _fail("forward paper operational tick session is invalid")
+        for entry in tick_panel.entries:
+            failed = False
+            research_identity_id = None
+            try:
+                research_identity_id = research_identity_id_for_isin(
+                    entry.validated_isin
+                )
+            except Exception:
+                failed = True
+            if failed or research_identity_id is None:
+                _fail("forward paper operational tick identity evidence is invalid")
+            if research_identity_id not in candidate_ids:
+                unmatched += 1
+                continue
+            mapping = (entry.stable_instrument_id, entry.stable_listing_id)
+            mappings.setdefault(research_identity_id, set()).add(mapping)
+            specification = entry.tick_specification
+            if specification.specification_id in selected:
+                _fail("forward paper operational tick evidence is duplicated")
+            selected[specification.specification_id] = specification
+    else:
+        for result in tick_panel.results:
+            if (
+                result.status
+                is not PromotedEffectiveSessionTickStatus.VERIFIED_EXACT_SESSION_ONLY
+            ):
+                unmatched += 1
+                continue
+            specification = result.tick_specification
+            if specification is None:
+                _fail("forward paper operational verified tick is incomplete")
+            failed = False
+            research_identity_id = None
+            try:
+                research_identity_id = research_identity_id_for_isin(
+                    _source_isin(result)
+                )
+            except ForwardPaperOperationalGraphError:
+                raise
+            except Exception:
+                failed = True
+            if failed or research_identity_id is None:
+                _fail("forward paper operational tick identity evidence is invalid")
+            if research_identity_id not in candidate_ids:
+                unmatched += 1
+                continue
+            mapping = (result.stable_instrument_id, result.stable_listing_id)
+            mappings.setdefault(research_identity_id, set()).add(mapping)
+            if result.market_session not in expected_sessions:
+                unmatched += 1
+                continue
+            if result.market_session != signal_session:
+                unmatched += 1
+                continue
+            if specification.specification_id in selected:
+                _fail("forward paper operational tick evidence is duplicated")
+            selected[specification.specification_id] = specification
 
     bindings: list[ForwardPaperCorporateActionIdentityBinding] = []
     for candidate in candidates:
@@ -178,7 +208,7 @@ class ForwardPaperOperationalResearchGraph:
 
     source_window: ForwardPaperRawHistoryWindow
     corporate_actions: CorporateActionSnapshot
-    tick_panel: VerifiedPromotedEffectiveSessionTickPanel
+    tick_panel: ForwardPaperTickPanel
     identity_bindings: tuple[ForwardPaperCorporateActionIdentityBinding, ...]
     tick_specifications: tuple[EffectiveTickSize, ...]
     adjusted_window: ForwardPaperAdjustedHistoryWindow
@@ -198,7 +228,7 @@ class ForwardPaperOperationalResearchGraph:
             _fail("forward paper operational source window is invalid")
         if type(self.corporate_actions) is not CorporateActionSnapshot:
             _fail("forward paper operational corporate actions are invalid")
-        if type(self.tick_panel) is not VerifiedPromotedEffectiveSessionTickPanel:
+        if not is_forward_paper_tick_panel(self.tick_panel):
             _fail("forward paper operational tick panel is invalid")
         for value, message in (
             (self.source_window, "forward paper operational source failed verification"),
@@ -313,7 +343,7 @@ def assemble_forward_paper_operational_research_graph(
     *,
     source_window: ForwardPaperRawHistoryWindow,
     corporate_actions: CorporateActionSnapshot,
-    tick_panel: VerifiedPromotedEffectiveSessionTickPanel,
+    tick_panel: ForwardPaperTickPanel,
 ) -> ForwardPaperOperationalResearchGraph:
     """Join three exact pinned artifacts and compute the descriptive graph."""
 
@@ -321,7 +351,7 @@ def assemble_forward_paper_operational_research_graph(
         _fail("forward paper operational source window is invalid")
     if type(corporate_actions) is not CorporateActionSnapshot:
         _fail("forward paper operational corporate actions are invalid")
-    if type(tick_panel) is not VerifiedPromotedEffectiveSessionTickPanel:
+    if not is_forward_paper_tick_panel(tick_panel):
         _fail("forward paper operational tick panel is invalid")
     _verify(source_window, "forward paper operational source failed verification")
     _verify(

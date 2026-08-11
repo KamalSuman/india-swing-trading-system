@@ -57,8 +57,8 @@ This is the durable execution order for reaching the first safe, live paper-trad
      liquidity, contraction, and tick-friction evidence. Degenerate inputs are
      vetoed without partial vectors, and outputs remain collection-only.
    - The pure operational research-graph assembler is implemented. It accepts only
-     an exact raw-history window, corporate-action snapshot, and promoted
-     exact-session tick panel; derives research-to-stable identity bindings from
+     an exact raw-history window, corporate-action snapshot, and exact-session tick
+     panel; derives research-to-stable identity bindings from
      retained same-session ISIN evidence; rejects future or ambiguous lineage; and
      materializes the adjustment, feature-input, and technical-feature graph under
      one content identity. Missing signal-session tick coverage remains an explicit
@@ -71,6 +71,14 @@ This is the durable execution order for reaching the first safe, live paper-trad
      payload to trust. Wiring real artifact resolvers into the operational job and
      producing the first real manifest remain before this step is accepted end to
      end.
+   - A standalone signal-session tick artifact is now implemented for the daily
+     path. It derives one-day tick specifications directly from one exact NSE MII
+     security master, retains active normal-market EQ/SM listings including both
+     NSE permitted-to-trade lanes, binds the source bytes/knowledge time/cutoff,
+     and persists by exact content ID. The operational graph, job, manifest restore,
+     and default cloud runtime accept this artifact while preserving the legacy
+     promoted-panel resolver as an exact-ID fallback; neither path lists or selects
+     a latest object.
    - The exact-input operational job service now reconstructs the raw 60-session
      window through the verified NSE archive dataset stream, resolves the pinned
      corporate-action snapshot and promoted tick panel, invokes the assembler, and
@@ -106,7 +114,10 @@ This is the durable execution order for reaching the first safe, live paper-trad
      used as the earliest provable knowledge time, so importing old events today
      cannot make them available to an earlier backtest. The real 23-Jul-2026 CSV
      and exact 23-Jul security master passed an ephemeral end-to-end import (20/20
-     economic rows) without modifying operational state.
+     economic rows) without modifying operational state. The genuine 12-Feb through
+     12-Aug CSV is now persisted as snapshot
+     `0aef166c01f8a124123887dcd1094db871d6cb1c4a4525fee15564998fc9a5b4`
+     with 878 economic events and zero silent drops.
 
 4. **First genuine promoted research run** — PENDING
    - Run the deterministic baseline/challenger on real adjusted evidence.
@@ -133,10 +144,10 @@ This is the durable execution order for reaching the first safe, live paper-trad
 - The verified archive dataset contains 2,849 accepted sessions and 4,792,827 records. It remains deliberately `collection_only=true`, `actionable=false`, `feature_eligible=false`, and `training_eligible=false` until the adjustment/feature controls in later steps are satisfied.
 - Published dataset identity: `cbb8c74ee3978cc0cd412b73251df903e2af28bd4101f30549b4833e039b8cd2`.
 - Published object: `gs://swing-data-indian-swing-trading-bot/research/nse-archive-datasets/v1/cbb8c74ee3978cc0cd412b73251df903e2af28bd4101f30549b4833e039b8cd2.json`, generation `1786469190290325`, size 537,704 bytes, SHA-256 `25a8c43e07c0b6f678d8b006881cc27e5475c67e06932dd074d4a9c043ac4c83`.
+- Genuine corporate-action snapshot ID: `0aef166c01f8a124123887dcd1094db871d6cb1c4a4525fee15564998fc9a5b4`.
+- Genuine 31-Jul-2026 signal-session tick-panel ID: `043d0a651476b0d8e34c97a7c02d7f97c9d9176d8920fde00c1b314f5baa84fe` (2,494 active normal-market EQ/SM listings, exact source master ID `5c3b3113e7c147a5be79a725f025b53b5d16f8f0826fc9ba5d8ed0198a6ef8d7`).
 - The next immediate gap is producing and deploying one genuine path-free launch:
-  download one NSE corporate-action CSV covering the exact 60-session window,
-  materialize its real snapshot plus the signal-session tick-panel ID, select the
-  exact 60 sessions,
+  select the exact 60 sessions,
   bind them to the already-pinned dataset and promoted-input snapshot, execute the
   first manifest build manually, and then feed its verified feature graph into the
   first promoted research run.
