@@ -520,6 +520,7 @@ class ForwardPaperRawHistoryWindow:
             _fail("forward paper raw history window sessions are invalid")
 
         session_ids: list[str] = []
+        session_indexes: list[_SessionIdentityIndex] = []
         for expected_date, session in zip(expected_sessions, self.sessions, strict=True):
             if type(session) is not NseArchiveResearchPriceStreamSession:
                 _fail("forward paper raw history window session type is invalid")
@@ -541,6 +542,7 @@ class ForwardPaperRawHistoryWindow:
                     "decision cutoff"
                 )
             session_ids.append(session.price_stream_session_id)
+            session_indexes.append(_build_session_identity_index(session))
         if len(set(session_ids)) != len(session_ids):
             _fail("forward paper raw history window sessions are duplicated")
 
@@ -577,14 +579,10 @@ class ForwardPaperRawHistoryWindow:
                         "forward paper raw history window candidate history sessions "
                         "disagree with its spec"
                     )
-                for session, observation in zip(
-                    self.sessions, outcome.history_observations, strict=True
+                for session_index, observation in zip(
+                    session_indexes, outcome.history_observations, strict=True
                 ):
-                    retained_matches = tuple(
-                        value
-                        for value in session.observations
-                        if value.research_identity_id == outcome.research_identity_id
-                    )
+                    retained_matches = session_index.get(outcome.research_identity_id, ())
                     if (
                         len(retained_matches) != 1
                         or retained_matches[0].observation_id != observation.observation_id
@@ -603,7 +601,7 @@ class ForwardPaperRawHistoryWindow:
                         "forward paper raw history window veto is out of order with "
                         "its signal session"
                     )
-                self._verify_veto_evidence(outcome, session_ids)
+                self._verify_veto_evidence(outcome, session_ids, session_indexes)
                 veto_count += 1
             else:
                 _fail("forward paper raw history window outcome type is invalid")
@@ -642,13 +640,18 @@ class ForwardPaperRawHistoryWindow:
         ):
             _fail("forward paper raw history window safety posture is invalid")
 
-    def _verify_veto_evidence(self, veto: ForwardPaperHistoryVeto, session_ids: list[str]) -> None:
+    def _verify_veto_evidence(
+        self,
+        veto: ForwardPaperHistoryVeto,
+        session_ids: list[str],
+        session_indexes: list[_SessionIdentityIndex],
+    ) -> None:
         """Independently re-derive the complete expected evidence and require exact equality.
 
-        Scans every one of the 60 retained sessions -- never only the
-        sessions the veto itself names -- so a veto cannot pass by
-        supplying a merely valid subset of a multi-session anomaly. An
-        omission, extra, reorder, duplicate, or unrelated ID all fail the
+        Consults every one of the 60 retained sessions' identity indexes --
+        never only the sessions the veto itself names -- so a veto cannot
+        pass by supplying a merely valid subset of a multi-session anomaly.
+        An omission, extra, reorder, duplicate, or unrelated ID all fail the
         same exact tuple-equality check.
         """
 
@@ -663,12 +666,8 @@ class ForwardPaperRawHistoryWindow:
         expected_missing_session_ids: list[str] = []
         expected_duplicated_session_ids: list[str] = []
         expected_duplicated_observation_ids: list[str] = []
-        for index, session in enumerate(self.sessions):
-            retained_matches = tuple(
-                value
-                for value in session.observations
-                if value.research_identity_id == veto.research_identity_id
-            )
+        for index, session_index in enumerate(session_indexes):
+            retained_matches = session_index.get(veto.research_identity_id, ())
             if len(retained_matches) == 0:
                 expected_missing_session_ids.append(session_ids[index])
             elif len(retained_matches) > 1:
@@ -744,11 +743,36 @@ class ForwardPaperRawHistoryWindow:
             _fail("forward paper raw history window identity failed")
 
 
+_SessionIdentityIndex = dict[str, tuple[NseArchiveResearchPriceObservation, ...]]
+
+
+def _build_session_identity_index(
+    session: NseArchiveResearchPriceStreamSession,
+) -> _SessionIdentityIndex:
+    """Map each resolved ``research_identity_id`` in ``session`` to its exact observations.
+
+    Preserves original stored order and every duplicate -- never
+    overwrites -- so a lookup's cardinality (0, 1, or many) distinguishes
+    missing, resolved, and duplicated identities. Unresolved observations
+    (``research_identity_id is None``) are never entered under a
+    fabricated key.
+    """
+
+    index: dict[str, list[NseArchiveResearchPriceObservation]] = {}
+    for observation in session.observations:
+        identity_id = observation.research_identity_id
+        if identity_id is None:
+            continue
+        index.setdefault(identity_id, []).append(observation)
+    return {key: tuple(value) for key, value in index.items()}
+
+
 def _build_outcome(
     spec: ForwardPaperHistoryWindowSpec,
     signal_observation: NseArchiveResearchPriceObservation,
     signal_session_id: str,
     history_by_session: dict[date, NseArchiveResearchPriceStreamSession],
+    history_index_by_session: dict[date, _SessionIdentityIndex],
 ) -> ForwardPaperHistoryOutcome:
     identity_id = signal_observation.research_identity_id
     if identity_id is None:
@@ -767,11 +791,7 @@ def _build_outcome(
     duplicated_observation_ids: list[str] = []
     for expected_date in spec.expected_market_sessions:
         session_for_date = history_by_session[expected_date]
-        matches = tuple(
-            observation
-            for observation in session_for_date.observations
-            if observation.research_identity_id == identity_id
-        )
+        matches = history_index_by_session[expected_date].get(identity_id, ())
         if len(matches) == 0:
             missing_session_ids.append(session_for_date.price_stream_session_id)
         elif len(matches) > 1:
@@ -845,6 +865,7 @@ def build_forward_paper_raw_history_window(
     expected_sessions = spec.expected_market_sessions
     consumed_sessions: list[NseArchiveResearchPriceStreamSession] = []
     history_by_session: dict[date, NseArchiveResearchPriceStreamSession] = {}
+    history_index_by_session: dict[date, _SessionIdentityIndex] = {}
     started = False
 
     for expected_date in expected_sessions:
@@ -903,6 +924,7 @@ def build_forward_paper_raw_history_window(
 
         consumed_sessions.append(session)
         history_by_session[expected_date] = session
+        history_index_by_session[expected_date] = _build_session_identity_index(session)
         if expected_date == spec.signal_session:
             break
 
@@ -922,6 +944,7 @@ def build_forward_paper_raw_history_window(
             signal_observation,
             signal_session_obj.price_stream_session_id,
             history_by_session,
+            history_index_by_session,
         )
         for signal_observation in signal_observations
     )

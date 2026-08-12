@@ -1277,5 +1277,495 @@ class ForwardPaperHistoryRegressionTests(unittest.TestCase):
         self.assertEqual(history_module.FORWARD_PAPER_HISTORY_WINDOW_SESSION_COUNT, 60)
 
 
+_MIXED_ISIN_MISSING = "INE900A01019"
+_MIXED_ISIN_DUP = "INE901A01016"
+
+
+def _direct_session_with_duplicate(
+    market_session: date,
+    *,
+    single_isins: tuple,
+    dup_isin: str,
+    dup_symbol: str,
+    dup_count: int = 2,
+) -> NseArchiveResearchPriceStreamSession:
+    """One legitimately self-consistent session combining several ordinary,
+    single-occurrence identities with one identity duplicated ``dup_count``
+    times.
+
+    Generalizes ``_direct_duplicate_identity_stream_session`` to more than
+    one accompanying unrelated identity. Built via direct construction --
+    never through ``_build_admission_session_decisions_and_transitions`` --
+    since the normal admission pipeline's same-session collision detector
+    always nulls out two decisions that claim the same ISIN, so this shape
+    can never arise through the public seam.
+    """
+
+    record_isin_pairs = [
+        (_record(market_session, symbol=symbol, validated_isin=isin), isin)
+        for symbol, isin in single_isins
+    ] + [
+        (
+            _record(market_session, symbol=f"{dup_symbol}{index}", validated_isin=dup_isin),
+            dup_isin,
+        )
+        for index in range(dup_count)
+    ]
+    records = tuple(record for record, _isin in record_isin_pairs)
+    replay_session = _session(market_session, records)
+
+    decisions = tuple(
+        NseArchiveResearchIdentityDecision(
+            dataset_id=replay_session.dataset_id,
+            replay_session_id=replay_session.replay_session_id,
+            session_snapshot_id=replay_session.session_snapshot_id,
+            market_session=replay_session.market_session,
+            partition_id=replay_session.partition_id,
+            partition_role=replay_session.partition_role,
+            record_id=record.record_id,
+            listing_key=record.listing_key,
+            symbol=record.symbol,
+            series=record.series,
+            source_claim_id=None,
+            source_isin=isin,
+            basis=NseArchiveResearchIdentityBasis.VALIDATED_SAME_SESSION_ISIN,
+            admission_status=NseArchiveResearchIdentityAdmissionStatus.ADMITTED_VALIDATED,
+            research_identity_id=research_identity_id_for_isin(isin),
+        )
+        for record, isin in record_isin_pairs
+    )
+    observations = tuple(
+        NseArchiveResearchPriceObservation(replay_record=record, identity_decision=decision)
+        for record, decision in zip(records, decisions, strict=True)
+    )
+    admission_session = NseArchiveResearchIdentityAdmissionSession(
+        dataset_id=replay_session.dataset_id,
+        replay_session_id=replay_session.replay_session_id,
+        session_snapshot_id=replay_session.session_snapshot_id,
+        market_session=replay_session.market_session,
+        partition_id=replay_session.partition_id,
+        partition_role=replay_session.partition_role,
+        decisions=decisions,
+        transitions=(),
+        admitted_validated_count=len(decisions),
+        admitted_source_attested_count=0,
+        blocked_unresolved_count=0,
+        blocked_collision_count=0,
+    )
+    paired = NseArchiveResearchPairedSession(
+        replay_session=replay_session, admission_session=admission_session
+    )
+    return NseArchiveResearchPriceStreamSession(
+        paired_session=paired,
+        observations=observations,
+        transitions=(),
+    )
+
+
+def _mixed_cross_section_stream_sessions(dataset, dates):
+    """Build 60 sessions exercising every outcome kind and a symbol change at once.
+
+    ISIN_A and ISIN_B are complete in every session (ISIN_B's symbol
+    changes partway through). ``_MIXED_ISIN_MISSING`` is absent from two
+    required sessions. ``_MIXED_ISIN_DUP`` is duplicated in two required
+    sessions (via direct construction). The signal session additionally
+    carries one unresolved row.
+    """
+
+    change_index = 40
+    missing_indices = (10, 40)
+    dup_indices = (15, 45)
+    signal_index = len(dates) - 1
+
+    replay_sessions = []
+    for index, market_session in enumerate(dates):
+        records = [
+            _record(market_session, symbol="AAA", validated_isin=ISIN_A),
+            _record(
+                market_session,
+                symbol=("BBB" if index < change_index else "ZZZ"),
+                validated_isin=ISIN_B,
+            ),
+        ]
+        if index not in missing_indices:
+            records.append(
+                _record(market_session, symbol="CCC", validated_isin=_MIXED_ISIN_MISSING)
+            )
+        if index not in dup_indices:
+            records.append(_record(market_session, symbol="DDD", validated_isin=_MIXED_ISIN_DUP))
+        if index == signal_index:
+            records.append(_unresolved_record(market_session, symbol="EEE"))
+        replay_sessions.append(_session(market_session, tuple(records)))
+
+    stream_sessions, _seam = _stream_sessions_for(dataset, replay_sessions)
+    for dup_index in dup_indices:
+        stream_sessions[dup_index] = _direct_session_with_duplicate(
+            dates[dup_index],
+            single_isins=(
+                ("AAA", ISIN_A),
+                ("BBB" if dup_index < change_index else "ZZZ", ISIN_B),
+                ("CCC", _MIXED_ISIN_MISSING),
+            ),
+            dup_isin=_MIXED_ISIN_DUP,
+            dup_symbol="DDD",
+        )
+    return stream_sessions
+
+
+def _legacy_scan_outcome(spec, signal_observation, signal_session_id, history_by_session):
+    """Independently re-derive one outcome via a plain linear scan of ``.observations``.
+
+    Deliberately never calls ``_build_outcome`` or
+    ``_build_session_identity_index`` -- this is the pre-optimization
+    scan semantics, reimplemented from scratch in test code, used only as
+    an equivalence oracle.
+    """
+
+    identity_id = signal_observation.research_identity_id
+    if identity_id is None:
+        return ForwardPaperHistoryVeto(
+            spec_id=spec.spec_id,
+            research_identity_id=None,
+            signal_observation=signal_observation,
+            reason=ForwardPaperHistoryVetoReason.SIGNAL_IDENTITY_UNRESOLVED,
+            evidence_session_ids=(signal_session_id,),
+            evidence_observation_ids=(),
+        )
+
+    history_observations = []
+    missing_session_ids = []
+    duplicated_session_ids = []
+    duplicated_observation_ids = []
+    for expected_date in spec.expected_market_sessions:
+        session_for_date = history_by_session[expected_date]
+        matches = tuple(
+            observation
+            for observation in session_for_date.observations
+            if observation.research_identity_id == identity_id
+        )
+        if len(matches) == 0:
+            missing_session_ids.append(session_for_date.price_stream_session_id)
+        elif len(matches) > 1:
+            duplicated_session_ids.append(session_for_date.price_stream_session_id)
+            duplicated_observation_ids.extend(o.observation_id for o in matches)
+        else:
+            history_observations.append(matches[0])
+
+    if duplicated_session_ids:
+        return ForwardPaperHistoryVeto(
+            spec_id=spec.spec_id,
+            research_identity_id=identity_id,
+            signal_observation=signal_observation,
+            reason=ForwardPaperHistoryVetoReason.REQUIRED_SESSION_DUPLICATED,
+            evidence_session_ids=tuple(duplicated_session_ids),
+            evidence_observation_ids=tuple(duplicated_observation_ids),
+        )
+    if missing_session_ids:
+        return ForwardPaperHistoryVeto(
+            spec_id=spec.spec_id,
+            research_identity_id=identity_id,
+            signal_observation=signal_observation,
+            reason=ForwardPaperHistoryVetoReason.REQUIRED_SESSION_MISSING,
+            evidence_session_ids=tuple(missing_session_ids),
+            evidence_observation_ids=(),
+        )
+    return ForwardPaperHistoryCandidate(
+        spec_id=spec.spec_id,
+        research_identity_id=identity_id,
+        history_observations=tuple(history_observations),
+    )
+
+
+class ForwardPaperHistoryEquivalenceRegressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dataset = _baseline_dataset()
+        self.dates = _dates()
+
+    def test_optimized_builder_matches_independently_computed_legacy_scan_semantics(
+        self,
+    ) -> None:
+        stream_sessions = _mixed_cross_section_stream_sessions(self.dataset, self.dates)
+        spec = _spec(self.dates)
+        history_by_session = dict(zip(self.dates, stream_sessions, strict=True))
+
+        actual_window = build_forward_paper_raw_history_window(spec, iter(stream_sessions))
+
+        signal_session_obj = stream_sessions[-1]
+        oracle_outcomes = tuple(
+            _legacy_scan_outcome(
+                spec,
+                signal_observation,
+                signal_session_obj.price_stream_session_id,
+                history_by_session,
+            )
+            for signal_observation in signal_session_obj.observations
+        )
+
+        self.assertEqual(actual_window.signal_subject_count, 5)
+        self.assertEqual(len(actual_window.outcomes), len(oracle_outcomes))
+        for actual, oracle in zip(actual_window.outcomes, oracle_outcomes, strict=True):
+            self.assertIs(type(actual), type(oracle))
+            if isinstance(oracle, ForwardPaperHistoryCandidate):
+                self.assertEqual(actual.candidate_id, oracle.candidate_id)
+                self.assertEqual(
+                    tuple(o.observation_id for o in actual.history_observations),
+                    tuple(o.observation_id for o in oracle.history_observations),
+                )
+            else:
+                self.assertEqual(actual.veto_id, oracle.veto_id)
+                self.assertIs(actual.reason, oracle.reason)
+                self.assertEqual(actual.research_identity_id, oracle.research_identity_id)
+                self.assertEqual(actual.evidence_session_ids, oracle.evidence_session_ids)
+                self.assertEqual(actual.evidence_observation_ids, oracle.evidence_observation_ids)
+
+        complete_candidate_count = sum(
+            1 for o in oracle_outcomes if isinstance(o, ForwardPaperHistoryCandidate)
+        )
+        veto_count = sum(1 for o in oracle_outcomes if isinstance(o, ForwardPaperHistoryVeto))
+        self.assertEqual(complete_candidate_count, 2)
+        self.assertEqual(veto_count, 3)
+        self.assertEqual(actual_window.complete_candidate_count, complete_candidate_count)
+        self.assertEqual(actual_window.veto_count, veto_count)
+
+        oracle_window = ForwardPaperRawHistoryWindow(
+            spec=spec,
+            sessions=tuple(stream_sessions),
+            outcomes=oracle_outcomes,
+            expected_session_count=actual_window.expected_session_count,
+            consumed_session_count=actual_window.consumed_session_count,
+            signal_subject_count=actual_window.signal_subject_count,
+            complete_candidate_count=complete_candidate_count,
+            veto_count=veto_count,
+        )
+        # A pure function of matching outcome ids, session ids, and counts:
+        # equal window_id is the final, strongest proof the optimized
+        # builder's ordered outcome sequence exactly matches the
+        # independently computed legacy semantics.
+        self.assertEqual(actual_window.window_id, oracle_window.window_id)
+
+
+class ForwardPaperHistoryDuplicatePreservationRegressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dataset = _baseline_dataset()
+        self.dates = _dates()
+
+    def test_three_way_duplicate_identity_observations_all_preserved_in_stored_order(
+        self,
+    ) -> None:
+        replay_sessions = _two_identity_replay_sessions(self.dates)
+        stream_sessions, _seam = _stream_sessions_for(self.dataset, replay_sessions)
+        dup_index = 25
+        stream_sessions[dup_index] = _direct_session_with_duplicate(
+            self.dates[dup_index],
+            single_isins=(("BBB", ISIN_B),),
+            dup_isin=ISIN_A,
+            dup_symbol="AAA",
+            dup_count=3,
+        )
+
+        spec = _spec(self.dates)
+        window = build_forward_paper_raw_history_window(spec, iter(stream_sessions))
+        veto_a = next(
+            o
+            for o in window.outcomes
+            if isinstance(o, ForwardPaperHistoryVeto) and o.signal_observation.symbol == "AAA"
+        )
+        self.assertIs(veto_a.reason, ForwardPaperHistoryVetoReason.REQUIRED_SESSION_DUPLICATED)
+        expected_observation_ids = tuple(
+            o.observation_id
+            for o in window.sessions[dup_index].observations
+            if o.research_identity_id == veto_a.research_identity_id
+        )
+        # The indexed lookup must retain every duplicate -- never overwrite
+        # down to the last-seen observation -- so cardinality three is
+        # preserved exactly, in original stored order.
+        self.assertEqual(len(expected_observation_ids), 3)
+        self.assertEqual(veto_a.evidence_observation_ids, expected_observation_ids)
+        window.verify_content_identity()
+
+    def test_duplicate_priority_over_missing_holds_regardless_of_relative_session_order(
+        self,
+    ) -> None:
+        # The pre-existing priority test has the missing session earlier
+        # than the duplicated one; this proves the indexed lookup's
+        # duplication-over-missing priority does not depend on which
+        # anomaly's session is encountered first.
+        replay_sessions = list(_two_identity_replay_sessions(self.dates))
+        missing_index = 50
+        missing_date = self.dates[missing_index]
+        replay_sessions[missing_index] = _session(
+            missing_date, (_record(missing_date, symbol="BBB", validated_isin=ISIN_B),)
+        )
+        stream_sessions, _seam = _stream_sessions_for(self.dataset, replay_sessions)
+        dup_index = 5
+        stream_sessions[dup_index] = _direct_duplicate_identity_stream_session(
+            self.dates[dup_index], ISIN_A, other_isin=ISIN_B
+        )
+
+        spec = _spec(self.dates)
+        window = build_forward_paper_raw_history_window(spec, iter(stream_sessions))
+        outcomes_by_symbol = {o.signal_observation.symbol: o for o in window.outcomes}
+        veto_a = outcomes_by_symbol["AAA"]
+        self.assertIsInstance(veto_a, ForwardPaperHistoryVeto)
+        self.assertIs(veto_a.reason, ForwardPaperHistoryVetoReason.REQUIRED_SESSION_DUPLICATED)
+        window.verify_content_identity()
+
+
+class ForwardPaperHistoryIndexedVerificationTamperRegressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dataset = _baseline_dataset()
+        self.dates = _dates()
+        self.stream_sessions = _mixed_cross_section_stream_sessions(self.dataset, self.dates)
+        self.spec = _spec(self.dates)
+        self.window = build_forward_paper_raw_history_window(self.spec, iter(self.stream_sessions))
+
+    def test_candidate_with_plausible_but_wrong_historical_observation_rejected_after_indexing(
+        self,
+    ) -> None:
+        candidate_a = next(
+            o
+            for o in self.window.outcomes
+            if isinstance(o, ForwardPaperHistoryCandidate) and o.signal_observation.symbol == "AAA"
+        )
+        forged_index = 20
+        forged_date = self.dates[forged_index]
+        forged_record = _record(
+            forged_date, symbol="AAA", validated_isin=ISIN_A, close=Decimal("1234.56")
+        )
+        forged_session = _session(forged_date, (forged_record,))
+        forged_stream_sessions, _seam = _stream_sessions_for(self.dataset, (forged_session,))
+        [forged_observation] = forged_stream_sessions[0].observations
+        self.assertNotEqual(
+            forged_observation.observation_id,
+            candidate_a.history_observations[forged_index].observation_id,
+        )
+
+        tampered_history = (
+            candidate_a.history_observations[:forged_index]
+            + (forged_observation,)
+            + candidate_a.history_observations[forged_index + 1 :]
+        )
+        tampered_candidate = ForwardPaperHistoryCandidate(
+            spec_id=candidate_a.spec_id,
+            research_identity_id=candidate_a.research_identity_id,
+            history_observations=tampered_history,
+        )
+        outcomes = tuple(
+            tampered_candidate if o is candidate_a else o for o in self.window.outcomes
+        )
+        with self.assertRaises(ForwardPaperHistoryError):
+            _rebuild_window_with_outcomes(self.window, outcomes)
+
+    def test_duplicated_veto_with_incomplete_plausible_evidence_rejected_after_indexing(
+        self,
+    ) -> None:
+        veto_d = next(
+            o
+            for o in self.window.outcomes
+            if isinstance(o, ForwardPaperHistoryVeto)
+            and o.reason is ForwardPaperHistoryVetoReason.REQUIRED_SESSION_DUPLICATED
+        )
+        self.assertEqual(len(veto_d.evidence_session_ids), 2)
+        # A truncated-but-shape-valid evidence tuple naming only one of the
+        # two genuine affected sessions, carrying that session's own two
+        # genuine duplicate observation ids -- plausible, but incomplete.
+        truncated = ForwardPaperHistoryVeto(
+            spec_id=veto_d.spec_id,
+            research_identity_id=veto_d.research_identity_id,
+            signal_observation=veto_d.signal_observation,
+            reason=veto_d.reason,
+            evidence_session_ids=veto_d.evidence_session_ids[:1],
+            evidence_observation_ids=veto_d.evidence_observation_ids[:2],
+        )
+        outcomes = tuple(truncated if o is veto_d else o for o in self.window.outcomes)
+        with self.assertRaises(ForwardPaperHistoryError):
+            _rebuild_window_with_outcomes(self.window, outcomes)
+
+
+def _synthetic_isin(index: int) -> str:
+    return f"IN{index:09d}9"
+
+
+class _CountingIndexBuilder:
+    def __init__(self, wrapped) -> None:
+        self._wrapped = wrapped
+        self.calls = 0
+
+    def __call__(self, session):
+        self.calls += 1
+        return self._wrapped(session)
+
+
+class ForwardPaperHistoryComplexityRegressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dataset = _baseline_dataset()
+
+    def _many_subject_replay_sessions(self, dates, subject_count):
+        isins = [_synthetic_isin(i) for i in range(subject_count)]
+        sessions = []
+        for market_session in dates:
+            records = tuple(
+                _record(market_session, symbol=f"SYM{i}", validated_isin=isin)
+                for i, isin in enumerate(isins)
+            )
+            sessions.append(_session(market_session, records))
+        return tuple(sessions)
+
+    def test_index_construction_is_bounded_by_session_count_not_subject_count_during_build(
+        self,
+    ) -> None:
+        dates = _dates()
+        subject_count = 50
+        replay_sessions = self._many_subject_replay_sessions(dates, subject_count)
+        stream_sessions, _seam = _stream_sessions_for(self.dataset, replay_sessions)
+        spec = _spec(dates)
+
+        counting = _CountingIndexBuilder(history_module._build_session_identity_index)
+        with patch.object(history_module, "_build_session_identity_index", counting):
+            window = build_forward_paper_raw_history_window(spec, iter(stream_sessions))
+
+        self.assertEqual(window.signal_subject_count, subject_count)
+        # Exactly one index built per retained session for outcome assembly,
+        # plus one more per session from the constructed window's own
+        # implicit self-validation (``ForwardPaperRawHistoryWindow.__post_init__``
+        # always calls ``_validate``) -- never once per (signal subject,
+        # session) pair, regardless of how many subjects share the
+        # cross-section.
+        self.assertEqual(counting.calls, 2 * WINDOW_SIZE)
+
+    def test_index_construction_is_bounded_by_session_count_not_subject_count_during_verify(
+        self,
+    ) -> None:
+        dates = _dates()
+        subject_count = 50
+        replay_sessions = self._many_subject_replay_sessions(dates, subject_count)
+        stream_sessions, _seam = _stream_sessions_for(self.dataset, replay_sessions)
+        spec = _spec(dates)
+        window = build_forward_paper_raw_history_window(spec, iter(stream_sessions))
+
+        counting = _CountingIndexBuilder(history_module._build_session_identity_index)
+        with patch.object(history_module, "_build_session_identity_index", counting):
+            window.verify_content_identity()
+
+        self.assertEqual(counting.calls, WINDOW_SIZE)
+
+    def test_many_subject_window_builds_and_verifies_with_all_complete_candidates(
+        self,
+    ) -> None:
+        # Moderate scalability smoke case -- not a wall-clock assertion,
+        # just large enough to catch an accidental restoration of the
+        # nested per-subject observations scan.
+        dates = _dates()
+        subject_count = 200
+        replay_sessions = self._many_subject_replay_sessions(dates, subject_count)
+        stream_sessions, _seam = _stream_sessions_for(self.dataset, replay_sessions)
+        spec = _spec(dates)
+        window = build_forward_paper_raw_history_window(spec, iter(stream_sessions))
+        self.assertEqual(window.signal_subject_count, subject_count)
+        self.assertEqual(window.complete_candidate_count, subject_count)
+        self.assertEqual(window.veto_count, 0)
+        window.verify_content_identity()
+
+
 if __name__ == "__main__":
     unittest.main()
