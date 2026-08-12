@@ -52,6 +52,27 @@ class LocalMarketSnapshotStoreTests(unittest.TestCase):
                 ["manifest.json", "payload.json"],
             )
 
+    def test_exact_date_partition_read_avoids_snapshot_discovery(self) -> None:
+        observed = datetime(2026, 7, 15, 8, 30, tzinfo=UTC)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LocalMarketSnapshotStore(Path(temp_dir))
+            stored = self.put(store, observed)
+
+            with patch.object(Path, "glob", side_effect=AssertionError("discovery used")):
+                loaded = store.get_from_date_partition(
+                    DATASET,
+                    observed.date(),
+                    stored.manifest.snapshot_id,
+                )
+
+            self.assertEqual(loaded.manifest, stored.manifest)
+            with self.assertRaises(MarketSnapshotNotFound):
+                store.get_from_date_partition(
+                    DATASET,
+                    (observed - timedelta(days=1)).date(),
+                    stored.manifest.snapshot_id,
+                )
+
     def test_concurrent_identical_puts_publish_one_complete_snapshot(self) -> None:
         observed = datetime(2026, 7, 15, 8, 30, tzinfo=UTC)
         with tempfile.TemporaryDirectory() as temp_dir:

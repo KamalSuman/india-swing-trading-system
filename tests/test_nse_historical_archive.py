@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Mapping
+from unittest.mock import patch
 
 from india_swing.daily_reports.parser import (
     FULL_BHAVCOPY_DELIVERY_HEADER,
@@ -748,9 +749,22 @@ class NseHistoricalArchiveStoreTests(unittest.TestCase):
                 1,
             )
 
-            verified = load_verified_nse_historical_archive_range(
+            exact_partition_read = LocalMarketSnapshotStore.get_from_date_partition
+            with patch.object(
+                LocalMarketSnapshotStore,
+                "get_from_date_partition",
+                autospec=True,
+                side_effect=exact_partition_read,
+            ) as exact_read:
+                verified = load_verified_nse_historical_archive_range(
+                    store,
+                    index_snapshot_id=first_index.manifest.snapshot_id,
+                )
+            exact_read.assert_called_once_with(
                 store,
-                index_snapshot_id=first_index.manifest.snapshot_id,
+                NSE_HISTORICAL_ARCHIVE_EQ_DATASET,
+                OBSERVED_AT.date(),
+                first[0].snapshot_id,
             )
             self.assertEqual(verified.range_start, SESSION)
             self.assertEqual(verified.range_end, SESSION)

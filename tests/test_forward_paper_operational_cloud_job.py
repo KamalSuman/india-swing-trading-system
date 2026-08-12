@@ -90,7 +90,7 @@ class ForwardPaperOperationalCloudJobTests(unittest.TestCase):
         stderr = io.StringIO()
         with patch(
             "india_swing.forward_paper.operational_job."
-            "iter_nse_archive_research_price_stream_sessions",
+            "iter_nse_archive_research_price_stream_sessions_from",
             return_value=iter(self.raw.sessions),
         ), redirect_stdout(stdout), redirect_stderr(stderr):
             code = main(

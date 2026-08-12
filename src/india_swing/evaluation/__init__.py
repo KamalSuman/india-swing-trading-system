@@ -101,6 +101,7 @@ from .nse_archive_research_identity import (
     NseArchiveResearchPairedSession,
     iter_nse_archive_research_identity_admission_sessions,
     iter_nse_archive_research_paired_sessions,
+    iter_nse_archive_research_paired_sessions_from,
     research_identity_id_for_isin,
 )
 from .nse_archive_research_price_stream import (
@@ -111,6 +112,7 @@ from .nse_archive_research_price_stream import (
     NseArchiveResearchPriceStreamError,
     NseArchiveResearchPriceStreamSession,
     iter_nse_archive_research_price_stream_sessions,
+    iter_nse_archive_research_price_stream_sessions_from,
 )
 from .lifecycle import (
     HOLDOUT_ACCESS_EVENT_TYPES,
@@ -290,6 +292,7 @@ __all__ = [
     "NseArchiveResearchPairedSession",
     "iter_nse_archive_research_identity_admission_sessions",
     "iter_nse_archive_research_paired_sessions",
+    "iter_nse_archive_research_paired_sessions_from",
     "research_identity_id_for_isin",
     "PRICE_STREAM_OBSERVATION_SCHEMA_VERSION",
     "PRICE_STREAM_POLICY_VERSION",
@@ -298,6 +301,7 @@ __all__ = [
     "NseArchiveResearchPriceStreamError",
     "NseArchiveResearchPriceStreamSession",
     "iter_nse_archive_research_price_stream_sessions",
+    "iter_nse_archive_research_price_stream_sessions_from",
     "EvaluationPlanError",
     "EvaluationPlanIntegrityError",
     "PurgedWalkForwardPlan",

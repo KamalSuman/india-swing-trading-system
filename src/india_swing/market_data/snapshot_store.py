@@ -7,7 +7,7 @@ import re
 import shutil
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -250,6 +250,30 @@ class LocalMarketSnapshotStore:
         if len(matches) != 1:
             raise MarketSnapshotIntegrityError("snapshot ID appears in multiple vintages")
         return self._read_path(matches[0], expected_dataset=dataset)
+
+    def get_from_date_partition(
+        self,
+        dataset: str,
+        partition_date: date,
+        snapshot_id: str,
+    ) -> StoredMarketSnapshot:
+        """Read one snapshot through its already-pinned observed-date partition.
+
+        Using a caller's independently verified partition avoids a wildcard
+        directory walk on mounted object stores while retaining the normal
+        manifest, payload, hash, dataset, and date-partition verification at
+        ``_read_path``.
+        """
+
+        dataset = _safe_component(dataset, "dataset")
+        if type(partition_date) is not date:
+            raise ValueError("partition_date must be a date")
+        if _SNAPSHOT_ID.fullmatch(snapshot_id) is None:
+            raise ValueError("snapshot_id must be a full SHA-256 identifier")
+        target = self.root / dataset / partition_date.isoformat() / snapshot_id
+        if not target.exists():
+            raise MarketSnapshotNotFound(f"snapshot not found: {dataset}/{snapshot_id}")
+        return self._read_path(target, expected_dataset=dataset)
 
     def find_by_selection_key(
         self,

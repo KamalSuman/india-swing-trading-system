@@ -31,6 +31,7 @@ one paired-session traversal it projects from.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Iterator
 
 from india_swing.identity import content_id
@@ -41,6 +42,7 @@ from .nse_archive_research_identity import (
     NseArchiveResearchIdentityTransition,
     NseArchiveResearchPairedSession,
     iter_nse_archive_research_paired_sessions,
+    iter_nse_archive_research_paired_sessions_from,
 )
 from .nse_archive_research_replay import (
     NseArchiveResearchReplayRecord,
@@ -375,5 +377,29 @@ def iter_nse_archive_research_price_stream_sessions(
         paired_call_failed = True
     if paired_call_failed or paired_iterator is None:
         _fail("research price stream dataset or reader is invalid")
+
+    return _iter_price_stream_sessions(paired_iterator)
+
+
+def iter_nse_archive_research_price_stream_sessions_from(
+    dataset: NseArchiveResearchDataset,
+    reader: NseHistoricalArchiveSnapshotReader,
+    *,
+    start_session: date,
+) -> Iterator[NseArchiveResearchPriceStreamSession]:
+    """Warm point-in-time identity state and materialize prices only from a boundary."""
+
+    paired_call_failed = False
+    paired_iterator: Iterator[NseArchiveResearchPairedSession] | None = None
+    try:
+        paired_iterator = iter_nse_archive_research_paired_sessions_from(
+            dataset,
+            reader,
+            start_session=start_session,
+        )
+    except Exception:
+        paired_call_failed = True
+    if paired_call_failed or paired_iterator is None:
+        _fail("research price stream dataset, reader, or boundary is invalid")
 
     return _iter_price_stream_sessions(paired_iterator)

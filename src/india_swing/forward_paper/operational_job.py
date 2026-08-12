@@ -13,7 +13,7 @@ from india_swing.evaluation.nse_archive_research_dataset import (
     NseArchiveResearchDataset,
 )
 from india_swing.evaluation.nse_archive_research_price_stream import (
-    iter_nse_archive_research_price_stream_sessions,
+    iter_nse_archive_research_price_stream_sessions_from,
 )
 from india_swing.forward_paper.history import (
     ForwardPaperHistoryWindowSpec,
@@ -172,9 +172,10 @@ class NseArchiveForwardPaperHistoryBuilder:
             ):
                 raise ValueError
             dataset.verify_content_identity()
-            sessions = iter_nse_archive_research_price_stream_sessions(
+            sessions = iter_nse_archive_research_price_stream_sessions_from(
                 dataset,
                 self.reader,
+                start_session=spec.expected_market_sessions[0],
             )
             window = build_forward_paper_raw_history_window(spec, sessions)
             window.verify_content_identity()

@@ -1175,6 +1175,47 @@ class NseArchiveResearchPairedSessionTests(unittest.TestCase):
         self.assertEqual(seam.calls, 1)
         self.assertEqual(first.replay_session.market_session, date(2024, 1, 1))
 
+    def test_boundary_iterator_warms_prior_identity_state_without_yielding_prior_pairs(
+        self,
+    ) -> None:
+        first = _session(
+            date(2024, 1, 1),
+            (_record(date(2024, 1, 1), symbol="AAA", validated_isin="INE009A01021"),),
+        )
+        second = _session(
+            date(2024, 1, 2),
+            (_record(date(2024, 1, 2), symbol="AAA", validated_isin="INE467B01029"),),
+        )
+        third = _session(
+            date(2024, 1, 3),
+            (_record(date(2024, 1, 3), symbol="BBB", validated_isin="INE467B01029"),),
+        )
+        seam = _FixedSessionsIterator((first, second, third))
+        with patch.object(
+            identity_module, "iter_verified_nse_archive_research_sessions", seam
+        ):
+            results = list(
+                identity_module.iter_nse_archive_research_paired_sessions_from(
+                    self.dataset,
+                    object(),
+                    start_session=date(2024, 1, 2),
+                )
+            )
+
+        self.assertEqual(seam.calls, 3)
+        self.assertEqual(
+            tuple(value.replay_session.market_session for value in results),
+            (date(2024, 1, 2), date(2024, 1, 3)),
+        )
+        self.assertIs(
+            results[0].admission_session.transitions[0].kind,
+            NseArchiveResearchIdentityTransitionKind.LISTING_KEY_REBOUND,
+        )
+        self.assertIs(
+            results[1].admission_session.transitions[0].kind,
+            NseArchiveResearchIdentityTransitionKind.IDENTITY_SYMBOL_CHANGED,
+        )
+
     def test_admission_iterator_still_works_via_single_upstream_traversal(self) -> None:
         # Refactoring the admission iterator to project from the paired
         # iterator must still call the upstream replay seam exactly once

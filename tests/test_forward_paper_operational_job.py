@@ -65,13 +65,17 @@ class ForwardPaperOperationalJobTests(unittest.TestCase):
         builder, datasets = self._builder()
         with patch.object(
             job_module,
-            "iter_nse_archive_research_price_stream_sessions",
+            "iter_nse_archive_research_price_stream_sessions_from",
             return_value=iter(self.raw.sessions),
         ) as stream:
             rebuilt = builder.build(self.raw.spec)
         self.assertEqual(rebuilt.window_id, self.raw.window_id)
         self.assertEqual(datasets.calls, [self.dataset.dataset_id])
-        stream.assert_called_once_with(self.dataset, builder.reader)
+        stream.assert_called_once_with(
+            self.dataset,
+            builder.reader,
+            start_session=self.raw.spec.expected_market_sessions[0],
+        )
 
     def test_job_rebuilds_assembles_and_seals_one_manifest(self) -> None:
         builder, _ = self._builder()
@@ -79,7 +83,7 @@ class ForwardPaperOperationalJobTests(unittest.TestCase):
         request = self._request()
         with patch.object(
             job_module,
-            "iter_nse_archive_research_price_stream_sessions",
+            "iter_nse_archive_research_price_stream_sessions_from",
             return_value=iter(self.raw.sessions),
         ):
             receipt = run_forward_paper_operational_job(
@@ -104,7 +108,7 @@ class ForwardPaperOperationalJobTests(unittest.TestCase):
         writer = FakeWriter()
         with patch.object(
             job_module,
-            "iter_nse_archive_research_price_stream_sessions",
+            "iter_nse_archive_research_price_stream_sessions_from",
             return_value=iter(self.raw.sessions),
         ):
             with self.assertRaises(ForwardPaperOperationalJobError):

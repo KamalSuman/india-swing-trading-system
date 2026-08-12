@@ -920,6 +920,8 @@ def _build_admission_session(
 def _iter_paired_sessions(
     dataset: NseArchiveResearchDataset,
     reader: NseHistoricalArchiveSnapshotReader,
+    *,
+    yield_from_session: date | None = None,
 ) -> Iterator[NseArchiveResearchPairedSession]:
     latest_by_listing_key: dict[str, _PriorObservation] = {}
     latest_by_identity: dict[str, _PriorObservation] = {}
@@ -964,6 +966,17 @@ def _iter_paired_sessions(
                     decision.record_id,
                     decision.market_session,
                 )
+
+        # Earlier sessions remain mandatory identity warm-up: their admitted
+        # state and transitions have already been fully reconstructed and
+        # verified above.  They do not need the additional paired-session and
+        # price-stream object graph when a caller has pinned a later history
+        # window boundary.
+        if (
+            yield_from_session is not None
+            and session.market_session < yield_from_session
+        ):
+            continue
 
         pair_failed = False
         paired: NseArchiveResearchPairedSession | None = None
@@ -1014,6 +1027,43 @@ def iter_nse_archive_research_paired_sessions(
     _verify_admission_dataset_safety_posture(dataset)
 
     return _iter_paired_sessions(dataset, reader)
+
+
+def iter_nse_archive_research_paired_sessions_from(
+    dataset: NseArchiveResearchDataset,
+    reader: NseHistoricalArchiveSnapshotReader,
+    *,
+    start_session: date,
+) -> Iterator[NseArchiveResearchPairedSession]:
+    """Warm identity state from dataset start and yield pairs only from a boundary.
+
+    Every earlier replay session is still consumed and admitted in stored
+    order, so listing rebounds and identity-symbol changes remain point-in-
+    time correct.  Only the redundant paired-session graph for pre-window
+    warm-up sessions is omitted.
+    """
+
+    if type(start_session) is not date:
+        _fail("research identity paired-session boundary is invalid")
+    if type(dataset) is not NseArchiveResearchDataset or reader is None:
+        _fail("research identity admission dataset or reader is invalid")
+    if start_session not in dataset.accepted_sessions:
+        _fail("research identity paired-session boundary is invalid")
+
+    dataset_identity_failed = False
+    try:
+        dataset.verify_content_identity()
+    except Exception:
+        dataset_identity_failed = True
+    if dataset_identity_failed:
+        _fail("research identity admission dataset identity failed")
+    _verify_admission_dataset_safety_posture(dataset)
+
+    return _iter_paired_sessions(
+        dataset,
+        reader,
+        yield_from_session=start_session,
+    )
 
 
 def _project_admission_sessions(

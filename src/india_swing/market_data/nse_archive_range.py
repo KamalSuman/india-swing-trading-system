@@ -184,6 +184,31 @@ class NseHistoricalArchiveSnapshotReader(Protocol):
     def get(self, dataset: str, snapshot_id: str) -> StoredMarketSnapshot: ...
 
 
+def _get_session_snapshot(
+    reader: NseHistoricalArchiveSnapshotReader,
+    *,
+    partition_date: date,
+    snapshot_id: str,
+) -> StoredMarketSnapshot:
+    """Use an exact date-partition read when the reader provides one.
+
+    The fallback preserves the original reader contract for test doubles and
+    other providers.  No discovery or latest selection is introduced.
+    """
+
+    get_from_date_partition = getattr(
+        type(reader), "get_from_date_partition", None
+    )
+    if callable(get_from_date_partition):
+        return get_from_date_partition(
+            reader,
+            NSE_HISTORICAL_ARCHIVE_EQ_DATASET,
+            partition_date,
+            snapshot_id,
+        )
+    return reader.get(NSE_HISTORICAL_ARCHIVE_EQ_DATASET, snapshot_id)
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedNseHistoricalArchiveRange:
     index_snapshot_id: str
@@ -755,9 +780,10 @@ def load_verified_nse_historical_archive_range(
     derived_legacy_identity_issue_counts: list[int] = []
     for value in index_records:
         try:
-            stored = reader.get(
-                NSE_HISTORICAL_ARCHIVE_EQ_DATASET,
-                value["snapshot_id"],
+            stored = _get_session_snapshot(
+                reader,
+                partition_date=manifest.observed_at.date(),
+                snapshot_id=value["snapshot_id"],
             )
         except Exception:
             raise NseHistoricalArchiveRangeError(
