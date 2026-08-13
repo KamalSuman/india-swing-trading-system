@@ -5,6 +5,7 @@ import json
 import unittest
 from contextlib import redirect_stderr
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import india_swing_forward_paper_bootstrap as bootstrap
 
@@ -60,6 +61,29 @@ class ForwardPaperOperationalBootstrapTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(calls, [("--exact", "value")])
+
+    def test_tracebacks_enable_fatal_handler_without_repeating_timer(self) -> None:
+        clock_values = iter((10.0, 10.25, 10.75))
+        stderr = io.StringIO()
+        with (
+            patch.object(bootstrap.faulthandler, "enable") as enable,
+            patch.object(bootstrap.faulthandler, "dump_traceback_later") as dump_later,
+            patch.object(
+                bootstrap.faulthandler,
+                "cancel_dump_traceback_later",
+            ) as cancel_dump,
+            redirect_stderr(stderr),
+        ):
+            result = bootstrap.main(
+                (),
+                importer=lambda name: SimpleNamespace(main=lambda argv: 0),
+                clock=lambda: next(clock_values),
+            )
+
+        self.assertEqual(result, 0)
+        enable.assert_called_once_with(file=stderr, all_threads=True)
+        dump_later.assert_not_called()
+        cancel_dump.assert_not_called()
 
 
 if __name__ == "__main__":

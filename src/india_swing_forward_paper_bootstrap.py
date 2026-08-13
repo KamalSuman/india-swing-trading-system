@@ -55,19 +55,17 @@ def main(
         delegated_argv = delegated_argv[2:]
     _event("process_start", "completed", 0.0)
     if enable_tracebacks:
+        # Keep fatal-signal tracebacks, but do not arm a repeating timer here.
+        # Repeated ``dump_traceback_later`` callbacks coincided exactly with the
+        # production worker's SIGSEGV and are diagnostic noise for a batch job.
         faulthandler.enable(file=sys.stderr, all_threads=True)
-        faulthandler.dump_traceback_later(60, repeat=True, file=sys.stderr)
-    try:
-        _event("application_import", "started", clock() - started_at)
-        module = importer("india_swing.forward_paper.operational_cloud_job")
-        _event("application_import", "completed", clock() - started_at)
-        entrypoint = getattr(module, "main", None)
-        if not callable(entrypoint):
-            return 2
-        return int(entrypoint(delegated_argv))
-    finally:
-        if enable_tracebacks:
-            faulthandler.cancel_dump_traceback_later()
+    _event("application_import", "started", clock() - started_at)
+    module = importer("india_swing.forward_paper.operational_cloud_job")
+    _event("application_import", "completed", clock() - started_at)
+    entrypoint = getattr(module, "main", None)
+    if not callable(entrypoint):
+        return 2
+    return int(entrypoint(delegated_argv))
 
 
 if __name__ == "__main__":
