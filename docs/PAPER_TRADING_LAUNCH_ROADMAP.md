@@ -26,10 +26,10 @@ This is the durable execution order for reaching the first safe, live paper-trad
    - The pure rollover model, canonical codec, exact-ID create-once local store, mark lineage, virtual cash accounting, realized/unrealized P&L, NAV/high-water/drawdown accounting, derived portfolio artifact, predecessor-chain checks, explicit operational rollover request, terminal-last GCS publication, and pinned restore are implemented.
    - Workflow spec v2 carries the exact genesis and predecessor lineage. The daily worker seals cutoff-bound terminal EOD marks, invokes the rollover, and records the request, rollover, and exact GCS manifest pin in its terminal output. Legacy v1 artifacts remain decodable but do not gain rollover authority.
 
-3. **Adjusted market evidence and feature bridge** — IN PROGRESS
+3. **Adjusted market evidence and feature bridge** — COMPLETE
    - Ingest point-in-time corporate actions, security-master/tick evidence, and the fresh daily market bundle.
    - Produce cutoff-bound adjusted prices and deterministic research features without look-ahead or survivorship leakage.
-   - The cutoff-bound raw EOD mark bridge is implemented: it uses only the terminal observation from each exact outcome job, requires that observation to be traded and present in the replay lineage, and never substitutes an older close. Corporate-action adjustment and research-feature materialization remain.
+   - The cutoff-bound raw EOD mark bridge is implemented: it uses only the terminal observation from each exact outcome job, requires that observation to be traded and present in the replay lineage, and never substitutes an older close. Corporate-action adjustment and research-feature materialization are now connected end to end.
    - The verified NSE archive forward-history adapter now has a cutoff-bound
      corporate-action adjustment boundary. Research identities require explicit,
      knowledge-timed bindings to stable corporate-action identities; split and
@@ -68,9 +68,7 @@ This is the durable execution order for reaching the first safe, live paper-trad
      restore resolves only the recorded raw-history, corporate-action, and tick
      artifact IDs. The complete graph is recomputed and every derived identity is
      compared before use; there is no listing/latest selection or stored feature
-     payload to trust. Wiring real artifact resolvers into the operational job and
-     producing the first real manifest remain before this step is accepted end to
-     end.
+     payload to trust.
    - A standalone signal-session tick artifact is now implemented for the daily
      path. It derives one-day tick specifications directly from one exact NSE MII
      security master, retains active normal-market EQ/SM listings including both
@@ -118,6 +116,20 @@ This is the durable execution order for reaching the first safe, live paper-trad
      12-Aug CSV is now persisted as snapshot
      `0aef166c01f8a124123887dcd1094db871d6cb1c4a4525fee15564998fc9a5b4`
      with 878 economic events and zero silent drops.
+   - The first genuine exact-pin Cloud Run graph completed on 14-Aug-2026 as
+     execution `india-swing-forward-paper-operational-8rj79` in 9m50.3s with one
+     attempt. It reconstructed the 60-session window from dataset
+     `ade90738281ca444c610804aaf52577a1f4125e1b1c74e83ad058218e25542cd`,
+     produced 1,405 technical feature vectors, and preserved 1,004 explicit
+     blocked outcomes. Unsupported corporate-action policies veto only the
+     affected security and can never flow into features.
+   - Published graph ID:
+     `39605f5b799211db020e8edb96f23c145acd9a5548240afb27a7632aae40eaa6`.
+     Its exact manifest generation is `1786657063624792` and its independently
+     recomputed SHA-256 is
+     `eb8d592ef09ab6872a519f332c7d525069c6a8a141a351b54f68f955b6853faf`.
+     The receipt remained `collection_only=true`, `paper_trade_eligible=false`,
+     `notification_eligible=false`, and `execution_eligible=false`.
 
 4. **First genuine promoted research run** — PENDING
    - Run the deterministic baseline/challenger on real adjusted evidence.
@@ -146,11 +158,10 @@ This is the durable execution order for reaching the first safe, live paper-trad
 - Published object: `gs://swing-data-indian-swing-trading-bot/research/nse-archive-datasets/v1/cbb8c74ee3978cc0cd412b73251df903e2af28bd4101f30549b4833e039b8cd2.json`, generation `1786469190290325`, size 537,704 bytes, SHA-256 `25a8c43e07c0b6f678d8b006881cc27e5475c67e06932dd074d4a9c043ac4c83`.
 - Genuine corporate-action snapshot ID: `0aef166c01f8a124123887dcd1094db871d6cb1c4a4525fee15564998fc9a5b4`.
 - Genuine 31-Jul-2026 signal-session tick-panel ID: `043d0a651476b0d8e34c97a7c02d7f97c9d9176d8920fde00c1b314f5baa84fe` (2,494 active normal-market EQ/SM listings, exact source master ID `5c3b3113e7c147a5be79a725f025b53b5d16f8f0826fc9ba5d8ed0198a6ef8d7`).
-- The next immediate gap is producing and deploying one genuine path-free launch:
-  select the exact 60 sessions,
-  bind them to the already-pinned dataset and promoted-input snapshot, execute the
-  first manifest build manually, and then feed its verified feature graph into the
-  first promoted research run.
+- The genuine path-free 60-session operational graph has now been built and
+  independently pinned. The next immediate gap is feeding that verified feature
+  graph into the first genuine promoted baseline/challenger research run; no
+  paper portfolio or notification authority has been granted yet.
 - The largest research gap is a validated, adjusted-data alpha; Kronos/LLM research is deliberately after the deterministic paper loop works.
 
 Update this document when a numbered step is accepted. Do not reorder or skip steps without recording the reason and the replacement evidence.
