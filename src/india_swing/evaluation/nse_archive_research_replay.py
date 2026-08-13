@@ -1278,7 +1278,12 @@ def _replay_range(
         payload = stored.normalized_payload
         if not isinstance(payload, Mapping) or payload.get("session") != accepted_session:
             _fail("research replay archive range session date does not match its binding")
-        evidence_profile = payload.get("evidence_profile")
+        evidence_profile = (
+            EVIDENCE_PROFILE_COMPLETE
+            if payload.get("schema_version")
+            == NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1
+            else payload.get("evidence_profile")
+        )
         if evidence_profile not in _KNOWN_EVIDENCE_PROFILES:
             _fail("research replay archive range session evidence profile is invalid")
         streamed_profile_counts[evidence_profile] += 1

@@ -1228,6 +1228,37 @@ class NseArchiveResearchReplaySourceIdentityClaimSessionTests(unittest.TestCase)
 
 
 class NseArchiveResearchReplaySourceIdentityClaimBackwardCompatTests(unittest.TestCase):
+    def test_streamed_v1_payload_derives_complete_evidence_profile(self) -> None:
+        dataset = _baseline_dataset()
+        binding = dataset.range_bindings[0]
+        sessions = []
+        for stored in _full_sessions_for_binding(binding):
+            payload = dict(stored.normalized_payload)
+            del payload["source_identity_claims"]
+            del payload["evidence_profile"]
+            del payload["missing_evidence"]
+            payload["schema_version"] = NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1
+            sessions.append(replace(stored, normalized_payload=payload))
+        verified = _verified_from_binding(binding, tuple(sessions))
+
+        class ExactReader:
+            def get_hash_verified_from_date_partition(self, *args, **kwargs):
+                raise AssertionError("mocked stream should be the sole reader")
+
+        with patch.object(
+            replay_module,
+            "stream_verified_nse_historical_archive_range",
+            return_value=verified,
+        ):
+            replayed = tuple(
+                iter_verified_nse_archive_research_sessions(dataset, ExactReader())
+            )
+
+        self.assertEqual(
+            tuple(value.evidence_profile for value in replayed),
+            (EVIDENCE_PROFILE_COMPLETE,) * len(replayed),
+        )
+
     def test_v1_and_v2_session_payloads_verify_with_empty_claims(self) -> None:
         cases = {
             "v1": (NSE_HISTORICAL_ARCHIVE_SCHEMA_VERSION_V1, {"evidence_profile", "missing_evidence"}),
