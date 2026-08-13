@@ -1214,3 +1214,16 @@ def iter_verified_nse_archive_research_sessions(
 
     partition_index = _session_partition_index(dataset)
     return _iter_replay_sessions(dataset, partition_index, reader)
+
+
+def _iter_freshly_verified_nse_archive_research_sessions(
+    dataset: NseArchiveResearchDataset,
+    reader: NseHistoricalArchiveSnapshotReader,
+) -> Iterator[NseArchiveResearchReplaySession]:
+    """Private construction-chain iterator for exact hash-verified readers."""
+
+    if not callable(
+        getattr(type(reader), "get_hash_verified_from_date_partition", None)
+    ):
+        _fail("research replay reader is not an exact hash-verified reader")
+    return iter_verified_nse_archive_research_sessions(dataset, reader)

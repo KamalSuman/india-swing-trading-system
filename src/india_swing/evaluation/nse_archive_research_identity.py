@@ -55,6 +55,7 @@ from .nse_archive_research_replay import (
     NseHistoricalArchiveSnapshotReader,
     _SYMBOL,
     iter_verified_nse_archive_research_sessions,
+    _iter_freshly_verified_nse_archive_research_sessions,
 )
 
 
@@ -617,6 +618,39 @@ class NseArchiveResearchPairedSession:
         if self.paired_session_id != self._calculated_id():
             _fail("research identity paired session identity failed")
 
+    @classmethod
+    def _from_freshly_verified_components(
+        cls,
+        *,
+        replay_session: NseArchiveResearchReplaySession,
+        admission_session: NseArchiveResearchIdentityAdmissionSession,
+    ) -> "NseArchiveResearchPairedSession":
+        """Assemble components created and verified in this iterator turn.
+
+        Public construction and ``verify_content_identity`` remain fully deep.
+        This private seam avoids immediately repeating the same large replay
+        record serialization before the resulting price-stream session reaches
+        its mandatory public verification boundary.
+        """
+
+        if (
+            type(replay_session) is not NseArchiveResearchReplaySession
+            or type(admission_session) is not NseArchiveResearchIdentityAdmissionSession
+            or replay_session.dataset_id != admission_session.dataset_id
+            or replay_session.replay_session_id != admission_session.replay_session_id
+            or replay_session.session_snapshot_id
+            != admission_session.session_snapshot_id
+            or replay_session.market_session != admission_session.market_session
+            or replay_session.partition_id != admission_session.partition_id
+            or replay_session.partition_role != admission_session.partition_role
+        ):
+            _fail("research identity paired session lineage is invalid")
+        value = object.__new__(cls)
+        object.__setattr__(value, "replay_session", replay_session)
+        object.__setattr__(value, "admission_session", admission_session)
+        object.__setattr__(value, "paired_session_id", value._calculated_id())
+        return value
+
     # Read-only, fixed fail-closed posture. These are not dataclass fields --
     # no per-instance state exists for them, and they never enter
     # paired_session_id, since the posture is a constant of this type, not a
@@ -888,10 +922,13 @@ def _build_admission_session(
     session: NseArchiveResearchReplaySession,
     latest_by_listing_key: dict[str, _PriorObservation],
     latest_by_identity: dict[str, _PriorObservation],
+    *,
+    freshly_verified: bool = False,
 ) -> NseArchiveResearchIdentityAdmissionSession:
     if type(session) is not NseArchiveResearchReplaySession:
         _fail("research identity admission replay session type is invalid")
-    session.verify_content_identity()
+    if not freshly_verified:
+        session.verify_content_identity()
     decisions, transitions = _build_admission_session_decisions_and_transitions(
         session, latest_by_listing_key, latest_by_identity
     )
@@ -925,7 +962,14 @@ def _iter_paired_sessions(
 ) -> Iterator[NseArchiveResearchPairedSession]:
     latest_by_listing_key: dict[str, _PriorObservation] = {}
     latest_by_identity: dict[str, _PriorObservation] = {}
-    replay_iterator = iter(iter_verified_nse_archive_research_sessions(dataset, reader))
+    freshly_verified = callable(
+        getattr(type(reader), "get_hash_verified_from_date_partition", None)
+    )
+    replay_iterator = iter(
+        _iter_freshly_verified_nse_archive_research_sessions(dataset, reader)
+        if freshly_verified
+        else iter_verified_nse_archive_research_sessions(dataset, reader)
+    )
 
     while True:
         advance_failed = False
@@ -943,7 +987,10 @@ def _iter_paired_sessions(
         admission_session: NseArchiveResearchIdentityAdmissionSession | None = None
         try:
             admission_session = _build_admission_session(
-                session, latest_by_listing_key, latest_by_identity
+                session,
+                latest_by_listing_key,
+                latest_by_identity,
+                freshly_verified=freshly_verified,
             )
         except NseArchiveResearchIdentityError:
             raise
@@ -981,8 +1028,16 @@ def _iter_paired_sessions(
         pair_failed = False
         paired: NseArchiveResearchPairedSession | None = None
         try:
-            paired = NseArchiveResearchPairedSession(
-                replay_session=session, admission_session=admission_session
+            paired = (
+                NseArchiveResearchPairedSession._from_freshly_verified_components(
+                    replay_session=session,
+                    admission_session=admission_session,
+                )
+                if freshly_verified
+                else NseArchiveResearchPairedSession(
+                    replay_session=session,
+                    admission_session=admission_session,
+                )
             )
         except NseArchiveResearchIdentityError:
             raise
