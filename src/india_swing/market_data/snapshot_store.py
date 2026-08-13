@@ -280,7 +280,11 @@ class LocalMarketSnapshotStore:
         if _SNAPSHOT_ID.fullmatch(snapshot_id) is None:
             raise ValueError("snapshot_id must be a full SHA-256 identifier")
         target = self.root / dataset / partition_date.isoformat() / snapshot_id
-        if not target.exists():
+        # GCSFuse can expose implicit directories without making a stat on the
+        # directory itself reliable immediately after a mount.  Probe the
+        # exact pinned manifest instead; this remains a direct, non-discovery
+        # read and never falls back to listing or latest selection.
+        if not (target / "manifest.json").exists():
             raise MarketSnapshotNotFound(f"snapshot not found: {dataset}/{snapshot_id}")
         return self._read_path(target, expected_dataset=dataset)
 
@@ -298,7 +302,10 @@ class LocalMarketSnapshotStore:
         if _SNAPSHOT_ID.fullmatch(snapshot_id) is None:
             raise ValueError("snapshot_id must be a full SHA-256 identifier")
         target = self.root / dataset / partition_date.isoformat() / snapshot_id
-        if not target.exists():
+        # See get_from_date_partition: use the exact child object as the
+        # existence probe so implicit GCSFuse directories do not cause a
+        # false negative for an otherwise present pinned snapshot.
+        if not (target / "manifest.json").exists():
             raise MarketSnapshotNotFound(f"snapshot not found: {dataset}/{snapshot_id}")
         return self._read_hash_verified_path(target, expected_dataset=dataset)
 
