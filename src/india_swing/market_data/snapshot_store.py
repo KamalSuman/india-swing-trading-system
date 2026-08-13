@@ -302,16 +302,16 @@ class LocalMarketSnapshotStore:
         if _SNAPSHOT_ID.fullmatch(snapshot_id) is None:
             raise ValueError("snapshot_id must be a full SHA-256 identifier")
         target = self.root / dataset / partition_date.isoformat() / snapshot_id
-        # See get_from_date_partition: use the exact child object as the
-        # existence probe so implicit GCSFuse directories do not cause a
-        # false negative for an otherwise present pinned snapshot.
-        if not (target / "manifest.json").exists():
-            raise MarketSnapshotNotFound(f"snapshot not found: {dataset}/{snapshot_id}")
-        return self._read_hash_verified_path(
-            target,
-            expected_dataset=dataset,
-            require_closed_directory=False,
-        )
+        try:
+            return self._read_hash_verified_path(
+                target,
+                expected_dataset=dataset,
+                require_closed_directory=False,
+            )
+        except MarketSnapshotNotFound:
+            raise MarketSnapshotNotFound(
+                f"snapshot not found: {dataset}/{snapshot_id}"
+            ) from None
 
     def find_by_selection_key(
         self,
@@ -412,16 +412,13 @@ class LocalMarketSnapshotStore:
                     raise MarketSnapshotIntegrityError(
                         "market snapshot entries must be files"
                     )
-            elif (
-                manifest_path.is_symlink()
-                or payload_path.is_symlink()
-                or not manifest_path.is_file()
-                or not payload_path.is_file()
-            ):
-                raise MarketSnapshotIntegrityError(
-                    "market snapshot entries must be files"
-                )
-            manifest_value = json.loads(manifest_path.read_text(encoding="utf-8"))
+            try:
+                manifest_text = manifest_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                raise MarketSnapshotNotFound(
+                    "market snapshot manifest was not found"
+                ) from None
+            manifest_value = json.loads(manifest_text)
             required_keys = {
                 "schema_version",
                 "codec_version",
