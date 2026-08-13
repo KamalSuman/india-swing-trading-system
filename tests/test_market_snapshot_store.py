@@ -92,6 +92,33 @@ class LocalMarketSnapshotStoreTests(unittest.TestCase):
             self.assertEqual(verified.manifest, stored.manifest)
             self.assertEqual(verified.payload_bytes, stored.payload_bytes)
 
+    def test_hash_verified_partition_read_avoids_directory_listing(self) -> None:
+        observed = datetime(2026, 7, 15, 8, 30, tzinfo=UTC)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = LocalMarketSnapshotStore(Path(temp_dir))
+            stored = self.put(store, observed)
+
+            with (
+                patch.object(
+                    Path,
+                    "iterdir",
+                    side_effect=AssertionError("directory listing used"),
+                ),
+                patch.object(
+                    Path,
+                    "is_dir",
+                    side_effect=AssertionError("implicit directory stat used"),
+                ),
+            ):
+                verified = store.get_hash_verified_from_date_partition(
+                    DATASET,
+                    observed.date(),
+                    stored.manifest.snapshot_id,
+                )
+
+            self.assertEqual(verified.manifest, stored.manifest)
+            self.assertEqual(verified.payload_bytes, stored.payload_bytes)
+
     def test_concurrent_identical_puts_publish_one_complete_snapshot(self) -> None:
         observed = datetime(2026, 7, 15, 8, 30, tzinfo=UTC)
         with tempfile.TemporaryDirectory() as temp_dir:

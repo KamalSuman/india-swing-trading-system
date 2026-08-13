@@ -307,7 +307,11 @@ class LocalMarketSnapshotStore:
         # false negative for an otherwise present pinned snapshot.
         if not (target / "manifest.json").exists():
             raise MarketSnapshotNotFound(f"snapshot not found: {dataset}/{snapshot_id}")
-        return self._read_hash_verified_path(target, expected_dataset=dataset)
+        return self._read_hash_verified_path(
+            target,
+            expected_dataset=dataset,
+            require_closed_directory=False,
+        )
 
     def find_by_selection_key(
         self,
@@ -382,18 +386,42 @@ class LocalMarketSnapshotStore:
         path: Path,
         *,
         expected_dataset: str | None = None,
+        require_closed_directory: bool = True,
     ) -> HashVerifiedMarketSnapshot:
         try:
-            if path.is_symlink() or not path.is_dir():
-                raise MarketSnapshotIntegrityError("market snapshot path is not a real directory")
-            entries = list(path.iterdir())
-            if any(entry.is_symlink() for entry in entries):
-                raise MarketSnapshotIntegrityError("market snapshot cannot contain symbolic links")
-            if {entry.name for entry in entries} != {"manifest.json", PAYLOAD_FILENAME}:
-                raise MarketSnapshotIntegrityError("market snapshot contains unexpected entries")
-            if not all(entry.is_file() for entry in entries):
-                raise MarketSnapshotIntegrityError("market snapshot entries must be files")
-            manifest_value = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+            manifest_path = path / "manifest.json"
+            payload_path = path / PAYLOAD_FILENAME
+            if require_closed_directory:
+                if path.is_symlink() or not path.is_dir():
+                    raise MarketSnapshotIntegrityError(
+                        "market snapshot path is not a real directory"
+                    )
+                entries = list(path.iterdir())
+                if any(entry.is_symlink() for entry in entries):
+                    raise MarketSnapshotIntegrityError(
+                        "market snapshot cannot contain symbolic links"
+                    )
+                if {entry.name for entry in entries} != {
+                    "manifest.json",
+                    PAYLOAD_FILENAME,
+                }:
+                    raise MarketSnapshotIntegrityError(
+                        "market snapshot contains unexpected entries"
+                    )
+                if not all(entry.is_file() for entry in entries):
+                    raise MarketSnapshotIntegrityError(
+                        "market snapshot entries must be files"
+                    )
+            elif (
+                manifest_path.is_symlink()
+                or payload_path.is_symlink()
+                or not manifest_path.is_file()
+                or not payload_path.is_file()
+            ):
+                raise MarketSnapshotIntegrityError(
+                    "market snapshot entries must be files"
+                )
+            manifest_value = json.loads(manifest_path.read_text(encoding="utf-8"))
             required_keys = {
                 "schema_version",
                 "codec_version",
@@ -459,7 +487,7 @@ class LocalMarketSnapshotStore:
                 f".{manifest.snapshot_id}."
             ):
                 raise MarketSnapshotIntegrityError("snapshot directory and manifest disagree")
-            payload_bytes = (path / manifest.payload_filename).read_bytes()
+            payload_bytes = payload_path.read_bytes()
             if _sha256(payload_bytes) != manifest.payload_sha256:
                 raise MarketSnapshotIntegrityError("market snapshot payload hash mismatch")
         except MarketSnapshotIntegrityError:
