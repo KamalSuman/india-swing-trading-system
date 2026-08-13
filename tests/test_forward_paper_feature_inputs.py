@@ -5,6 +5,11 @@ import unittest
 from datetime import timedelta
 from decimal import Decimal
 
+from india_swing.corporate_actions.models import (
+    CorporateActionEvent,
+    CorporateActionStatus,
+    CorporateActionType,
+)
 from india_swing.evaluation.dataset_assembly import EffectiveTickSize
 from india_swing.forward_paper import feature_inputs as feature_input_module
 from india_swing.forward_paper.feature_inputs import (
@@ -208,6 +213,40 @@ class ForwardPaperFeatureInputTests(unittest.TestCase):
                 for value in result.outcomes
             )
         )
+
+    def test_policy_veto_preserves_its_pinned_tick_as_unused_evidence(self) -> None:
+        dividend = CorporateActionEvent(
+            stable_instrument_id=self.fixture.stable_a,
+            stable_listing_id=self.fixture.listing_a,
+            action_type=CorporateActionType.CASH_DIVIDEND,
+            status=CorporateActionStatus.CONFIRMED,
+            effective_session=self.fixture.effective_session,
+            announcement_time=(
+                self.fixture.window.spec.decision_cutoff - timedelta(days=10)
+            ),
+            knowledge_time=(
+                self.fixture.window.spec.decision_cutoff - timedelta(days=9)
+            ),
+            source_artifact_id=self.fixture.artifact_id,
+            source_row_id=_fake_sha256("feature-input-dividend-row"),
+            cash_amount_per_share=Decimal("5"),
+            currency="INR",
+        )
+        partially_adjusted = self.fixture._build(
+            snapshot=self.fixture._snapshot((dividend,))
+        )
+        result = self._build(adjusted=partially_adjusted, ticks=self.ticks)
+        self.assertEqual(result.assembled_candidate_count, 1)
+        self.assertEqual(result.veto_count, 1)
+        self.assertTrue(
+            any(
+                type(value) is ForwardPaperFeatureInputVeto
+                and value.reason
+                is ForwardPaperFeatureInputVetoReason.SOURCE_ADJUSTMENT_VETO
+                for value in result.outcomes
+            )
+        )
+        result.verify_content_identity()
 
     def test_output_has_no_feature_ranking_alert_or_execution_authority(self) -> None:
         result = self._build()

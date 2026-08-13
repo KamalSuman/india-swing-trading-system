@@ -600,14 +600,14 @@ def _build_forward_paper_feature_input_window(
     if len({value.specification_id for value in canonical_ticks}) != len(canonical_ticks):
         _fail("forward paper feature input tick specifications are duplicated")
 
+    signal_session = source_window.source_window.spec.signal_session
     relevant_keys = {
         (
-            outcome.identity_binding.stable_instrument_id,
-            outcome.identity_binding.stable_listing_id,
-            outcome.observations[-1].source_observation.market_session,
+            binding.stable_instrument_id,
+            binding.stable_listing_id,
+            signal_session,
         )
-        for outcome in source_window.outcomes
-        if type(outcome) is ForwardPaperAdjustedCandidate
+        for binding in source_window.identity_bindings
     }
     if any(
         (value.instrument_id, value.listing_id, value.effective_from_session)
