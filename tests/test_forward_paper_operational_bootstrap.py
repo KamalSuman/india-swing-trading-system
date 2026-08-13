@@ -40,6 +40,27 @@ class ForwardPaperOperationalBootstrapTests(unittest.TestCase):
         )
         self.assertTrue(all(event["event"] == "FORWARD_PAPER_BOOTSTRAP" for event in events))
 
+    def test_bootstrap_strips_preserved_python_module_prefix(self) -> None:
+        calls = []
+        clock_values = iter((10.0, 10.25, 10.75))
+        with redirect_stderr(io.StringIO()):
+            result = bootstrap.main(
+                (
+                    "-m",
+                    "india_swing.forward_paper.operational_cloud_job",
+                    "--exact",
+                    "value",
+                ),
+                importer=lambda name: SimpleNamespace(
+                    main=lambda argv: calls.append(tuple(argv)) or 0
+                ),
+                clock=lambda: next(clock_values),
+                enable_tracebacks=False,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [("--exact", "value")])
+
 
 if __name__ == "__main__":
     unittest.main()
