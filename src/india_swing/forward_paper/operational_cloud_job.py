@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from india_swing.daily_pipeline.acquisition import (
     GCSObjectReader,
@@ -36,6 +37,7 @@ from india_swing.forward_paper.signal_tick import (
     LocalForwardPaperSignalTickPanelStore,
 )
 from india_swing.market_data.snapshot_store import LocalMarketSnapshotStore
+from india_swing.market_data.snapshot_store import StoredMarketSnapshot
 from india_swing.promoted_engine import build_promoted_engine_stores
 
 
@@ -61,6 +63,105 @@ class ForwardPaperOperationalCloudRuntime:
 RuntimeFactory = Callable[[argparse.Namespace], ForwardPaperOperationalCloudRuntime]
 WriterFactory = Callable[[], StateObjectWriter]
 ReaderFactory = Callable[[], GCSObjectReader]
+
+
+class _StructuredProgressLogger:
+    """Sanitized stderr timing events; canonical stdout remains one receipt."""
+
+    def __init__(self) -> None:
+        self._started_at = time.perf_counter()
+        self._stage_started_at: dict[str, float] = {}
+
+    def __call__(
+        self,
+        stage: str,
+        status: str,
+        details: Mapping[str, int],
+    ) -> None:
+        if (
+            stage == "history_reconstruction"
+            and status == "completed"
+            and "archive_session_loading" in self._stage_started_at
+        ):
+            self(
+                "archive_session_loading",
+                "completed",
+                {},
+            )
+        now = time.perf_counter()
+        payload: dict[str, object] = {
+            "elapsed_seconds": round(now - self._started_at, 3),
+            "event": "FORWARD_PAPER_STAGE",
+            "stage": stage,
+            "status": status,
+        }
+        if status == "started":
+            self._stage_started_at[stage] = now
+        elif status in {"completed", "progress"}:
+            stage_started_at = self._stage_started_at.get(stage)
+            if stage_started_at is not None:
+                payload["stage_elapsed_seconds"] = round(now - stage_started_at, 3)
+        for key, value in details.items():
+            if type(key) is str and type(value) is int and value >= 0:
+                payload[key] = value
+        print(
+            json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+class _InstrumentedMarketSnapshotReader:
+    """Exact-reader adapter emitting bounded, sanitized archive progress."""
+
+    def __init__(
+        self,
+        reader: LocalMarketSnapshotStore,
+        progress: _StructuredProgressLogger,
+    ) -> None:
+        self._reader = reader
+        self._progress = progress
+        self._session_count = 0
+
+    def get(self, dataset: str, snapshot_id: str) -> StoredMarketSnapshot:
+        self._progress("archive_index_read", "started", {})
+        result = self._reader.get(dataset, snapshot_id)
+        self._progress("archive_index_read", "completed", {})
+        return result
+
+    def get_from_date_partition(
+        self,
+        dataset: str,
+        partition_date: date,
+        snapshot_id: str,
+    ) -> StoredMarketSnapshot:
+        if self._session_count == 0:
+            self._progress("archive_session_loading", "started", {})
+        result = self._reader.get_from_date_partition(
+            dataset,
+            partition_date,
+            snapshot_id,
+        )
+        self._session_count += 1
+        if self._session_count == 60:
+            self._progress(
+                "archive_session_loading",
+                "progress",
+                {"loaded_session_count": self._session_count},
+            )
+        if self._session_count % 10 == 0:
+            self._progress(
+                "archive_session_loading",
+                "progress",
+                {"loaded_session_count": self._session_count},
+            )
+        return result
 
 
 def _absolute_path(value: str) -> Path:
@@ -147,10 +248,13 @@ def _default_runtime_factory(
     arguments: argparse.Namespace,
     *,
     dataset_reader: GCSObjectReader | None = None,
+    progress: _StructuredProgressLogger | None = None,
 ) -> ForwardPaperOperationalCloudRuntime:
     market_data_root = arguments.market_data_root
     promoted_root = arguments.promoted_root
     reader = dataset_reader or GoogleCloudStorageObjectReader()
+    if progress is not None:
+        progress("dataset_manifest_read", "started", {})
     dataset = read_pinned_nse_archive_research_dataset(
         request=PinnedNseArchiveResearchDatasetRequest(
             bucket=arguments.dataset_bucket,
@@ -160,6 +264,15 @@ def _default_runtime_factory(
         ),
         reader=reader,
     )
+    if progress is not None:
+        progress(
+            "dataset_manifest_read",
+            "completed",
+            {
+                "accepted_session_count": len(dataset.accepted_sessions),
+                "record_count": dataset.record_count,
+            },
+        )
     engine_stores = build_promoted_engine_stores(
         reference_root=arguments.reference_root,
         identity_evidence_root=arguments.identity_evidence_root,
@@ -169,10 +282,16 @@ def _default_runtime_factory(
         promoted_root=promoted_root,
         engine_run_root=arguments.engine_run_root,
     )
+    market_reader: object = LocalMarketSnapshotStore(market_data_root)
+    if progress is not None:
+        market_reader = _InstrumentedMarketSnapshotReader(
+            market_reader,
+            progress,
+        )
     return ForwardPaperOperationalCloudRuntime(
         history_builder=NseArchiveForwardPaperHistoryBuilder(
             datasets=ExactNseArchiveResearchDatasetResolver(dataset),
-            reader=LocalMarketSnapshotStore(market_data_root),
+            reader=market_reader,
         ),
         corporate_actions=LocalCorporateActionSnapshotStore(promoted_root),
         tick_panels=ExactForwardPaperTickPanelResolver(
@@ -195,12 +314,15 @@ def main(
 ) -> int:
     try:
         arguments = _parser().parse_args(list(argv) if argv is not None else None)
+        progress = _StructuredProgressLogger() if runtime_factory is None else None
         if runtime_factory is None:
             active_reader_factory = reader_factory or GoogleCloudStorageObjectReader
             if not callable(active_reader_factory):
                 raise ForwardPaperOperationalCloudJobError(_ERROR)
             active_runtime_factory = lambda values: _default_runtime_factory(
-                values, dataset_reader=active_reader_factory()
+                values,
+                dataset_reader=active_reader_factory(),
+                progress=progress,
             )
         else:
             active_runtime_factory = runtime_factory
@@ -226,6 +348,7 @@ def main(
             corporate_actions=runtime.corporate_actions,
             tick_panels=runtime.tick_panels,
             writer=writer,
+            stage_observer=progress,
         )
         manifest_object = receipt.publication.manifest_object
         output = {

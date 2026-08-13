@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Protocol
+from typing import Mapping, Protocol
 
 from india_swing.corporate_actions.models import CorporateActionSnapshot
 from india_swing.daily_pipeline.state_publication import StateObjectWriter
@@ -59,6 +59,15 @@ class NseArchiveResearchDatasetResolver(Protocol):
     def get(self, dataset_id: str) -> NseArchiveResearchDataset: ...
 
 
+class ForwardPaperOperationalStageObserver(Protocol):
+    def __call__(
+        self,
+        stage: str,
+        status: str,
+        details: Mapping[str, int],
+    ) -> None: ...
+
+
 def _fail(message: str) -> None:
     raise ForwardPaperOperationalJobError(message)
 
@@ -67,6 +76,16 @@ def _sha(value: object) -> str:
     if type(value) is not str or _SHA256.fullmatch(value) is None:
         _fail("forward paper operational job identity is invalid")
     return value
+
+
+def _observe(
+    observer: ForwardPaperOperationalStageObserver | None,
+    stage: str,
+    status: str,
+    **details: int,
+) -> None:
+    if observer is not None:
+        observer(stage, status, details)
 
 
 def _utc(value: object) -> datetime:
@@ -282,6 +301,7 @@ def run_forward_paper_operational_job(
     corporate_actions: ForwardPaperCorporateActionSnapshotResolver,
     tick_panels: ForwardPaperEffectiveTickPanelResolver,
     writer: StateObjectWriter,
+    stage_observer: ForwardPaperOperationalStageObserver | None = None,
 ) -> ForwardPaperOperationalJobReceipt:
     if type(request) is not ForwardPaperOperationalJobRequest:
         _fail("forward paper operational job request is invalid")
@@ -291,7 +311,16 @@ def run_forward_paper_operational_job(
     failed = False
     source = actions = ticks = graph = publication = None
     try:
+        _observe(stage_observer, "history_reconstruction", "started")
         source = history_builder.build(request.history_spec)
+        _observe(
+            stage_observer,
+            "history_reconstruction",
+            "completed",
+            consumed_session_count=source.consumed_session_count,
+            signal_subject_count=source.signal_subject_count,
+        )
+        _observe(stage_observer, "evidence_resolution", "started")
         actions = corporate_actions.get(request.corporate_action_snapshot_id)
         ticks = tick_panels.get(request.tick_panel_id)
         if (
@@ -301,16 +330,31 @@ def run_forward_paper_operational_job(
             or ticks.panel_id != request.tick_panel_id
         ):
             raise ValueError
+        _observe(stage_observer, "evidence_resolution", "completed")
+        _observe(stage_observer, "graph_assembly", "started")
         graph = assemble_forward_paper_operational_research_graph(
             source_window=source,
             corporate_actions=actions,
             tick_panel=ticks,
         )
+        _observe(
+            stage_observer,
+            "graph_assembly",
+            "completed",
+            computed_feature_count=(
+                graph.technical_feature_window.computed_feature_count
+            ),
+            blocked_feature_count=(
+                graph.technical_feature_window.blocked_feature_count
+            ),
+        )
+        _observe(stage_observer, "publication", "started")
         publication = publish_forward_paper_operational_graph(
             graph=graph,
             bucket=request.bucket,
             writer=writer,
         )
+        _observe(stage_observer, "publication", "completed")
     except Exception:
         failed = True
     if failed or graph is None or publication is None:

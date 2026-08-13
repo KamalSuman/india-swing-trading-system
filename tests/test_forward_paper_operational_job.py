@@ -103,6 +103,41 @@ class ForwardPaperOperationalJobTests(unittest.TestCase):
         self.assertFalse(receipt.execution_eligible)
         receipt.verify_content_identity()
 
+    def test_job_reports_ordered_sanitized_stage_events(self) -> None:
+        builder, _ = self._builder()
+        events = []
+        with patch.object(
+            job_module,
+            "iter_nse_archive_research_price_stream_sessions_from",
+            return_value=iter(self.raw.sessions),
+        ):
+            run_forward_paper_operational_job(
+                request=self._request(),
+                history_builder=builder,
+                corporate_actions=ExactResolver(self.actions),
+                tick_panels=ExactResolver(self.ticks),
+                writer=FakeWriter(),
+                stage_observer=lambda stage, status, details: events.append(
+                    (stage, status, dict(details))
+                ),
+            )
+
+        self.assertEqual(
+            [(stage, status) for stage, status, _details in events],
+            [
+                ("history_reconstruction", "started"),
+                ("history_reconstruction", "completed"),
+                ("evidence_resolution", "started"),
+                ("evidence_resolution", "completed"),
+                ("graph_assembly", "started"),
+                ("graph_assembly", "completed"),
+                ("publication", "started"),
+                ("publication", "completed"),
+            ],
+        )
+        for _stage, _status, details in events:
+            self.assertTrue(all(type(value) is int and value >= 0 for value in details.values()))
+
     def test_wrong_exact_artifact_fails_before_publication(self) -> None:
         builder, _ = self._builder()
         writer = FakeWriter()
