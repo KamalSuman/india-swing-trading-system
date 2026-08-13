@@ -749,10 +749,12 @@ class NseHistoricalArchiveStoreTests(unittest.TestCase):
                 1,
             )
 
-            exact_partition_read = LocalMarketSnapshotStore.get_from_date_partition
+            exact_partition_read = (
+                LocalMarketSnapshotStore.get_hash_verified_from_date_partition
+            )
             with patch.object(
                 LocalMarketSnapshotStore,
-                "get_from_date_partition",
+                "get_hash_verified_from_date_partition",
                 autospec=True,
                 side_effect=exact_partition_read,
             ) as exact_read:
@@ -776,6 +778,44 @@ class NseHistoricalArchiveStoreTests(unittest.TestCase):
                 verified.evidence_profile_counts[EVIDENCE_PROFILE_COMPLETE],
                 1,
             )
+
+    def test_range_verifier_decodes_hash_verified_session_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staging = root / "staging" / SESSION.isoformat()
+            archives = root / "source-archives" / SESSION.isoformat()
+            staging.mkdir(parents=True)
+            archives.mkdir(parents=True)
+            archive_path = archives / "Reports-Archives-Multiple-15072026.zip"
+            archive_path.write_bytes(archive_bytes())
+            with zipfile.ZipFile(archive_path) as archive:
+                for name in archive.namelist():
+                    (staging / name).write_bytes(archive.read(name))
+            store = LocalMarketSnapshotStore(root / "canonical")
+            _records, index = import_nse_historical_range(
+                staging_root=root / "staging",
+                archive_root=root / "source-archives",
+                store=store,
+                start=SESSION,
+                end=SESSION,
+                observed_at=OBSERVED_AT,
+            )
+
+            from india_swing.market_data import nse_archive_range as range_module
+
+            decode = range_module.decode_market_payload
+            with patch.object(
+                range_module,
+                "decode_market_payload",
+                wraps=decode,
+            ) as decode_spy:
+                verified = load_verified_nse_historical_archive_range(
+                    store,
+                    index_snapshot_id=index.manifest.snapshot_id,
+                )
+
+            self.assertEqual(len(verified.sessions), 1)
+            self.assertEqual(decode_spy.call_count, 1)
 
     def test_range_verifier_rejects_mutated_session_record_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

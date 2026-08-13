@@ -31,7 +31,7 @@ from .nse_archive import (
     _legacy_bhavcopy_stem,
 )
 from .codec import decode_market_payload
-from .snapshot_store import StoredMarketSnapshot
+from .snapshot_store import HashVerifiedMarketSnapshot, StoredMarketSnapshot
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -189,13 +189,23 @@ def _get_session_snapshot(
     *,
     partition_date: date,
     snapshot_id: str,
-) -> StoredMarketSnapshot:
+) -> StoredMarketSnapshot | HashVerifiedMarketSnapshot:
     """Use an exact date-partition read when the reader provides one.
 
     The fallback preserves the original reader contract for test doubles and
     other providers.  No discovery or latest selection is introduced.
     """
 
+    get_hash_verified = getattr(
+        type(reader), "get_hash_verified_from_date_partition", None
+    )
+    if callable(get_hash_verified):
+        return get_hash_verified(
+            reader,
+            NSE_HISTORICAL_ARCHIVE_EQ_DATASET,
+            partition_date,
+            snapshot_id,
+        )
     get_from_date_partition = getattr(
         type(reader), "get_from_date_partition", None
     )
@@ -207,6 +217,35 @@ def _get_session_snapshot(
             snapshot_id,
         )
     return reader.get(NSE_HISTORICAL_ARCHIVE_EQ_DATASET, snapshot_id)
+
+
+def _materialize_session_snapshot(
+    value: StoredMarketSnapshot | HashVerifiedMarketSnapshot,
+) -> StoredMarketSnapshot:
+    if type(value) is HashVerifiedMarketSnapshot:
+        try:
+            normalized_payload = decode_market_payload(value.payload_bytes)
+        except Exception:
+            raise NseHistoricalArchiveRangeError(
+                "archive range session payload bytes are invalid"
+            ) from None
+        return StoredMarketSnapshot(
+            path=value.path,
+            manifest=value.manifest,
+            normalized_payload=normalized_payload,
+            payload_bytes=value.payload_bytes,
+        )
+    if type(value) is not StoredMarketSnapshot:
+        _fail("archive range session snapshot type is invalid")
+    try:
+        replayed_payload = decode_market_payload(value.payload_bytes)
+    except Exception:
+        raise NseHistoricalArchiveRangeError(
+            "archive range session payload bytes are invalid"
+        ) from None
+    if replayed_payload != value.normalized_payload:
+        _fail("archive range session payload bytes are invalid")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,14 +523,6 @@ def _verify_session(
         != manifest.snapshot_id
     ):
         _fail("archive range session snapshot identity is invalid")
-    try:
-        replayed_payload = decode_market_payload(stored.payload_bytes)
-    except Exception:
-        raise NseHistoricalArchiveRangeError(
-            "archive range session payload bytes are invalid"
-        ) from None
-    if replayed_payload != stored.normalized_payload:
-        _fail("archive range session payload bytes are invalid")
     if (
         type(session) is not date
         or manifest.dataset != NSE_HISTORICAL_ARCHIVE_EQ_DATASET
@@ -780,7 +811,7 @@ def load_verified_nse_historical_archive_range(
     derived_legacy_identity_issue_counts: list[int] = []
     for value in index_records:
         try:
-            stored = _get_session_snapshot(
+            session_value = _get_session_snapshot(
                 reader,
                 partition_date=manifest.observed_at.date(),
                 snapshot_id=value["snapshot_id"],
@@ -789,6 +820,7 @@ def load_verified_nse_historical_archive_range(
             raise NseHistoricalArchiveRangeError(
                 "archive range session snapshot could not be loaded"
             ) from None
+        stored = _materialize_session_snapshot(session_value)
         if is_v1_index:
             # v1 index records never declared identity_issue_count -- bind
             # _verify_session's existing required field to a value derived

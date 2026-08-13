@@ -36,8 +36,11 @@ from india_swing.forward_paper.signal_tick import (
     ExactForwardPaperTickPanelResolver,
     LocalForwardPaperSignalTickPanelStore,
 )
-from india_swing.market_data.snapshot_store import LocalMarketSnapshotStore
-from india_swing.market_data.snapshot_store import StoredMarketSnapshot
+from india_swing.market_data.snapshot_store import (
+    HashVerifiedMarketSnapshot,
+    LocalMarketSnapshotStore,
+    StoredMarketSnapshot,
+)
 from india_swing.promoted_engine import build_promoted_engine_stores
 
 
@@ -129,6 +132,21 @@ class _InstrumentedMarketSnapshotReader:
         self._progress = progress
         self._session_count = 0
 
+    def _record_session_loaded(self) -> None:
+        self._session_count += 1
+        if self._session_count == 60:
+            self._progress(
+                "archive_session_loading",
+                "progress",
+                {"loaded_session_count": self._session_count},
+            )
+        if self._session_count % 10 == 0:
+            self._progress(
+                "archive_session_loading",
+                "progress",
+                {"loaded_session_count": self._session_count},
+            )
+
     def get(self, dataset: str, snapshot_id: str) -> StoredMarketSnapshot:
         self._progress("archive_index_read", "started", {})
         result = self._reader.get(dataset, snapshot_id)
@@ -148,19 +166,23 @@ class _InstrumentedMarketSnapshotReader:
             partition_date,
             snapshot_id,
         )
-        self._session_count += 1
-        if self._session_count == 60:
-            self._progress(
-                "archive_session_loading",
-                "progress",
-                {"loaded_session_count": self._session_count},
-            )
-        if self._session_count % 10 == 0:
-            self._progress(
-                "archive_session_loading",
-                "progress",
-                {"loaded_session_count": self._session_count},
-            )
+        self._record_session_loaded()
+        return result
+
+    def get_hash_verified_from_date_partition(
+        self,
+        dataset: str,
+        partition_date: date,
+        snapshot_id: str,
+    ) -> HashVerifiedMarketSnapshot:
+        if self._session_count == 0:
+            self._progress("archive_session_loading", "started", {})
+        result = self._reader.get_hash_verified_from_date_partition(
+            dataset,
+            partition_date,
+            snapshot_id,
+        )
+        self._record_session_loaded()
         return result
 
 

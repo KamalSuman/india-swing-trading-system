@@ -73,6 +73,15 @@ class StoredMarketSnapshot:
     payload_bytes: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class HashVerifiedMarketSnapshot:
+    """Pinned snapshot bytes verified without a second payload decode."""
+
+    path: Path
+    manifest: MarketSnapshotManifest
+    payload_bytes: bytes
+
+
 def _safe_component(value: str, field_name: str) -> str:
     if not isinstance(value, str) or _SAFE_COMPONENT.fullmatch(value) is None:
         raise ValueError(f"{field_name} contains unsafe path characters")
@@ -275,6 +284,24 @@ class LocalMarketSnapshotStore:
             raise MarketSnapshotNotFound(f"snapshot not found: {dataset}/{snapshot_id}")
         return self._read_path(target, expected_dataset=dataset)
 
+    def get_hash_verified_from_date_partition(
+        self,
+        dataset: str,
+        partition_date: date,
+        snapshot_id: str,
+    ) -> HashVerifiedMarketSnapshot:
+        """Read one exact pinned snapshot without decoding its payload."""
+
+        dataset = _safe_component(dataset, "dataset")
+        if type(partition_date) is not date:
+            raise ValueError("partition_date must be a date")
+        if _SNAPSHOT_ID.fullmatch(snapshot_id) is None:
+            raise ValueError("snapshot_id must be a full SHA-256 identifier")
+        target = self.root / dataset / partition_date.isoformat() / snapshot_id
+        if not target.exists():
+            raise MarketSnapshotNotFound(f"snapshot not found: {dataset}/{snapshot_id}")
+        return self._read_hash_verified_path(target, expected_dataset=dataset)
+
     def find_by_selection_key(
         self,
         dataset: str,
@@ -344,11 +371,11 @@ class LocalMarketSnapshotStore:
         return selected
 
     @staticmethod
-    def _read_path(
+    def _read_hash_verified_path(
         path: Path,
         *,
         expected_dataset: str | None = None,
-    ) -> StoredMarketSnapshot:
+    ) -> HashVerifiedMarketSnapshot:
         try:
             if path.is_symlink() or not path.is_dir():
                 raise MarketSnapshotIntegrityError("market snapshot path is not a real directory")
@@ -428,13 +455,33 @@ class LocalMarketSnapshotStore:
             payload_bytes = (path / manifest.payload_filename).read_bytes()
             if _sha256(payload_bytes) != manifest.payload_sha256:
                 raise MarketSnapshotIntegrityError("market snapshot payload hash mismatch")
-            normalized_payload = decode_market_payload(payload_bytes)
-            if market_payload_record_count(normalized_payload) != manifest.record_count:
+        except MarketSnapshotIntegrityError:
+            raise
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise MarketSnapshotIntegrityError("market snapshot is incomplete or malformed") from exc
+        return HashVerifiedMarketSnapshot(path, manifest, payload_bytes)
+
+    @staticmethod
+    def _read_path(
+        path: Path,
+        *,
+        expected_dataset: str | None = None,
+    ) -> StoredMarketSnapshot:
+        verified = LocalMarketSnapshotStore._read_hash_verified_path(
+            path,
+            expected_dataset=expected_dataset,
+        )
+        try:
+            normalized_payload = decode_market_payload(verified.payload_bytes)
+            if market_payload_record_count(normalized_payload) != verified.manifest.record_count:
                 raise MarketSnapshotIntegrityError("market snapshot record count mismatch")
         except MarketSnapshotIntegrityError:
             raise
         except MarketPayloadCodecError as exc:
             raise MarketSnapshotIntegrityError("market snapshot payload is malformed") from exc
-        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise MarketSnapshotIntegrityError("market snapshot is incomplete or malformed") from exc
-        return StoredMarketSnapshot(path, manifest, normalized_payload, payload_bytes)
+        return StoredMarketSnapshot(
+            verified.path,
+            verified.manifest,
+            normalized_payload,
+            verified.payload_bytes,
+        )
