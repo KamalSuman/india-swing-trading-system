@@ -71,3 +71,6 @@ india-swing-quality-pilot-arm = "india_swing.quality_pilot_arming_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools]
+py-modules = ["india_swing_forward_paper_bootstrap"]
