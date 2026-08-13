@@ -148,8 +148,18 @@ This is the durable execution order for reaching the first safe, live paper-trad
      implemented for the first one-variable experiment: default baseline versus
      a challenger changing only the high-volatility regime threshold to 0.40.
      Launch requires the expected IDs of both code-defined configurations and the
-     exact accepted operational-manifest pin. Building a reviewed image and the
-     first real 1,405-vector invocation remain before this step is complete.
+     exact accepted operational-manifest pin. A successful real 1,405-vector
+     invocation remains before this step is complete.
+   - First production attempt `india-swing-forward-paper-research-wvgzc` used
+     reviewed commit `4289d0b` and immutable image digest
+     `sha256:f4650cf5c01d63794d506d51491df2fb882dc51d2da1d59da808ae2337a064f5`.
+     It loaded all 140 required archive sessions but reached the 1,800-second
+     one-task, zero-retry timeout before graph restoration completed. It
+     published no research artifact. The cause was redundant use of the public
+     whole-graph verification constructor after exact resolver reconstruction;
+     replay now uses the existing verified-input derivation path while retaining
+     final end-to-end manifest comparison. A new reviewed image and one explicit
+     retry remain required.
 
 5. **INR 200,000 paper genesis and launch package** — PENDING
    - Create the empty paper portfolio and exact reconciliation evidence.

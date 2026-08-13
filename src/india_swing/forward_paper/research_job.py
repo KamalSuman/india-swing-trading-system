@@ -244,6 +244,7 @@ def run_forward_paper_research_job(
             history_windows=history_windows,
             corporate_actions=corporate_actions,
             tick_panels=tick_panels,
+            stage_observer=stage_observer,
         )
         _observe(
             stage_observer,

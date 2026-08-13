@@ -1,5 +1,5 @@
-# Deployment template only. Replace RESEARCH_IMAGE_DIGEST with the digest of an
-# image containing the reviewed research modules before applying this manifest.
+# One-shot research job pinned to reviewed commit 4289d0b and its immutable
+# Artifact Registry image digest. This manifest creates no recurring schedule.
 apiVersion: run.googleapis.com/v1
 kind: Job
 metadata:
@@ -20,7 +20,7 @@ spec:
           timeoutSeconds: "1800"
           maxRetries: 0
           containers:
-            - image: asia-south1-docker.pkg.dev/indian-swing-trading-bot/swing-repo/india-swing-app@sha256:RESEARCH_IMAGE_DIGEST
+            - image: asia-south1-docker.pkg.dev/indian-swing-trading-bot/swing-repo/india-swing-app@sha256:f4650cf5c01d63794d506d51491df2fb882dc51d2da1d59da808ae2337a064f5
               command:
                 - python
               args:

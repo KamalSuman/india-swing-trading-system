@@ -21,7 +21,8 @@ from india_swing.forward_paper.history import (
 )
 from india_swing.forward_paper.operational import (
     ForwardPaperOperationalResearchGraph,
-    assemble_forward_paper_operational_research_graph,
+    OperationalGraphStageObserver,
+    _assemble_forward_paper_operational_research_graph_from_verified_inputs,
 )
 from india_swing.identity import content_id
 from india_swing.forward_paper.signal_tick import (
@@ -474,6 +475,7 @@ def restore_forward_paper_operational_graph(
     history_windows: ForwardPaperRawHistoryWindowResolver,
     corporate_actions: ForwardPaperCorporateActionSnapshotResolver,
     tick_panels: ForwardPaperEffectiveTickPanelResolver,
+    stage_observer: OperationalGraphStageObserver | None = None,
 ) -> ForwardPaperOperationalResearchGraph:
     expected_graph_id = _sha(expected_graph_id)
     bucket = _bucket(bucket)
@@ -549,10 +551,16 @@ def restore_forward_paper_operational_graph(
             or ticks.panel_id != manifest.tick_panel_id
         ):
             raise ValueError
-        graph = assemble_forward_paper_operational_research_graph(
+        # Each exact resolver above already reconstructs or loads a content-bound
+        # artifact and this boundary independently checks every expected top-level
+        # identity before derivation. Use the same verified-input graph path as the
+        # operational job; the final manifest comparison below remains an
+        # independent end-to-end recomputation check.
+        graph = _assemble_forward_paper_operational_research_graph_from_verified_inputs(
             source_window=source,
             corporate_actions=actions,
             tick_panel=ticks,
+            stage_observer=stage_observer,
         )
     except Exception:
         failed = True

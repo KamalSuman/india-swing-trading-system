@@ -126,6 +126,12 @@ class ForwardPaperResearchGCSTests(unittest.TestCase):
             [(stage, status) for stage, status, _ in stages],
             [
                 ("operational_graph_restore", "started"),
+                ("adjustment_derivation", "started"),
+                ("adjustment_derivation", "completed"),
+                ("feature_input_derivation", "started"),
+                ("feature_input_derivation", "completed"),
+                ("technical_feature_derivation", "started"),
+                ("technical_feature_derivation", "completed"),
                 ("operational_graph_restore", "completed"),
                 ("baseline_challenger", "started"),
                 ("baseline_challenger", "completed"),
