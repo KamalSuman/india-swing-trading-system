@@ -633,7 +633,7 @@ class PromotedCrossSectionResult:
 
 @dataclass(frozen=True, slots=True)
 class _ScoreParts:
-    source_result: PromotedTechnicalFeatureResult
+    vector: PromotedTechnicalFeatureVector
     specialist_scores: tuple[PromotedSpecialistScore, ...]
     ensemble_score: Decimal
 
@@ -678,32 +678,21 @@ def _regime(
 
 def _score_parts(
     *,
-    computed: tuple[PromotedTechnicalFeatureResult, ...],
+    vectors: tuple[PromotedTechnicalFeatureVector, ...],
     regime_evidence: PromotedMarketRegimeEvidence,
     config: PromotedCrossSectionConfig,
 ) -> tuple[_ScoreParts, ...]:
-    source_by_key = {
-        (
-            value.feature_vector.stable_instrument_id,
-            value.feature_vector.stable_listing_id,
-        ): value
-        for value in computed
-        if value.feature_vector is not None
-    }
-    if len(source_by_key) != len(computed):
-        raise PromotedCrossSectionError(_ERR_GRAPH)
     cells = tuple(
         (
             (
-                value.feature_vector.stable_instrument_id,
-                value.feature_vector.stable_listing_id,
+                value.stable_instrument_id,
+                value.stable_listing_id,
             ),
-            value.feature_vector,
+            value,
         )
-        for value in computed
-        if value.feature_vector is not None
+        for value in vectors
     )
-    if len(cells) != len(computed):
+    if len({key for key, _ in cells}) != len(vectors):
         raise PromotedCrossSectionError(_ERR_GRAPH)
     short_ranks = _percentile_ranks(
         tuple((key, vector.return_short) for key, vector in cells),
@@ -820,7 +809,7 @@ def _score_parts(
         )
         output.append(
             _ScoreParts(
-                source_result=source_by_key[key],
+                vector=vector,
                 specialist_scores=specialist_scores,
                 ensemble_score=sum(
                     (value.weighted_score for value in specialist_scores),
@@ -829,6 +818,104 @@ def _score_parts(
             )
         )
     return tuple(output)
+
+
+def score_promoted_feature_vectors(
+    *,
+    vectors: tuple[PromotedTechnicalFeatureVector, ...],
+    source_feature_panel_id: str,
+    config: PromotedCrossSectionConfig,
+) -> tuple[
+    PromotedMarketRegimeEvidence | None,
+    tuple[PromotedOpportunityScore, ...],
+]:
+    """Apply the established regime/specialist kernel to exact vectors.
+
+    This is the shared calculation seam used by both the legacy promoted
+    panel and the forward-paper graph. It performs no selection and grants
+    no ranking, alert, paper-trade, notification, or execution authority.
+    """
+
+    if (
+        type(vectors) is not tuple
+        or any(type(value) is not PromotedTechnicalFeatureVector for value in vectors)
+        or type(source_feature_panel_id) is not str
+        or _SHA256.fullmatch(source_feature_panel_id) is None
+        or type(config) is not PromotedCrossSectionConfig
+    ):
+        raise PromotedCrossSectionError(_ERR_INPUT)
+    try:
+        config.verify_content_identity()
+        for value in vectors:
+            value.verify_content_identity()
+    except Exception:
+        raise PromotedCrossSectionError(_ERR_VERIFY) from None
+    keys = tuple(
+        (value.stable_instrument_id, value.stable_listing_id) for value in vectors
+    )
+    if len(set(keys)) != len(keys):
+        raise PromotedCrossSectionError(_ERR_GRAPH)
+    if len(vectors) < config.minimum_computed_instruments:
+        return None, ()
+    try:
+        with localcontext() as context:
+            context.prec = 28
+            context.rounding = ROUND_HALF_EVEN
+            regime_evidence = _regime(vectors, config, source_feature_panel_id)
+            parts = _score_parts(
+                vectors=vectors,
+                regime_evidence=regime_evidence,
+                config=config,
+            )
+            tiers = _rank_tiers(
+                tuple(
+                    (
+                        (
+                            value.vector.stable_instrument_id,
+                            value.vector.stable_listing_id,
+                        ),
+                        value.ensemble_score,
+                    )
+                    for value in parts
+                )
+            )
+            opportunities = tuple(
+                sorted(
+                    (
+                        PromotedOpportunityScore(
+                            source_feature_id=value.vector.feature_id,
+                            regime_evidence_id=regime_evidence.evidence_id,
+                            stable_instrument_id=value.vector.stable_instrument_id,
+                            stable_listing_id=value.vector.stable_listing_id,
+                            specialist_scores=value.specialist_scores,
+                            ensemble_score=value.ensemble_score,
+                            rank_tier=tiers[
+                                (
+                                    value.vector.stable_instrument_id,
+                                    value.vector.stable_listing_id,
+                                )
+                            ][0],
+                            tie_size=tiers[
+                                (
+                                    value.vector.stable_instrument_id,
+                                    value.vector.stable_listing_id,
+                                )
+                            ][1],
+                        )
+                        for value in parts
+                    ),
+                    key=lambda value: (
+                        value.rank_tier,
+                        value.stable_instrument_id,
+                        value.stable_listing_id,
+                    ),
+                )
+            )
+    except PromotedCrossSectionError:
+        raise
+    except Exception:
+        raise PromotedCrossSectionError(_ERR_GRAPH) from None
+    return regime_evidence, opportunities
 
 
 @dataclass(frozen=True, slots=True)
@@ -919,59 +1006,16 @@ def _build_facts_exact(
         is PromotedTechnicalFeatureStatus.FEATURE_VECTOR_COMPUTED_COLLECTION_ONLY
         and value.feature_vector is not None
     )
-    enough = len(computed) >= config.minimum_computed_instruments
-    regime_evidence = (
-        _regime(
-            tuple(value.feature_vector for value in computed),
-            config,
-            source_panel.panel_id,
-        )
-        if enough
-        else None
+    vectors = tuple(value.feature_vector for value in computed if value.feature_vector)
+    regime_evidence, opportunities = score_promoted_feature_vectors(
+        vectors=vectors,
+        source_feature_panel_id=source_panel.panel_id,
+        config=config,
     )
-    opportunity_by_result_id: dict[str, PromotedOpportunityScore] = {}
-    if regime_evidence is not None:
-        parts = _score_parts(
-            computed=computed,
-            regime_evidence=regime_evidence,
-            config=config,
-        )
-        tiers = _rank_tiers(
-            tuple(
-                (
-                    (
-                        value.source_result.feature_vector.stable_instrument_id,
-                        value.source_result.feature_vector.stable_listing_id,
-                    ),
-                    value.ensemble_score,
-                )
-                for value in parts
-                if value.source_result.feature_vector is not None
-            )
-        )
-        if len(tiers) != len(parts):
-            raise PromotedCrossSectionError(_ERR_GRAPH)
-        for value in parts:
-            vector = value.source_result.feature_vector
-            assert vector is not None
-            rank_tier, tie_size = tiers[
-                (
-                    vector.stable_instrument_id,
-                    vector.stable_listing_id,
-                )
-            ]
-            opportunity_by_result_id[value.source_result.result_id] = (
-                PromotedOpportunityScore(
-                    source_feature_id=vector.feature_id,
-                    regime_evidence_id=regime_evidence.evidence_id,
-                    stable_instrument_id=vector.stable_instrument_id,
-                    stable_listing_id=vector.stable_listing_id,
-                    specialist_scores=value.specialist_scores,
-                    ensemble_score=value.ensemble_score,
-                    rank_tier=rank_tier,
-                    tie_size=tie_size,
-                )
-            )
+    enough = regime_evidence is not None
+    opportunity_by_feature_id = {
+        value.source_feature_id: value for value in opportunities
+    }
 
     results: list[PromotedCrossSectionResult] = []
     for source_result in source_panel.results:
@@ -1002,7 +1046,7 @@ def _build_facts_exact(
                         PromotedCrossSectionResultStatus
                         .SCORED_RESOLVED_SUBSET_COLLECTION_ONLY
                     ),
-                    opportunity_by_result_id[source_result.result_id],
+                    opportunity_by_feature_id[source_result.feature_vector.feature_id],
                 )
             )
     results_tuple = tuple(
@@ -1034,7 +1078,7 @@ def _build_facts_exact(
         )
     )
     status_counts = _counts(tuple(value.status.value for value in results_tuple))
-    scored_count = len(opportunity_by_result_id)
+    scored_count = len(opportunity_by_feature_id)
     blocked_count = len(results_tuple) - scored_count
     resolved_complete = bool(results_tuple) and scored_count == len(results_tuple)
     orphan_bar_count = len(

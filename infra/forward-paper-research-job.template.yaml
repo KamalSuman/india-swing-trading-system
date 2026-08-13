@@ -1,0 +1,85 @@
+# Deployment template only. Replace RESEARCH_IMAGE_DIGEST with the digest of an
+# image containing the reviewed research modules before applying this manifest.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: india-swing-forward-paper-research
+  labels:
+    app.kubernetes.io/name: india-swing-forward-paper-research
+    app.kubernetes.io/part-of: india-swing-trading-system
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+    spec:
+      taskCount: 1
+      template:
+        spec:
+          serviceAccountName: eod-swing-runtime@indian-swing-trading-bot.iam.gserviceaccount.com
+          timeoutSeconds: "1800"
+          maxRetries: 0
+          containers:
+            - image: asia-south1-docker.pkg.dev/indian-swing-trading-bot/swing-repo/india-swing-app@sha256:RESEARCH_IMAGE_DIGEST
+              command:
+                - python
+              args:
+                - -m
+                - india_swing.forward_paper.research_cloud_job
+                - --market-data-root
+                - /mnt/india-swing-data/research/canonical-market-data
+                - --reference-root
+                - /tmp/india-swing/reference
+                - --identity-evidence-root
+                - /tmp/india-swing/identity-evidence
+                - --calendar-root
+                - /tmp/india-swing/calendar
+                - --daily-reports-root
+                - /tmp/india-swing/daily-reports
+                - --historical-corpus-root
+                - /tmp/india-swing/historical-corpus
+                - --promoted-root
+                - /mnt/india-swing-data/research/forward-paper-promoted
+                - --engine-run-root
+                - /tmp/india-swing/engine-runs
+                - --dataset-id
+                - ade90738281ca444c610804aaf52577a1f4125e1b1c74e83ad058218e25542cd
+                - --dataset-bucket
+                - swing-data-indian-swing-trading-bot
+                - --dataset-generation
+                - "1786542111409559"
+                - --dataset-sha256
+                - 32352fd3e21f7690af3bdb69e1a13de48160ef2dbde30d7ac14e779fc1f210fa
+                - --source-bucket
+                - swing-data-indian-swing-trading-bot
+                - --source-graph-id
+                - 39605f5b799211db020e8edb96f23c145acd9a5548240afb27a7632aae40eaa6
+                - --source-manifest-object-name
+                - research/forward-paper-operational/v1/2026-07-31/39605f5b799211db020e8edb96f23c145acd9a5548240afb27a7632aae40eaa6/1f51159d084e158a8cc92c563587d4ee529e19b613bc250a9b34d5d75ce7dabc.json
+                - --source-manifest-generation
+                - "1786657063624792"
+                - --source-manifest-sha256
+                - eb8d592ef09ab6872a519f332c7d525069c6a8a141a351b54f68f955b6853faf
+                - --output-bucket
+                - swing-data-indian-swing-trading-bot
+                - --research-design
+                - DEFAULT_V1_VS_HIGH_VOL_040_V1
+                - --baseline-config-id
+                - 7a75d4590081e45ecb42f69ee4ac4dac1f0fdb5b13de3d242a3c2598ce5c9b24
+                - --challenger-config-id
+                - 45275a0f9d8213651517387f5bd11d007f300788b884c19cb522ac78f22adffd
+                - --comparison-top-tiers
+                - "10"
+              resources:
+                limits:
+                  cpu: "8"
+                  memory: 16Gi
+              volumeMounts:
+                - name: corpus
+                  mountPath: /mnt/india-swing-data
+          volumes:
+            - name: corpus
+              csi:
+                driver: gcsfuse.run.googleapis.com
+                volumeAttributes:
+                  bucketName: swing-data-indian-swing-trading-bot

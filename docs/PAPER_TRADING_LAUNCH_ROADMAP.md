@@ -131,9 +131,25 @@ This is the durable execution order for reaching the first safe, live paper-trad
      The receipt remained `collection_only=true`, `paper_trade_eligible=false`,
      `notification_eligible=false`, and `execution_eligible=false`.
 
-4. **First genuine promoted research run** — PENDING
+4. **First genuine promoted research run** — IN PROGRESS
    - Run the deterministic baseline/challenger on real adjusted evidence.
    - Promote only an artifact that passes the existing research, quality, quote, liquidity, allocation, and terminal gates.
+   - The pure baseline/challenger boundary is implemented over the accepted
+     forward-paper graph. Both arms reuse the established promoted regime and
+     specialist-score kernel, retain every upstream veto, bind exact configs and
+     comparisons under content identities, and grant no promotion, paper-trade,
+     notification, or execution authority.
+   - The durable research manifest and exact-input job boundary are implemented.
+     They pin the operational graph by object name, generation, and SHA-256;
+     recompute it before use; bind both configuration and arm identities; publish
+     create-once through the shared state writer; and support exact replay without
+     listing or latest selection.
+   - The production Cloud Run entry point and pinned deployment template are
+     implemented for the first one-variable experiment: default baseline versus
+     a challenger changing only the high-volatility regime threshold to 0.40.
+     Launch requires the expected IDs of both code-defined configurations and the
+     exact accepted operational-manifest pin. Building a reviewed image and the
+     first real 1,405-vector invocation remain before this step is complete.
 
 5. **INR 200,000 paper genesis and launch package** — PENDING
    - Create the empty paper portfolio and exact reconciliation evidence.

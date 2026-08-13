@@ -17,6 +17,7 @@ from india_swing.features.promoted_cross_section import (
     VerifiedPromotedCrossSectionPanel,
     _percentile_ranks,
     _rank_tiers,
+    score_promoted_feature_vectors,
 )
 from india_swing.features.promoted_technical import (
     PromotedTechnicalFeatureConfig,
@@ -163,6 +164,29 @@ class PromotedCrossSectionRankKernelTests(unittest.TestCase):
 
 
 class PromotedCrossSectionCalculationTests(unittest.TestCase):
+    def test_shared_vector_kernel_matches_legacy_panel_exactly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            features, config, panel = _cross_section(Path(tmp))
+            vectors = tuple(
+                result.feature_vector
+                for result in features.results
+                if result.feature_vector is not None
+            )
+            regime, opportunities = score_promoted_feature_vectors(
+                vectors=vectors,
+                source_feature_panel_id=features.panel_id,
+                config=config,
+            )
+        self.assertEqual(regime, panel.regime_evidence)
+        self.assertEqual(
+            opportunities,
+            tuple(
+                result.opportunity_score
+                for result in panel.results
+                if result.opportunity_score is not None
+            ),
+        )
+
     def test_computes_regime_specialists_and_dense_rank(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             features, config, panel = _cross_section(Path(tmp))

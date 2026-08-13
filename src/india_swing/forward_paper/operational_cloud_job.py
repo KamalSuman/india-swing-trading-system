@@ -266,7 +266,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _default_runtime_factory(
+def build_forward_paper_operational_cloud_runtime(
     arguments: argparse.Namespace,
     *,
     dataset_reader: GCSObjectReader | None = None,
@@ -323,6 +323,11 @@ def _default_runtime_factory(
     )
 
 
+# Backward-compatible private alias retained for focused tests and callers from
+# before the runtime builder became a shared production composition seam.
+_default_runtime_factory = build_forward_paper_operational_cloud_runtime
+
+
 def _default_writer_factory() -> StateObjectWriter:
     return GoogleCloudStorageStateObjectWriter()
 
@@ -341,7 +346,7 @@ def main(
             active_reader_factory = reader_factory or GoogleCloudStorageObjectReader
             if not callable(active_reader_factory):
                 raise ForwardPaperOperationalCloudJobError(_ERROR)
-            active_runtime_factory = lambda values: _default_runtime_factory(
+            active_runtime_factory = lambda values: build_forward_paper_operational_cloud_runtime(
                 values,
                 dataset_reader=active_reader_factory(),
                 progress=progress,
