@@ -764,7 +764,7 @@ def _verified_v3_session_iterator(
             ) from None
         stored = _materialize_session_snapshot(session_value)
         evidence_profile = _verify_session(stored, value, index_observed_at)
-        if value["evidence_profile"] != evidence_profile:
+        if "evidence_profile" in value and value["evidence_profile"] != evidence_profile:
             _fail("archive range index evidence profile is inconsistent")
         # Raw bytes were independently hashed and decoded above and are never
         # consumed by research replay. Releasing them here bounds peak memory
@@ -797,18 +797,24 @@ def stream_verified_nse_historical_archive_range(
     if not isinstance(index.normalized_payload, Mapping):
         _fail("archive range index payload is invalid")
     index_schema = index.normalized_payload.get("schema_version")
-    if index_schema in (
-        NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1,
+    if index_schema not in (
         NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2,
+        NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION,
     ):
-        raise NseHistoricalArchiveLegacyIndexSchema(
-            "archive range streaming requires the current index schema"
-        )
-    if index_schema != NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION:
         _fail("archive range index schema is invalid")
+    index_keys = (
+        _INDEX_KEYS_V2
+        if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2
+        else _INDEX_KEYS_V3
+    )
+    index_record_keys = (
+        _INDEX_RECORD_KEYS_V2
+        if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2
+        else _INDEX_RECORD_KEYS_V3
+    )
     payload = _mapping(
         index.normalized_payload,
-        _INDEX_KEYS_V3,
+        index_keys,
         "archive range index payload is invalid",
     )
     records = payload["records"]
@@ -830,7 +836,7 @@ def stream_verified_nse_historical_archive_range(
     ):
         _fail("archive range index payload is invalid")
     index_records = tuple(
-        _mapping(value, _INDEX_RECORD_KEYS_V3, "archive range index record is invalid")
+        _mapping(value, index_record_keys, "archive range index record is invalid")
         for value in records
     )
     sessions = tuple(value["session"] for value in index_records)
@@ -843,7 +849,10 @@ def stream_verified_nse_historical_archive_range(
             or value["record_count"] <= 0
             or type(value["identity_issue_count"]) is not int
             or value["identity_issue_count"] < 0
-            or value["evidence_profile"] not in _EVIDENCE_PROFILE_MISSING
+            or (
+                index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION
+                and value["evidence_profile"] not in _EVIDENCE_PROFILE_MISSING
+            )
             for value in index_records
         )
     ):
@@ -851,33 +860,43 @@ def stream_verified_nse_historical_archive_range(
     for value in index_records:
         _sha256(value["snapshot_id"], "archive range session snapshot id is invalid")
         _sha256(value["source_container_sha256"], "archive range source hash is invalid")
-    evidence_profile_counts = {
-        profile: sum(value["evidence_profile"] == profile for value in index_records)
-        for profile in _EVIDENCE_PROFILE_MISSING
-    }
-    claimed_counts = payload["evidence_profile_counts"]
-    normalized_claimed_counts = (
-        {
-            profile: claimed_counts.get(profile, 0)
+    if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION:
+        evidence_profile_counts = {
+            profile: sum(value["evidence_profile"] == profile for value in index_records)
             for profile in _EVIDENCE_PROFILE_MISSING
         }
-        if isinstance(claimed_counts, Mapping)
-        and set(claimed_counts) <= set(_EVIDENCE_PROFILE_MISSING)
-        and all(type(value) is int and value >= 0 for value in claimed_counts.values())
-        else None
-    )
-    incomplete_evidence_session_count = sum(
-        value["evidence_profile"] != EVIDENCE_PROFILE_COMPLETE
-        for value in index_records
-    )
+        claimed_counts = payload["evidence_profile_counts"]
+        normalized_claimed_counts = (
+            {
+                profile: claimed_counts.get(profile, 0)
+                for profile in _EVIDENCE_PROFILE_MISSING
+            }
+            if isinstance(claimed_counts, Mapping)
+            and set(claimed_counts) <= set(_EVIDENCE_PROFILE_MISSING)
+            and all(type(value) is int and value >= 0 for value in claimed_counts.values())
+            else None
+        )
+        incomplete_evidence_session_count = sum(
+            value["evidence_profile"] != EVIDENCE_PROFILE_COMPLETE
+            for value in index_records
+        )
+    else:
+        evidence_profile_counts = {}
+        normalized_claimed_counts = {}
+        incomplete_evidence_session_count = 0
     if (
         payload["identity_issue_count"]
         != sum(value["identity_issue_count"] for value in index_records)
         or payload["identity_quarantined_session_count"]
         != sum(value["identity_issue_count"] > 0 for value in index_records)
-        or normalized_claimed_counts != evidence_profile_counts
-        or payload["incomplete_evidence_session_count"]
-        != incomplete_evidence_session_count
+        or (
+            index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION
+            and (
+                normalized_claimed_counts != evidence_profile_counts
+                or payload["incomplete_evidence_session_count"]
+                != incomplete_evidence_session_count
+            )
+        )
     ):
         _fail("archive range identity accounting is invalid")
     return StreamingVerifiedNseHistoricalArchiveRange(

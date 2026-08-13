@@ -772,6 +772,10 @@ def _verify_range_matches_binding(
         StreamingVerifiedNseHistoricalArchiveRange,
     ):
         _fail("research replay archive range type is invalid")
+    deferred_streaming_evidence = (
+        type(verified) is StreamingVerifiedNseHistoricalArchiveRange
+        and not verified.evidence_profile_counts
+    )
     if (
         verified.index_snapshot_id != binding.index_snapshot_id
         or verified.range_start != binding.range_start
@@ -781,18 +785,22 @@ def _verify_range_matches_binding(
         or verified.identity_issue_count != binding.identity_issue_count
         or verified.identity_quarantined_session_count
         != binding.identity_quarantined_session_count
-        or verified.incomplete_evidence_session_count
-        != binding.incomplete_evidence_session_count
+        or (
+            not deferred_streaming_evidence
+            and verified.incomplete_evidence_session_count
+            != binding.incomplete_evidence_session_count
+        )
     ):
         _fail("research replay archive range does not match its binding")
     profile_counts = verified.evidence_profile_counts
-    if (
-        not isinstance(profile_counts, Mapping)
-        or set(profile_counts) != set(_KNOWN_EVIDENCE_PROFILES)
-        or any(type(value) is not int or value < 0 for value in profile_counts.values())
-        or tuple(sorted(profile_counts.items())) != binding.evidence_profile_counts
-    ):
-        _fail("research replay archive range evidence profile counts do not match its binding")
+    if not deferred_streaming_evidence:
+        if (
+            not isinstance(profile_counts, Mapping)
+            or set(profile_counts) != set(_KNOWN_EVIDENCE_PROFILES)
+            or any(type(value) is not int or value < 0 for value in profile_counts.values())
+            or tuple(sorted(profile_counts.items())) != binding.evidence_profile_counts
+        ):
+            _fail("research replay archive range evidence profile counts do not match its binding")
     if type(verified) is VerifiedNseHistoricalArchiveRange:
         if (
             type(verified.sessions) is not tuple
@@ -1242,6 +1250,8 @@ def _replay_range(
     if match_failed:
         _fail("research replay archive range does not match its binding")
 
+    streamed_profile_counts = {profile: 0 for profile in _KNOWN_EVIDENCE_PROFILES}
+    streamed_session_count = 0
     for session_snapshot_id, accepted_session, stored in zip(
         binding.session_snapshot_ids,
         binding.accepted_sessions,
@@ -1255,6 +1265,11 @@ def _replay_range(
         payload = stored.normalized_payload
         if not isinstance(payload, Mapping) or payload.get("session") != accepted_session:
             _fail("research replay archive range session date does not match its binding")
+        evidence_profile = payload.get("evidence_profile")
+        if evidence_profile not in _KNOWN_EVIDENCE_PROFILES:
+            _fail("research replay archive range session evidence profile is invalid")
+        streamed_profile_counts[evidence_profile] += 1
+        streamed_session_count += 1
         partition = partition_index.get(accepted_session)
         if partition is None:
             _fail("research replay session partition role is invalid")
@@ -1276,6 +1291,22 @@ def _replay_range(
         if build_failed or session_obj is None:
             _fail("research replay session could not be reconstructed")
         yield session_obj
+    if type(verified) is StreamingVerifiedNseHistoricalArchiveRange:
+        if (
+            streamed_session_count != len(binding.accepted_sessions)
+            or tuple(sorted(streamed_profile_counts.items()))
+            != binding.evidence_profile_counts
+            or sum(
+                count
+                for profile, count in streamed_profile_counts.items()
+                if profile != EVIDENCE_PROFILE_COMPLETE
+            )
+            != binding.incomplete_evidence_session_count
+        ):
+            _fail(
+                "research replay archive range evidence profile counts do not "
+                "match its binding"
+            )
 
 
 def _iter_replay_sessions(
