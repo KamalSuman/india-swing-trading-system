@@ -220,7 +220,7 @@ class ForwardPaperAdjustmentTests(unittest.TestCase):
         with self.assertRaises(ForwardPaperAdjustmentError):
             self._build(snapshot=short)
 
-    def test_cash_dividend_requires_manual_policy_and_fails_closed(self) -> None:
+    def test_cash_dividend_vetoes_only_the_affected_candidate(self) -> None:
         dividend = CorporateActionEvent(
             stable_instrument_id=self.stable_a,
             stable_listing_id=self.listing_a,
@@ -235,8 +235,24 @@ class ForwardPaperAdjustmentTests(unittest.TestCase):
             currency="INR",
         )
         snapshot = self._snapshot((dividend,))
-        with self.assertRaises(ForwardPaperAdjustmentError):
-            self._build(snapshot=snapshot)
+        result = self._build(snapshot=snapshot)
+        veto = next(
+            value
+            for value in result.outcomes
+            if type(value) is ForwardPaperAdjustmentVeto
+        )
+        self.assertEqual(
+            veto.reason,
+            ForwardPaperAdjustmentVetoReason.CORPORATE_ACTION_POLICY_BLOCKED,
+        )
+        self.assertEqual(
+            veto.source_candidate.candidate_id,
+            self.candidate_a.candidate_id,
+        )
+        self.assertEqual(result.adjusted_candidate_count, 1)
+        self.assertEqual(result.adjustment_veto_count, 1)
+        self.assertFalse(result.resolved_histories_adjustment_complete)
+        result.verify_content_identity()
 
     def test_decimal_results_do_not_depend_on_global_context(self) -> None:
         baseline = self._build()

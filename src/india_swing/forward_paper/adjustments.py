@@ -33,7 +33,7 @@ from .history import (
 
 
 FORWARD_PAPER_ADJUSTMENT_POLICY_VERSION = (
-    "forward-paper-corporate-action-adjustment/split-bonus-point-in-time-v1"
+    "forward-paper-corporate-action-adjustment/split-bonus-point-in-time-v2"
 )
 FORWARD_PAPER_IDENTITY_BINDING_SCHEMA_VERSION = (
     "forward-paper-corporate-action-identity-binding/v1"
@@ -371,6 +371,7 @@ class ForwardPaperAdjustedCandidate:
 
 class ForwardPaperAdjustmentVetoReason(Enum):
     IDENTITY_BINDING_MISSING = "IDENTITY_BINDING_MISSING"
+    CORPORATE_ACTION_POLICY_BLOCKED = "CORPORATE_ACTION_POLICY_BLOCKED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,7 +390,7 @@ class ForwardPaperAdjustmentVeto:
             verification_failed = True
         if verification_failed:
             _fail("forward paper adjustment veto source failed verification")
-        if self.reason is not ForwardPaperAdjustmentVetoReason.IDENTITY_BINDING_MISSING:
+        if type(self.reason) is not ForwardPaperAdjustmentVetoReason:
             _fail("forward paper adjustment veto reason is invalid")
         object.__setattr__(self, "veto_id", self._calculated_id())
 
@@ -409,7 +410,7 @@ class ForwardPaperAdjustmentVeto:
             _fail("forward paper adjustment veto source is invalid")
         self.source_candidate.verify_content_identity()
         if (
-            self.reason is not ForwardPaperAdjustmentVetoReason.IDENTITY_BINDING_MISSING
+            type(self.reason) is not ForwardPaperAdjustmentVetoReason
             or self.veto_id != self._calculated_id()
         ):
             _fail("forward paper adjustment veto failed verification")
@@ -624,7 +625,7 @@ def _adjust_candidate(
     candidate: ForwardPaperHistoryCandidate,
     binding: ForwardPaperCorporateActionIdentityBinding,
     corporate_actions: CorporateActionSnapshot,
-) -> ForwardPaperAdjustedCandidate:
+) -> ForwardPaperAdjustedCandidate | ForwardPaperAdjustmentVeto:
     rejected = False
     failed = False
     adjusted: list[ForwardPaperAdjustedObservation] = []
@@ -670,7 +671,12 @@ def _adjust_candidate(
     except Exception:
         failed = True
     if rejected:
-        _fail("forward paper candidate corporate action adjustment was rejected")
+        return ForwardPaperAdjustmentVeto._from_freshly_verified_derivation(
+            source_candidate=candidate,
+            reason=(
+                ForwardPaperAdjustmentVetoReason.CORPORATE_ACTION_POLICY_BLOCKED
+            ),
+        )
     if failed:
         _fail("forward paper candidate corporate action adjustment failed")
     observations = tuple(adjusted)
@@ -775,8 +781,12 @@ def _build_forward_paper_adjusted_history_window(
             )
             adjustment_veto_count += 1
             continue
-        outcomes.append(_adjust_candidate(source, binding, corporate_actions))
-        adjusted_count += 1
+        outcome = _adjust_candidate(source, binding, corporate_actions)
+        outcomes.append(outcome)
+        if type(outcome) is ForwardPaperAdjustedCandidate:
+            adjusted_count += 1
+        else:
+            adjustment_veto_count += 1
 
     return ForwardPaperAdjustedHistoryWindow._from_freshly_verified_derivation(
         source_window=source_window,
