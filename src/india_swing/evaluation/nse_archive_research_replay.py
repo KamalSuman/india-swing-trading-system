@@ -1290,22 +1290,32 @@ def _replay_range(
             build_failed = True
         if build_failed or session_obj is None:
             _fail("research replay session could not be reconstructed")
-        yield session_obj
-    if type(verified) is StreamingVerifiedNseHistoricalArchiveRange:
         if (
-            streamed_session_count != len(binding.accepted_sessions)
-            or tuple(sorted(streamed_profile_counts.items()))
-            != binding.evidence_profile_counts
-            or sum(
-                count
-                for profile, count in streamed_profile_counts.items()
-                if profile != EVIDENCE_PROFILE_COMPLETE
+            type(verified) is StreamingVerifiedNseHistoricalArchiveRange
+            and streamed_session_count == len(binding.accepted_sessions)
+            and (
+                tuple(sorted(streamed_profile_counts.items()))
+                != binding.evidence_profile_counts
+                or sum(
+                    count
+                    for profile, count in streamed_profile_counts.items()
+                    if profile != EVIDENCE_PROFILE_COMPLETE
+                )
+                != binding.incomplete_evidence_session_count
             )
-            != binding.incomplete_evidence_session_count
         ):
             _fail(
                 "research replay archive range evidence profile counts do not "
                 "match its binding"
+            )
+        yield session_obj
+    if type(verified) is StreamingVerifiedNseHistoricalArchiveRange:
+        if (
+            streamed_session_count != len(binding.accepted_sessions)
+        ):
+            _fail(
+                "research replay archive range session lineage does not match "
+                "its binding"
             )
 
 
