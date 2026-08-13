@@ -263,6 +263,23 @@ class ForwardPaperHistoryCandidate:
         if self.candidate_id != self._calculated_id():
             _fail("forward paper history candidate identity failed")
 
+    @classmethod
+    def _from_freshly_verified_components(
+        cls,
+        *,
+        spec_id: str,
+        research_identity_id: str,
+        history_observations: tuple[NseArchiveResearchPriceObservation, ...],
+    ) -> "ForwardPaperHistoryCandidate":
+        """Assemble a candidate from the exact sessions verified by this builder."""
+
+        value = object.__new__(cls)
+        object.__setattr__(value, "spec_id", spec_id)
+        object.__setattr__(value, "research_identity_id", research_identity_id)
+        object.__setattr__(value, "history_observations", history_observations)
+        object.__setattr__(value, "candidate_id", value._calculated_id())
+        return value
+
     # Read-only, fixed fail-closed posture. Not dataclass fields -- no
     # per-instance state exists for them, and they never enter candidate_id.
     @property
@@ -405,6 +422,29 @@ class ForwardPaperHistoryVeto:
         self._validate()
         if self.veto_id != self._calculated_id():
             _fail("forward paper history veto identity failed")
+
+    @classmethod
+    def _from_freshly_verified_components(
+        cls,
+        *,
+        spec_id: str,
+        research_identity_id: str | None,
+        signal_observation: NseArchiveResearchPriceObservation,
+        reason: ForwardPaperHistoryVetoReason,
+        evidence_session_ids: tuple[str, ...],
+        evidence_observation_ids: tuple[str, ...],
+    ) -> "ForwardPaperHistoryVeto":
+        """Assemble a veto from evidence derived from the verified session indexes."""
+
+        value = object.__new__(cls)
+        object.__setattr__(value, "spec_id", spec_id)
+        object.__setattr__(value, "research_identity_id", research_identity_id)
+        object.__setattr__(value, "signal_observation", signal_observation)
+        object.__setattr__(value, "reason", reason)
+        object.__setattr__(value, "evidence_session_ids", evidence_session_ids)
+        object.__setattr__(value, "evidence_observation_ids", evidence_observation_ids)
+        object.__setattr__(value, "veto_id", value._calculated_id())
+        return value
 
     # Read-only, fixed fail-closed posture. Not dataclass fields -- no
     # per-instance state exists for them, and they never enter veto_id.
@@ -742,6 +782,54 @@ class ForwardPaperRawHistoryWindow:
         if self.window_id != self._calculated_id():
             _fail("forward paper raw history window identity failed")
 
+    @classmethod
+    def _from_freshly_verified_components(
+        cls,
+        *,
+        spec: ForwardPaperHistoryWindowSpec,
+        sessions: tuple[NseArchiveResearchPriceStreamSession, ...],
+        outcomes: tuple[ForwardPaperHistoryOutcome, ...],
+        expected_session_count: int,
+        consumed_session_count: int,
+        signal_subject_count: int,
+        complete_candidate_count: int,
+        veto_count: int,
+    ) -> "ForwardPaperRawHistoryWindow":
+        """Seal the graph already derived from one exact, verified stream pass.
+
+        The public verifier remains unchanged and independently traverses the
+        entire graph when a later trust boundary needs to re-check it.  This
+        construction seam only avoids repeating that traversal immediately
+        after the builder verified every input session and derived every
+        outcome from its retained indexes.
+        """
+
+        value = object.__new__(cls)
+        for name, item in (
+            ("spec", spec),
+            ("sessions", sessions),
+            ("outcomes", outcomes),
+            ("expected_session_count", expected_session_count),
+            ("consumed_session_count", consumed_session_count),
+            ("signal_subject_count", signal_subject_count),
+            ("complete_candidate_count", complete_candidate_count),
+            ("veto_count", veto_count),
+            ("collection_only", True),
+            ("training_eligible", False),
+            ("feature_eligible", False),
+            ("label_eligible", False),
+            ("ranking_eligible", False),
+            ("alert_eligible", False),
+            ("paper_trade_eligible", False),
+            ("notification_eligible", False),
+            ("execution_eligible", False),
+            ("production_identity_resolution_complete", False),
+            ("corporate_action_adjustment_complete", False),
+        ):
+            object.__setattr__(value, name, item)
+        object.__setattr__(value, "window_id", value._calculated_id())
+        return value
+
 
 _SessionIdentityIndex = dict[str, tuple[NseArchiveResearchPriceObservation, ...]]
 
@@ -776,7 +864,7 @@ def _build_outcome(
 ) -> ForwardPaperHistoryOutcome:
     identity_id = signal_observation.research_identity_id
     if identity_id is None:
-        return ForwardPaperHistoryVeto(
+        return ForwardPaperHistoryVeto._from_freshly_verified_components(
             spec_id=spec.spec_id,
             research_identity_id=None,
             signal_observation=signal_observation,
@@ -805,7 +893,7 @@ def _build_outcome(
     # since an ambiguous same-identity collision is a stronger integrity
     # failure than a plain absence.
     if duplicated_session_ids:
-        return ForwardPaperHistoryVeto(
+        return ForwardPaperHistoryVeto._from_freshly_verified_components(
             spec_id=spec.spec_id,
             research_identity_id=identity_id,
             signal_observation=signal_observation,
@@ -814,7 +902,7 @@ def _build_outcome(
             evidence_observation_ids=tuple(duplicated_observation_ids),
         )
     if missing_session_ids:
-        return ForwardPaperHistoryVeto(
+        return ForwardPaperHistoryVeto._from_freshly_verified_components(
             spec_id=spec.spec_id,
             research_identity_id=identity_id,
             signal_observation=signal_observation,
@@ -822,7 +910,7 @@ def _build_outcome(
             evidence_session_ids=tuple(missing_session_ids),
             evidence_observation_ids=(),
         )
-    return ForwardPaperHistoryCandidate(
+    return ForwardPaperHistoryCandidate._from_freshly_verified_components(
         spec_id=spec.spec_id,
         research_identity_id=identity_id,
         history_observations=tuple(history_observations),
@@ -953,7 +1041,7 @@ def build_forward_paper_raw_history_window(
     )
     veto_count = sum(1 for value in outcomes if type(value) is ForwardPaperHistoryVeto)
 
-    return ForwardPaperRawHistoryWindow(
+    return ForwardPaperRawHistoryWindow._from_freshly_verified_components(
         spec=spec,
         sessions=tuple(consumed_sessions),
         outcomes=outcomes,

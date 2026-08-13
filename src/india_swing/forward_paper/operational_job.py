@@ -197,7 +197,12 @@ class NseArchiveForwardPaperHistoryBuilder:
                 start_session=spec.expected_market_sessions[0],
             )
             window = build_forward_paper_raw_history_window(spec, sessions)
-            window.verify_content_identity()
+            if (
+                type(window) is not ForwardPaperRawHistoryWindow
+                or window.spec.spec_id != spec.spec_id
+                or window.window_id != window._calculated_id()
+            ):
+                raise ValueError
         except Exception:
             failed = True
         if failed or window is None:

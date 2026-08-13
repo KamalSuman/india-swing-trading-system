@@ -1725,13 +1725,10 @@ class ForwardPaperHistoryComplexityRegressionTests(unittest.TestCase):
             window = build_forward_paper_raw_history_window(spec, iter(stream_sessions))
 
         self.assertEqual(window.signal_subject_count, subject_count)
-        # Exactly one index built per retained session for outcome assembly,
-        # plus one more per session from the constructed window's own
-        # implicit self-validation (``ForwardPaperRawHistoryWindow.__post_init__``
-        # always calls ``_validate``) -- never once per (signal subject,
-        # session) pair, regardless of how many subjects share the
-        # cross-section.
-        self.assertEqual(counting.calls, 2 * WINDOW_SIZE)
+        # Exactly one index is built per retained session for outcome
+        # assembly. The freshly-verified construction seam does not perform
+        # an immediate duplicate full-window traversal.
+        self.assertEqual(counting.calls, WINDOW_SIZE)
 
     def test_index_construction_is_bounded_by_session_count_not_subject_count_during_verify(
         self,
