@@ -632,6 +632,109 @@ class NseArchiveResearchReplaySession:
                 "research replay session identity failed"
             )
 
+    @classmethod
+    def _from_freshly_verified_archive(
+        cls,
+        *,
+        dataset_id: str,
+        split_policy_id: str,
+        partition_id: str,
+        partition_role: ResearchSplitRole,
+        index_snapshot_id: str,
+        range_binding_id: str,
+        market_session: date,
+        session_snapshot_id: str,
+        observed_at: datetime,
+        evidence_profile: str,
+        missing_evidence: tuple[str, ...],
+        knowledge_time_status: str,
+        records: tuple[NseArchiveResearchReplayRecord, ...],
+        identity_issue_count: int,
+        source_identity_claims: tuple[NseArchiveResearchSourceIdentityClaim, ...],
+    ) -> "NseArchiveResearchReplaySession":
+        """Assemble one session after the archive and every leaf were verified."""
+
+        value = object.__new__(cls)
+        for name, item in (
+            ("dataset_id", dataset_id),
+            ("split_policy_id", split_policy_id),
+            ("partition_id", partition_id),
+            ("partition_role", partition_role),
+            ("index_snapshot_id", index_snapshot_id),
+            ("range_binding_id", range_binding_id),
+            ("market_session", market_session),
+            ("session_snapshot_id", session_snapshot_id),
+            ("observed_at", observed_at),
+            ("evidence_profile", evidence_profile),
+            ("missing_evidence", missing_evidence),
+            ("knowledge_time_status", knowledge_time_status),
+            ("records", records),
+            ("record_count", len(records)),
+            ("identity_issue_count", identity_issue_count),
+            ("source_identity_claims", source_identity_claims),
+            ("collection_only", True),
+            ("actionable", False),
+            ("training_eligible", False),
+            ("feature_eligible", False),
+            ("label_eligible", False),
+            ("alert_eligible", False),
+            ("execution_eligible", False),
+        ):
+            object.__setattr__(value, name, item)
+        # The archive verifier already re-derived every record/claim identity;
+        # retain all session-level lineage, shape, and posture checks without
+        # serializing every leaf a second time in the same construction turn.
+        if (
+            not _is_sha256(value.dataset_id)
+            or not _is_sha256(value.split_policy_id)
+            or not _is_sha256(value.partition_id)
+            or type(value.partition_role) is not ResearchSplitRole
+            or not _is_sha256(value.index_snapshot_id)
+            or not _is_sha256(value.range_binding_id)
+            or type(value.market_session) is not date
+            or not _is_sha256(value.session_snapshot_id)
+            or type(value.observed_at) is not datetime
+            or value.observed_at.tzinfo is None
+            or value.evidence_profile not in _KNOWN_EVIDENCE_PROFILES
+            or type(value.missing_evidence) is not tuple
+            or any(type(item) is not str for item in value.missing_evidence)
+            or value.knowledge_time_status != _UNVERIFIED_KNOWLEDGE_TIME_STATUS
+            or type(value.records) is not tuple
+            or any(type(item) is not NseArchiveResearchReplayRecord for item in value.records)
+            or any(item.session != value.market_session for item in value.records)
+            or type(value.identity_issue_count) is not int
+            or value.identity_issue_count < 0
+            or type(value.source_identity_claims) is not tuple
+            or any(
+                type(item) is not NseArchiveResearchSourceIdentityClaim
+                or item.session != value.market_session
+                for item in value.source_identity_claims
+            )
+        ):
+            _fail("research replay session freshly verified assembly failed")
+        if value.source_identity_claims:
+            if (
+                value.evidence_profile != EVIDENCE_PROFILE_UNRECONCILED
+                or len(value.source_identity_claims) != len(value.records)
+            ):
+                _fail("research replay session source identity claim count is invalid")
+            for claim, record in zip(
+                value.source_identity_claims,
+                value.records,
+                strict=True,
+            ):
+                if (
+                    claim.session != record.session
+                    or claim.listing_key != record.listing_key
+                    or claim.symbol != record.symbol
+                    or claim.series != record.series
+                ):
+                    _fail(
+                        "research replay session source identity claim binding is invalid"
+                    )
+        object.__setattr__(value, "replay_session_id", value._calculated_id())
+        return value
+
 
 def _verify_dataset_safety_posture(dataset: NseArchiveResearchDataset) -> None:
     if (
@@ -1074,7 +1177,7 @@ def _build_replay_session(
         _build_replay_source_identity_claim(value)
         for value in source_identity_claims_payload
     )
-    return NseArchiveResearchReplaySession(
+    return NseArchiveResearchReplaySession._from_freshly_verified_archive(
         dataset_id=dataset.dataset_id,
         split_policy_id=dataset.split_policy_id,
         partition_id=partition.partition_id,
@@ -1088,7 +1191,6 @@ def _build_replay_session(
         missing_evidence=missing_evidence,
         knowledge_time_status=knowledge_time_status,
         records=records,
-        record_count=len(records),
         identity_issue_count=identity_issue_count,
         source_identity_claims=source_identity_claims,
     )
