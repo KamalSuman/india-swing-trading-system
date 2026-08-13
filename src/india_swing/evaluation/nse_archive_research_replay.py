@@ -776,15 +776,26 @@ def _verify_range_matches_binding(
         type(verified) is StreamingVerifiedNseHistoricalArchiveRange
         and not verified.evidence_profile_counts
     )
+    deferred_streaming_identity = (
+        type(verified) is StreamingVerifiedNseHistoricalArchiveRange
+        and verified.identity_issue_count == -1
+        and verified.identity_quarantined_session_count == -1
+    )
     if (
         verified.index_snapshot_id != binding.index_snapshot_id
         or verified.range_start != binding.range_start
         or verified.range_end != binding.range_end
         or verified.session_snapshot_ids != binding.session_snapshot_ids
         or verified.record_count != binding.record_count
-        or verified.identity_issue_count != binding.identity_issue_count
-        or verified.identity_quarantined_session_count
-        != binding.identity_quarantined_session_count
+        or (
+            not deferred_streaming_identity
+            and verified.identity_issue_count != binding.identity_issue_count
+        )
+        or (
+            not deferred_streaming_identity
+            and verified.identity_quarantined_session_count
+            != binding.identity_quarantined_session_count
+        )
         or (
             not deferred_streaming_evidence
             and verified.incomplete_evidence_session_count
@@ -1252,6 +1263,8 @@ def _replay_range(
 
     streamed_profile_counts = {profile: 0 for profile in _KNOWN_EVIDENCE_PROFILES}
     streamed_session_count = 0
+    streamed_identity_issue_count = 0
+    streamed_quarantined_session_count = 0
     for session_snapshot_id, accepted_session, stored in zip(
         binding.session_snapshot_ids,
         binding.accepted_sessions,
@@ -1270,6 +1283,11 @@ def _replay_range(
             _fail("research replay archive range session evidence profile is invalid")
         streamed_profile_counts[evidence_profile] += 1
         streamed_session_count += 1
+        identity_issue_count = payload.get("identity_issue_count")
+        if type(identity_issue_count) is not int or identity_issue_count < 0:
+            _fail("research replay archive range session identity accounting is invalid")
+        streamed_identity_issue_count += identity_issue_count
+        streamed_quarantined_session_count += identity_issue_count > 0
         partition = partition_index.get(accepted_session)
         if partition is None:
             _fail("research replay session partition role is invalid")
@@ -1302,6 +1320,9 @@ def _replay_range(
                     if profile != EVIDENCE_PROFILE_COMPLETE
                 )
                 != binding.incomplete_evidence_session_count
+                or streamed_identity_issue_count != binding.identity_issue_count
+                or streamed_quarantined_session_count
+                != binding.identity_quarantined_session_count
             )
         ):
             _fail(

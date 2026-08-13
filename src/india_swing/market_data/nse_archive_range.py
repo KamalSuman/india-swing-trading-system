@@ -748,6 +748,7 @@ def _verified_v3_session_iterator(
     reader: NseHistoricalArchiveSnapshotReader,
     *,
     index_records: tuple[Mapping[str, object], ...],
+    index_schema: str,
     observed_date: date,
     index_observed_at: object,
 ) -> Iterator[StoredMarketSnapshot]:
@@ -763,7 +764,10 @@ def _verified_v3_session_iterator(
                 "archive range session snapshot could not be loaded"
             ) from None
         stored = _materialize_session_snapshot(session_value)
-        evidence_profile = _verify_session(stored, value, index_observed_at)
+        session_record = dict(value)
+        if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1:
+            session_record["identity_issue_count"] = _derive_legacy_identity_issue_count(stored)
+        evidence_profile = _verify_session(stored, session_record, index_observed_at)
         if "evidence_profile" in value and value["evidence_profile"] != evidence_profile:
             _fail("archive range index evidence profile is inconsistent")
         # Raw bytes were independently hashed and decoded above and are never
@@ -798,20 +802,21 @@ def stream_verified_nse_historical_archive_range(
         _fail("archive range index payload is invalid")
     index_schema = index.normalized_payload.get("schema_version")
     if index_schema not in (
+        NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1,
         NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2,
         NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION,
     ):
         _fail("archive range index schema is invalid")
-    index_keys = (
-        _INDEX_KEYS_V2
-        if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2
-        else _INDEX_KEYS_V3
-    )
-    index_record_keys = (
-        _INDEX_RECORD_KEYS_V2
-        if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2
-        else _INDEX_RECORD_KEYS_V3
-    )
+    index_keys = {
+        NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1: _INDEX_KEYS_V1,
+        NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2: _INDEX_KEYS_V2,
+        NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION: _INDEX_KEYS_V3,
+    }[index_schema]
+    index_record_keys = {
+        NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1: _INDEX_RECORD_KEYS_V1,
+        NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2: _INDEX_RECORD_KEYS_V2,
+        NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION: _INDEX_RECORD_KEYS_V3,
+    }[index_schema]
     payload = _mapping(
         index.normalized_payload,
         index_keys,
@@ -847,8 +852,13 @@ def stream_verified_nse_historical_archive_range(
         or any(
             type(value["record_count"]) is not int
             or value["record_count"] <= 0
-            or type(value["identity_issue_count"]) is not int
-            or value["identity_issue_count"] < 0
+            or (
+                index_schema != NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1
+                and (
+                    type(value["identity_issue_count"]) is not int
+                    or value["identity_issue_count"] < 0
+                )
+            )
             or (
                 index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION
                 and value["evidence_profile"] not in _EVIDENCE_PROFILE_MISSING
@@ -885,10 +895,15 @@ def stream_verified_nse_historical_archive_range(
         normalized_claimed_counts = {}
         incomplete_evidence_session_count = 0
     if (
-        payload["identity_issue_count"]
-        != sum(value["identity_issue_count"] for value in index_records)
-        or payload["identity_quarantined_session_count"]
-        != sum(value["identity_issue_count"] > 0 for value in index_records)
+        (
+            index_schema != NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1
+            and (
+                payload["identity_issue_count"]
+                != sum(value["identity_issue_count"] for value in index_records)
+                or payload["identity_quarantined_session_count"]
+                != sum(value["identity_issue_count"] > 0 for value in index_records)
+            )
+        )
         or (
             index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION
             and (
@@ -907,12 +922,21 @@ def stream_verified_nse_historical_archive_range(
         sessions=_verified_v3_session_iterator(
             reader,
             index_records=index_records,
+            index_schema=index_schema,
             observed_date=manifest.observed_at.date(),
             index_observed_at=manifest.observed_at,
         ),
         record_count=sum(value["record_count"] for value in index_records),
-        identity_issue_count=payload["identity_issue_count"],
-        identity_quarantined_session_count=payload["identity_quarantined_session_count"],
+        identity_issue_count=(
+            -1
+            if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1
+            else payload["identity_issue_count"]
+        ),
+        identity_quarantined_session_count=(
+            -1
+            if index_schema == NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1
+            else payload["identity_quarantined_session_count"]
+        ),
         incomplete_evidence_session_count=incomplete_evidence_session_count,
         evidence_profile_counts=evidence_profile_counts,
     )
