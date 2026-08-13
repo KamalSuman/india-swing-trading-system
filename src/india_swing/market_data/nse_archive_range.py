@@ -4,7 +4,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 from datetime import date
-from typing import Mapping, Protocol
+from typing import Iterator, Mapping, Protocol
 
 from india_swing.identity import content_id
 
@@ -180,6 +180,10 @@ class NseHistoricalArchiveRangeError(ValueError):
     pass
 
 
+class NseHistoricalArchiveLegacyIndexSchema(NseHistoricalArchiveRangeError):
+    """The exact index is valid only through the legacy full-range verifier."""
+
+
 class NseHistoricalArchiveSnapshotReader(Protocol):
     def get(self, dataset: str, snapshot_id: str) -> StoredMarketSnapshot: ...
 
@@ -255,6 +259,22 @@ class VerifiedNseHistoricalArchiveRange:
     range_end: date
     session_snapshot_ids: tuple[str, ...]
     sessions: tuple[StoredMarketSnapshot, ...]
+    record_count: int
+    identity_issue_count: int
+    identity_quarantined_session_count: int
+    incomplete_evidence_session_count: int
+    evidence_profile_counts: Mapping[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class StreamingVerifiedNseHistoricalArchiveRange:
+    """Verified v3 range header with one-session-at-a-time authenticated replay."""
+
+    index_snapshot_id: str
+    range_start: date
+    range_end: date
+    session_snapshot_ids: tuple[str, ...]
+    sessions: Iterator[StoredMarketSnapshot]
     record_count: int
     identity_issue_count: int
     identity_quarantined_session_count: int
@@ -722,6 +742,161 @@ def _derive_legacy_identity_issue_count(stored: StoredMarketSnapshot) -> int:
     if type(issues) is not tuple:
         return -1
     return len(issues)
+
+
+def _verified_v3_session_iterator(
+    reader: NseHistoricalArchiveSnapshotReader,
+    *,
+    index_records: tuple[Mapping[str, object], ...],
+    observed_date: date,
+    index_observed_at: object,
+) -> Iterator[StoredMarketSnapshot]:
+    for value in index_records:
+        try:
+            session_value = _get_session_snapshot(
+                reader,
+                partition_date=observed_date,
+                snapshot_id=value["snapshot_id"],
+            )
+        except Exception:
+            raise NseHistoricalArchiveRangeError(
+                "archive range session snapshot could not be loaded"
+            ) from None
+        stored = _materialize_session_snapshot(session_value)
+        evidence_profile = _verify_session(stored, value, index_observed_at)
+        if value["evidence_profile"] != evidence_profile:
+            _fail("archive range index evidence profile is inconsistent")
+        # Raw bytes were independently hashed and decoded above and are never
+        # consumed by research replay. Releasing them here bounds peak memory
+        # to one raw payload plus the decoded session graph.
+        yield StoredMarketSnapshot(
+            path=stored.path,
+            manifest=stored.manifest,
+            normalized_payload=stored.normalized_payload,
+            payload_bytes=b"",
+        )
+
+
+def stream_verified_nse_historical_archive_range(
+    reader: NseHistoricalArchiveSnapshotReader,
+    *,
+    index_snapshot_id: str,
+) -> StreamingVerifiedNseHistoricalArchiveRange:
+    """Verify one exact v3 range header and stream authenticated sessions."""
+
+    _sha256(index_snapshot_id, "archive range index snapshot id is invalid")
+    try:
+        index = reader.get(NSE_HISTORICAL_ARCHIVE_INDEX_DATASET, index_snapshot_id)
+    except Exception:
+        raise NseHistoricalArchiveRangeError(
+            "archive range index snapshot could not be loaded"
+        ) from None
+    if type(index) is not StoredMarketSnapshot:
+        _fail("archive range index snapshot type is invalid")
+    manifest = index.manifest
+    if not isinstance(index.normalized_payload, Mapping):
+        _fail("archive range index payload is invalid")
+    index_schema = index.normalized_payload.get("schema_version")
+    if index_schema in (
+        NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V1,
+        NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION_V2,
+    ):
+        raise NseHistoricalArchiveLegacyIndexSchema(
+            "archive range streaming requires the current index schema"
+        )
+    if index_schema != NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION:
+        _fail("archive range index schema is invalid")
+    payload = _mapping(
+        index.normalized_payload,
+        _INDEX_KEYS_V3,
+        "archive range index payload is invalid",
+    )
+    records = payload["records"]
+    if (
+        manifest.dataset != NSE_HISTORICAL_ARCHIVE_INDEX_DATASET
+        or manifest.snapshot_id != index_snapshot_id
+        or manifest.provider != NSE_HISTORICAL_ARCHIVE_PROVIDER
+        or type(payload["range_start"]) is not date
+        or type(payload["range_end"]) is not date
+        or payload["range_start"] > payload["range_end"]
+        or manifest.selection_key
+        != f"{payload['range_start'].isoformat()}:{payload['range_end'].isoformat()}"
+        or payload["collection_only"] is not True
+        or payload["actionable"] is not False
+        or payload["training_eligible"] is not False
+        or type(records) is not tuple
+        or not records
+        or len(records) != manifest.record_count
+    ):
+        _fail("archive range index payload is invalid")
+    index_records = tuple(
+        _mapping(value, _INDEX_RECORD_KEYS_V3, "archive range index record is invalid")
+        for value in records
+    )
+    sessions = tuple(value["session"] for value in index_records)
+    if (
+        any(type(value) is not date for value in sessions)
+        or sessions != tuple(sorted(set(sessions)))
+        or any(not payload["range_start"] <= value <= payload["range_end"] for value in sessions)
+        or any(
+            type(value["record_count"]) is not int
+            or value["record_count"] <= 0
+            or type(value["identity_issue_count"]) is not int
+            or value["identity_issue_count"] < 0
+            or value["evidence_profile"] not in _EVIDENCE_PROFILE_MISSING
+            for value in index_records
+        )
+    ):
+        _fail("archive range index record is invalid")
+    for value in index_records:
+        _sha256(value["snapshot_id"], "archive range session snapshot id is invalid")
+        _sha256(value["source_container_sha256"], "archive range source hash is invalid")
+    evidence_profile_counts = {
+        profile: sum(value["evidence_profile"] == profile for value in index_records)
+        for profile in _EVIDENCE_PROFILE_MISSING
+    }
+    claimed_counts = payload["evidence_profile_counts"]
+    normalized_claimed_counts = (
+        {
+            profile: claimed_counts.get(profile, 0)
+            for profile in _EVIDENCE_PROFILE_MISSING
+        }
+        if isinstance(claimed_counts, Mapping)
+        and set(claimed_counts) <= set(_EVIDENCE_PROFILE_MISSING)
+        and all(type(value) is int and value >= 0 for value in claimed_counts.values())
+        else None
+    )
+    incomplete_evidence_session_count = sum(
+        value["evidence_profile"] != EVIDENCE_PROFILE_COMPLETE
+        for value in index_records
+    )
+    if (
+        payload["identity_issue_count"]
+        != sum(value["identity_issue_count"] for value in index_records)
+        or payload["identity_quarantined_session_count"]
+        != sum(value["identity_issue_count"] > 0 for value in index_records)
+        or normalized_claimed_counts != evidence_profile_counts
+        or payload["incomplete_evidence_session_count"]
+        != incomplete_evidence_session_count
+    ):
+        _fail("archive range identity accounting is invalid")
+    return StreamingVerifiedNseHistoricalArchiveRange(
+        index_snapshot_id=index_snapshot_id,
+        range_start=payload["range_start"],
+        range_end=payload["range_end"],
+        session_snapshot_ids=tuple(value["snapshot_id"] for value in index_records),
+        sessions=_verified_v3_session_iterator(
+            reader,
+            index_records=index_records,
+            observed_date=manifest.observed_at.date(),
+            index_observed_at=manifest.observed_at,
+        ),
+        record_count=sum(value["record_count"] for value in index_records),
+        identity_issue_count=payload["identity_issue_count"],
+        identity_quarantined_session_count=payload["identity_quarantined_session_count"],
+        incomplete_evidence_session_count=incomplete_evidence_session_count,
+        evidence_profile_counts=evidence_profile_counts,
+    )
 
 
 def load_verified_nse_historical_archive_range(

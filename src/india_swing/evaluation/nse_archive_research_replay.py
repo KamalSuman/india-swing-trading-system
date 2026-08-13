@@ -41,9 +41,12 @@ from india_swing.market_data.nse_archive import (
     _legacy_bhavcopy_stem,
 )
 from india_swing.market_data.nse_archive_range import (
+    NseHistoricalArchiveLegacyIndexSchema,
     NseHistoricalArchiveSnapshotReader,
+    StreamingVerifiedNseHistoricalArchiveRange,
     VerifiedNseHistoricalArchiveRange,
     load_verified_nse_historical_archive_range,
+    stream_verified_nse_historical_archive_range,
 )
 from india_swing.market_data.snapshot_store import StoredMarketSnapshot
 
@@ -658,10 +661,13 @@ def _session_partition_index(
 
 
 def _verify_range_matches_binding(
-    verified: VerifiedNseHistoricalArchiveRange,
+    verified: VerifiedNseHistoricalArchiveRange | StreamingVerifiedNseHistoricalArchiveRange,
     binding: NseArchiveResearchRangeBinding,
 ) -> None:
-    if type(verified) is not VerifiedNseHistoricalArchiveRange:
+    if type(verified) not in (
+        VerifiedNseHistoricalArchiveRange,
+        StreamingVerifiedNseHistoricalArchiveRange,
+    ):
         _fail("research replay archive range type is invalid")
     if (
         verified.index_snapshot_id != binding.index_snapshot_id
@@ -684,25 +690,26 @@ def _verify_range_matches_binding(
         or tuple(sorted(profile_counts.items())) != binding.evidence_profile_counts
     ):
         _fail("research replay archive range evidence profile counts do not match its binding")
-    if (
-        type(verified.sessions) is not tuple
-        or len(verified.sessions) != len(binding.accepted_sessions)
-        or len(verified.sessions) != len(binding.session_snapshot_ids)
-    ):
-        _fail("research replay archive range session lineage does not match its binding")
-    for stored, expected_snapshot_id, expected_session in zip(
-        verified.sessions,
-        binding.session_snapshot_ids,
-        binding.accepted_sessions,
-        strict=True,
-    ):
-        if type(stored) is not StoredMarketSnapshot:
-            _fail("research replay archive range session snapshot type is invalid")
-        if stored.manifest.snapshot_id != expected_snapshot_id:
-            _fail("research replay archive range session snapshot id does not match its binding")
-        payload = stored.normalized_payload
-        if not isinstance(payload, Mapping) or payload.get("session") != expected_session:
-            _fail("research replay archive range session date does not match its binding")
+    if type(verified) is VerifiedNseHistoricalArchiveRange:
+        if (
+            type(verified.sessions) is not tuple
+            or len(verified.sessions) != len(binding.accepted_sessions)
+            or len(verified.sessions) != len(binding.session_snapshot_ids)
+        ):
+            _fail("research replay archive range session lineage does not match its binding")
+        for stored, expected_snapshot_id, expected_session in zip(
+            verified.sessions,
+            binding.session_snapshot_ids,
+            binding.accepted_sessions,
+            strict=True,
+        ):
+            if type(stored) is not StoredMarketSnapshot:
+                _fail("research replay archive range session snapshot type is invalid")
+            if stored.manifest.snapshot_id != expected_snapshot_id:
+                _fail("research replay archive range session snapshot id does not match its binding")
+            payload = stored.normalized_payload
+            if not isinstance(payload, Mapping) or payload.get("session") != expected_session:
+                _fail("research replay archive range session date does not match its binding")
 
 
 def _verify_identity_issue_payload(value: object, expected_session: date) -> None:
@@ -1094,11 +1101,30 @@ def _replay_range(
     partition_index: Mapping[date, NseArchiveResearchDatasetSplitPartition],
 ) -> Iterator[NseArchiveResearchReplaySession]:
     range_load_failed = False
-    verified: VerifiedNseHistoricalArchiveRange | None = None
+    verified: (
+        VerifiedNseHistoricalArchiveRange
+        | StreamingVerifiedNseHistoricalArchiveRange
+        | None
+    ) = None
     try:
-        verified = load_verified_nse_historical_archive_range(
-            reader, index_snapshot_id=binding.index_snapshot_id
-        )
+        if callable(
+            getattr(type(reader), "get_hash_verified_from_date_partition", None)
+        ):
+            try:
+                verified = stream_verified_nse_historical_archive_range(
+                    reader,
+                    index_snapshot_id=binding.index_snapshot_id,
+                )
+            except NseHistoricalArchiveLegacyIndexSchema:
+                # Legacy v1/v2 ranges retain the original full-range verifier.
+                verified = load_verified_nse_historical_archive_range(
+                    reader,
+                    index_snapshot_id=binding.index_snapshot_id,
+                )
+        else:
+            verified = load_verified_nse_historical_archive_range(
+                reader, index_snapshot_id=binding.index_snapshot_id
+            )
     except Exception:
         range_load_failed = True
     if range_load_failed or verified is None:
@@ -1120,6 +1146,13 @@ def _replay_range(
         verified.sessions,
         strict=True,
     ):
+        if type(stored) is not StoredMarketSnapshot:
+            _fail("research replay archive range session snapshot type is invalid")
+        if stored.manifest.snapshot_id != session_snapshot_id:
+            _fail("research replay archive range session snapshot id does not match its binding")
+        payload = stored.normalized_payload
+        if not isinstance(payload, Mapping) or payload.get("session") != accepted_session:
+            _fail("research replay archive range session date does not match its binding")
         partition = partition_index.get(accepted_session)
         if partition is None:
             _fail("research replay session partition role is invalid")
