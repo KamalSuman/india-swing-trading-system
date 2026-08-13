@@ -403,7 +403,7 @@ class NseArchiveResearchIdentityAdmissionSession:
         self._validate()
         object.__setattr__(self, "admission_session_id", self._calculated_id())
 
-    def _validate(self) -> None:
+    def _validate(self, *, verify_nested: bool = True) -> None:
         for value, name in (
             (self.dataset_id, "dataset id"),
             (self.replay_session_id, "replay session id"),
@@ -422,7 +422,8 @@ class NseArchiveResearchIdentityAdmissionSession:
             _fail("research identity admission session decisions are invalid")
         record_ids: list[str] = []
         for decision in self.decisions:
-            decision.verify_content_identity()
+            if verify_nested:
+                decision.verify_content_identity()
             if (
                 decision.dataset_id != self.dataset_id
                 or decision.replay_session_id != self.replay_session_id
@@ -446,7 +447,8 @@ class NseArchiveResearchIdentityAdmissionSession:
         }
         transition_ids: list[str] = []
         for transition in self.transitions:
-            transition.verify_content_identity()
+            if verify_nested:
+                transition.verify_content_identity()
             if transition.current_market_session != self.market_session:
                 _fail(
                     "research identity admission session transition current "
@@ -563,6 +565,68 @@ class NseArchiveResearchIdentityAdmissionSession:
         self._validate()
         if self.admission_session_id != self._calculated_id():
             _fail("research identity admission session identity failed")
+
+    @classmethod
+    def _from_freshly_verified_components(
+        cls,
+        *,
+        dataset_id: str,
+        replay_session_id: str,
+        session_snapshot_id: str,
+        market_session: date,
+        partition_id: str,
+        partition_role: ResearchSplitRole,
+        decisions: tuple[NseArchiveResearchIdentityDecision, ...],
+        transitions: tuple[NseArchiveResearchIdentityTransition, ...],
+        admitted_validated_count: int,
+        admitted_source_attested_count: int,
+        blocked_unresolved_count: int,
+        blocked_collision_count: int,
+    ) -> "NseArchiveResearchIdentityAdmissionSession":
+        """Assemble leaves constructed and validated in this iterator turn.
+
+        This private construction-chain seam deliberately skips only the
+        immediate second content-hash pass over freshly constructed decisions
+        and transitions.  It retains every container-level lineage,
+        cardinality, ordering, count, and fail-closed posture check.  Public
+        construction and :meth:`verify_content_identity` remain fully deep;
+        the retained price-stream session is independently verified at the
+        forward-paper history boundary before it can affect an outcome.
+        """
+
+        value = object.__new__(cls)
+        for name, component in (
+            ("dataset_id", dataset_id),
+            ("replay_session_id", replay_session_id),
+            ("session_snapshot_id", session_snapshot_id),
+            ("market_session", market_session),
+            ("partition_id", partition_id),
+            ("partition_role", partition_role),
+            ("decisions", decisions),
+            ("transitions", transitions),
+            ("admitted_validated_count", admitted_validated_count),
+            ("admitted_source_attested_count", admitted_source_attested_count),
+            ("blocked_unresolved_count", blocked_unresolved_count),
+            ("blocked_collision_count", blocked_collision_count),
+        ):
+            object.__setattr__(value, name, component)
+        object.__setattr__(
+            value,
+            "research_identity_admission_complete",
+            blocked_unresolved_count == 0 and blocked_collision_count == 0,
+        )
+        object.__setattr__(value, "production_identity_resolution_complete", False)
+        object.__setattr__(value, "corporate_action_adjustment_complete", False)
+        object.__setattr__(value, "collection_only", True)
+        object.__setattr__(value, "actionable", False)
+        object.__setattr__(value, "training_eligible", False)
+        object.__setattr__(value, "feature_eligible", False)
+        object.__setattr__(value, "label_eligible", False)
+        object.__setattr__(value, "alert_eligible", False)
+        object.__setattr__(value, "execution_eligible", False)
+        value._validate(verify_nested=False)
+        object.__setattr__(value, "admission_session_id", value._calculated_id())
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -938,7 +1002,12 @@ def _build_admission_session(
         blocked_unresolved_count,
         blocked_collision_count,
     ) = _admission_counts(decisions)
-    return NseArchiveResearchIdentityAdmissionSession(
+    constructor = (
+        NseArchiveResearchIdentityAdmissionSession._from_freshly_verified_components
+        if freshly_verified
+        else NseArchiveResearchIdentityAdmissionSession
+    )
+    return constructor(
         dataset_id=session.dataset_id,
         replay_session_id=session.replay_session_id,
         session_snapshot_id=session.session_snapshot_id,

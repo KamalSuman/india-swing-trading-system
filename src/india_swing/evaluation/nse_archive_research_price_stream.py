@@ -112,6 +112,31 @@ class NseArchiveResearchPriceObservation:
         if self.observation_id != self._calculated_id():
             _fail("research price observation identity failed")
 
+    @classmethod
+    def _from_freshly_verified_components(
+        cls,
+        *,
+        replay_record: NseArchiveResearchReplayRecord,
+        identity_decision: NseArchiveResearchIdentityDecision,
+    ) -> "NseArchiveResearchPriceObservation":
+        """Bind same-turn verified leaves without immediately rehashing them."""
+
+        if (
+            type(replay_record) is not NseArchiveResearchReplayRecord
+            or type(identity_decision) is not NseArchiveResearchIdentityDecision
+            or replay_record.record_id != identity_decision.record_id
+            or replay_record.session != identity_decision.market_session
+            or replay_record.listing_key != identity_decision.listing_key
+            or replay_record.symbol != identity_decision.symbol
+            or replay_record.series != identity_decision.series
+        ):
+            _fail("research price observation lineage is invalid")
+        value = object.__new__(cls)
+        object.__setattr__(value, "replay_record", replay_record)
+        object.__setattr__(value, "identity_decision", identity_decision)
+        object.__setattr__(value, "observation_id", value._calculated_id())
+        return value
+
     @property
     def market_session(self):
         return self.identity_decision.market_session
@@ -303,21 +328,104 @@ class NseArchiveResearchPriceStreamSession:
         if self.price_stream_session_id != self._calculated_id():
             _fail("research price stream session identity failed")
 
+    @classmethod
+    def _from_freshly_verified_components(
+        cls,
+        *,
+        paired_session: NseArchiveResearchPairedSession,
+        observations: tuple[NseArchiveResearchPriceObservation, ...],
+        transitions: tuple[NseArchiveResearchIdentityTransition, ...],
+    ) -> "NseArchiveResearchPriceStreamSession":
+        """Assemble a same-turn trusted projection without duplicate leaf hashes.
+
+        All public construction and verification paths remain fully deep. This
+        private path retains the complete one-to-one/order-preserving
+        bijection, transition binding, duplicate, and safety-posture checks;
+        the forward-paper history boundary subsequently performs an
+        independent public verification before accepting the retained session.
+        """
+
+        if type(paired_session) is not NseArchiveResearchPairedSession:
+            _fail("research price stream session paired session type is invalid")
+        replay_session = paired_session.replay_session
+        admission_session = paired_session.admission_session
+        if type(observations) is not tuple or any(
+            type(value) is not NseArchiveResearchPriceObservation
+            for value in observations
+        ):
+            _fail("research price stream session observations are invalid")
+        if len(observations) != len(replay_session.records) or len(
+            observations
+        ) != len(admission_session.decisions):
+            _fail("research price stream session observation bijection is invalid")
+        observation_ids: list[str] = []
+        for observation, record, decision in zip(
+            observations,
+            replay_session.records,
+            admission_session.decisions,
+            strict=True,
+        ):
+            if (
+                observation.replay_record.record_id != record.record_id
+                or observation.identity_decision.decision_id != decision.decision_id
+            ):
+                _fail("research price stream session observation bijection is invalid")
+            observation_ids.append(observation.observation_id)
+        if len(set(observation_ids)) != len(observation_ids):
+            _fail("research price stream session observations are duplicated")
+        if type(transitions) is not tuple or any(
+            type(value) is not NseArchiveResearchIdentityTransition
+            for value in transitions
+        ):
+            _fail("research price stream session transitions are invalid")
+        if tuple(value.transition_id for value in transitions) != tuple(
+            value.transition_id for value in admission_session.transitions
+        ):
+            _fail("research price stream session transitions disagree with its admission")
+
+        value = object.__new__(cls)
+        object.__setattr__(value, "paired_session", paired_session)
+        object.__setattr__(value, "observations", observations)
+        object.__setattr__(value, "transitions", transitions)
+        object.__setattr__(value, "collection_only", True)
+        object.__setattr__(value, "actionable", False)
+        object.__setattr__(value, "training_eligible", False)
+        object.__setattr__(value, "feature_eligible", False)
+        object.__setattr__(value, "label_eligible", False)
+        object.__setattr__(value, "alert_eligible", False)
+        object.__setattr__(value, "execution_eligible", False)
+        object.__setattr__(value, "production_identity_resolution_complete", False)
+        object.__setattr__(value, "corporate_action_adjustment_complete", False)
+        object.__setattr__(value, "price_stream_session_id", value._calculated_id())
+        return value
+
 
 def _build_price_stream_session(
     paired: NseArchiveResearchPairedSession,
+    *,
+    freshly_verified: bool = False,
 ) -> NseArchiveResearchPriceStreamSession:
     if type(paired) is not NseArchiveResearchPairedSession:
         _fail("research price stream paired session type is invalid")
+    observation_constructor = (
+        NseArchiveResearchPriceObservation._from_freshly_verified_components
+        if freshly_verified
+        else NseArchiveResearchPriceObservation
+    )
     observations = tuple(
-        NseArchiveResearchPriceObservation(replay_record=record, identity_decision=decision)
+        observation_constructor(replay_record=record, identity_decision=decision)
         for record, decision in zip(
             paired.replay_session.records,
             paired.admission_session.decisions,
             strict=True,
         )
     )
-    return NseArchiveResearchPriceStreamSession(
+    session_constructor = (
+        NseArchiveResearchPriceStreamSession._from_freshly_verified_components
+        if freshly_verified
+        else NseArchiveResearchPriceStreamSession
+    )
+    return session_constructor(
         paired_session=paired,
         observations=observations,
         transitions=paired.admission_session.transitions,
@@ -326,6 +434,8 @@ def _build_price_stream_session(
 
 def _iter_price_stream_sessions(
     paired_iterator: Iterator[NseArchiveResearchPairedSession],
+    *,
+    freshly_verified: bool = False,
 ) -> Iterator[NseArchiveResearchPriceStreamSession]:
     iterator = iter(paired_iterator)
     while True:
@@ -343,7 +453,9 @@ def _iter_price_stream_sessions(
         build_failed = False
         session_obj: NseArchiveResearchPriceStreamSession | None = None
         try:
-            session_obj = _build_price_stream_session(paired)
+            session_obj = _build_price_stream_session(
+                paired, freshly_verified=freshly_verified
+            )
         except NseArchiveResearchPriceStreamError:
             raise
         except Exception:
@@ -378,7 +490,12 @@ def iter_nse_archive_research_price_stream_sessions(
     if paired_call_failed or paired_iterator is None:
         _fail("research price stream dataset or reader is invalid")
 
-    return _iter_price_stream_sessions(paired_iterator)
+    freshly_verified = callable(
+        getattr(type(reader), "get_hash_verified_from_date_partition", None)
+    )
+    return _iter_price_stream_sessions(
+        paired_iterator, freshly_verified=freshly_verified
+    )
 
 
 def iter_nse_archive_research_price_stream_sessions_from(
@@ -402,4 +519,9 @@ def iter_nse_archive_research_price_stream_sessions_from(
     if paired_call_failed or paired_iterator is None:
         _fail("research price stream dataset, reader, or boundary is invalid")
 
-    return _iter_price_stream_sessions(paired_iterator)
+    freshly_verified = callable(
+        getattr(type(reader), "get_hash_verified_from_date_partition", None)
+    )
+    return _iter_price_stream_sessions(
+        paired_iterator, freshly_verified=freshly_verified
+    )
