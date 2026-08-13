@@ -159,6 +159,30 @@ class ForwardPaperFeatureInputBar:
         if self.input_bar_id != self._calculated_id():
             _fail("forward paper feature input bar failed verification")
 
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        adjusted_observation: ForwardPaperAdjustedObservation,
+        tick_specification: EffectiveTickSize | None,
+        stable_instrument_id: str,
+        stable_listing_id: str,
+        market_session: date,
+        knowledge_time: datetime,
+    ) -> "ForwardPaperFeatureInputBar":
+        value = object.__new__(cls)
+        for name, item in (
+            ("adjusted_observation", adjusted_observation),
+            ("tick_specification", tick_specification),
+            ("stable_instrument_id", stable_instrument_id),
+            ("stable_listing_id", stable_listing_id),
+            ("market_session", market_session),
+            ("knowledge_time", knowledge_time),
+        ):
+            object.__setattr__(value, name, item)
+        object.__setattr__(value, "input_bar_id", value._calculated_id())
+        return value
+
 
 @dataclass(frozen=True, slots=True)
 class ForwardPaperFeatureInputCandidate:
@@ -236,6 +260,19 @@ class ForwardPaperFeatureInputCandidate:
         if self.candidate_id != self._calculated_id():
             _fail("forward paper feature input candidate failed verification")
 
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        source_candidate: ForwardPaperAdjustedCandidate,
+        bars: tuple[ForwardPaperFeatureInputBar, ...],
+    ) -> "ForwardPaperFeatureInputCandidate":
+        value = object.__new__(cls)
+        object.__setattr__(value, "source_candidate", source_candidate)
+        object.__setattr__(value, "bars", bars)
+        object.__setattr__(value, "candidate_id", value._calculated_id())
+        return value
+
 
 class ForwardPaperFeatureInputVetoReason(Enum):
     SOURCE_HISTORY_VETO = "SOURCE_HISTORY_VETO"
@@ -298,6 +335,27 @@ class ForwardPaperFeatureInputVeto:
     def verify_content_identity(self) -> None:
         if self.veto_id != self._calculated_id():
             _fail("forward paper feature input veto failed verification")
+
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        source_outcome_id: str,
+        reason: ForwardPaperFeatureInputVetoReason,
+        affected_sessions: tuple[date, ...],
+        evidence_tick_specification_ids: tuple[str, ...],
+    ) -> "ForwardPaperFeatureInputVeto":
+        value = object.__new__(cls)
+        object.__setattr__(value, "source_outcome_id", source_outcome_id)
+        object.__setattr__(value, "reason", reason)
+        object.__setattr__(value, "affected_sessions", affected_sessions)
+        object.__setattr__(
+            value,
+            "evidence_tick_specification_ids",
+            evidence_tick_specification_ids,
+        )
+        object.__setattr__(value, "veto_id", value._calculated_id())
+        return value
 
 
 ForwardPaperFeatureInputOutcome = Union[
@@ -419,6 +477,30 @@ class ForwardPaperFeatureInputWindow:
         if self.window_id != self._calculated_id():
             _fail("forward paper feature input window failed verification")
 
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        source_window: ForwardPaperAdjustedHistoryWindow,
+        tick_specifications: tuple[EffectiveTickSize, ...],
+        outcomes: tuple[ForwardPaperFeatureInputOutcome, ...],
+        assembled_candidate_count: int,
+        veto_count: int,
+        resolved_histories_input_complete: bool,
+    ) -> "ForwardPaperFeatureInputWindow":
+        value = object.__new__(cls)
+        for name, item in (
+            ("source_window", source_window),
+            ("tick_specifications", tick_specifications),
+            ("outcomes", outcomes),
+            ("assembled_candidate_count", assembled_candidate_count),
+            ("veto_count", veto_count),
+            ("resolved_histories_input_complete", resolved_histories_input_complete),
+        ):
+            object.__setattr__(value, name, item)
+        object.__setattr__(value, "window_id", value._calculated_id())
+        return value
+
     @property
     def collection_only(self) -> bool:
         return True
@@ -472,7 +554,7 @@ def _source_veto(source: object) -> ForwardPaperFeatureInputVeto:
         if type(source) is ForwardPaperAdjustmentVeto
         else ForwardPaperFeatureInputVetoReason.SOURCE_HISTORY_VETO
     )
-    return ForwardPaperFeatureInputVeto(
+    return ForwardPaperFeatureInputVeto._from_freshly_verified_derivation(
         source_outcome_id=_source_outcome_id(source),
         reason=reason,
         affected_sessions=(),
@@ -480,10 +562,11 @@ def _source_veto(source: object) -> ForwardPaperFeatureInputVeto:
     )
 
 
-def build_forward_paper_feature_input_window(
+def _build_forward_paper_feature_input_window(
     *,
     source_window: ForwardPaperAdjustedHistoryWindow,
     tick_specifications: tuple[EffectiveTickSize, ...],
+    verify_inputs: bool,
 ) -> ForwardPaperFeatureInputWindow:
     """Join only the signal bar to one exact-session tick fact, never latest."""
 
@@ -493,15 +576,16 @@ def build_forward_paper_feature_input_window(
         type(value) is not EffectiveTickSize for value in tick_specifications
     ):
         _fail("forward paper feature input tick specifications are invalid")
-    verification_failed = False
-    try:
-        source_window.verify_content_identity()
-        for value in tick_specifications:
-            value.verify_content_identity()
-    except Exception:
-        verification_failed = True
-    if verification_failed:
-        _fail("forward paper feature input evidence failed verification")
+    if verify_inputs:
+        verification_failed = False
+        try:
+            source_window.verify_content_identity()
+            for value in tick_specifications:
+                value.verify_content_identity()
+        except Exception:
+            verification_failed = True
+        if verification_failed:
+            _fail("forward paper feature input evidence failed verification")
     canonical_ticks = tuple(
         sorted(
             tick_specifications,
@@ -584,7 +668,7 @@ def build_forward_paper_feature_input_window(
         else:
             signal_tick = matches[0]
             bars = tuple(
-                ForwardPaperFeatureInputBar(
+                ForwardPaperFeatureInputBar._from_freshly_verified_derivation(
                     adjusted_observation=bar,
                     tick_specification=(
                         signal_tick if index == len(source.observations) - 1 else None
@@ -597,7 +681,10 @@ def build_forward_paper_feature_input_window(
                 for index, bar in enumerate(source.observations)
             )
             outcomes.append(
-                ForwardPaperFeatureInputCandidate(source_candidate=source, bars=bars)
+                ForwardPaperFeatureInputCandidate._from_freshly_verified_derivation(
+                    source_candidate=source,
+                    bars=bars,
+                )
             )
             assembled += 1
             continue
@@ -611,7 +698,7 @@ def build_forward_paper_feature_input_window(
             )
         )
         outcomes.append(
-            ForwardPaperFeatureInputVeto(
+            ForwardPaperFeatureInputVeto._from_freshly_verified_derivation(
                 source_outcome_id=source.candidate_id,
                 reason=reason,
                 affected_sessions=affected,
@@ -620,11 +707,37 @@ def build_forward_paper_feature_input_window(
         )
         vetoes += 1
 
-    return ForwardPaperFeatureInputWindow(
+    return ForwardPaperFeatureInputWindow._from_freshly_verified_derivation(
         source_window=source_window,
         tick_specifications=canonical_ticks,
         outcomes=tuple(outcomes),
         assembled_candidate_count=assembled,
         veto_count=vetoes,
         resolved_histories_input_complete=vetoes == 0,
+    )
+
+
+def build_forward_paper_feature_input_window(
+    *,
+    source_window: ForwardPaperAdjustedHistoryWindow,
+    tick_specifications: tuple[EffectiveTickSize, ...],
+) -> ForwardPaperFeatureInputWindow:
+    """Join the signal bar after independently verifying the supplied evidence."""
+
+    return _build_forward_paper_feature_input_window(
+        source_window=source_window,
+        tick_specifications=tick_specifications,
+        verify_inputs=True,
+    )
+
+
+def _build_forward_paper_feature_input_window_from_verified_inputs(
+    *,
+    source_window: ForwardPaperAdjustedHistoryWindow,
+    tick_specifications: tuple[EffectiveTickSize, ...],
+) -> ForwardPaperFeatureInputWindow:
+    return _build_forward_paper_feature_input_window(
+        source_window=source_window,
+        tick_specifications=tick_specifications,
+        verify_inputs=False,
     )

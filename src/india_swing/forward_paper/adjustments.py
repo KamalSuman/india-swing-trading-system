@@ -257,6 +257,17 @@ class ForwardPaperAdjustedObservation:
         if self.observation_id != self._calculated_id():
             _fail("forward paper adjusted observation failed verification")
 
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        **values: object,
+    ) -> "ForwardPaperAdjustedObservation":
+        value = object.__new__(cls)
+        for name, item in values.items():
+            object.__setattr__(value, name, item)
+        object.__setattr__(value, "observation_id", value._calculated_id())
+        return value
+
 
 @dataclass(frozen=True, slots=True)
 class ForwardPaperAdjustedCandidate:
@@ -340,6 +351,23 @@ class ForwardPaperAdjustedCandidate:
         if self.candidate_id != self._calculated_id():
             _fail("forward paper adjusted candidate failed verification")
 
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        source_candidate: ForwardPaperHistoryCandidate,
+        identity_binding: ForwardPaperCorporateActionIdentityBinding,
+        observations: tuple[ForwardPaperAdjustedObservation, ...],
+        applied_event_ids: tuple[str, ...],
+    ) -> "ForwardPaperAdjustedCandidate":
+        value = object.__new__(cls)
+        object.__setattr__(value, "source_candidate", source_candidate)
+        object.__setattr__(value, "identity_binding", identity_binding)
+        object.__setattr__(value, "observations", observations)
+        object.__setattr__(value, "applied_event_ids", applied_event_ids)
+        object.__setattr__(value, "candidate_id", value._calculated_id())
+        return value
+
 
 class ForwardPaperAdjustmentVetoReason(Enum):
     IDENTITY_BINDING_MISSING = "IDENTITY_BINDING_MISSING"
@@ -363,27 +391,41 @@ class ForwardPaperAdjustmentVeto:
             _fail("forward paper adjustment veto source failed verification")
         if self.reason is not ForwardPaperAdjustmentVetoReason.IDENTITY_BINDING_MISSING:
             _fail("forward paper adjustment veto reason is invalid")
-        object.__setattr__(
-            self,
-            "veto_id",
-            content_id(
-                {
-                    "schema": FORWARD_PAPER_ADJUSTMENT_VETO_SCHEMA_VERSION,
-                    "policy_version": FORWARD_PAPER_ADJUSTMENT_POLICY_VERSION,
-                    "source_candidate_id": self.source_candidate.candidate_id,
-                    "reason": self.reason,
-                },
-                length=64,
-            ),
+        object.__setattr__(self, "veto_id", self._calculated_id())
+
+    def _calculated_id(self) -> str:
+        return content_id(
+            {
+                "schema": FORWARD_PAPER_ADJUSTMENT_VETO_SCHEMA_VERSION,
+                "policy_version": FORWARD_PAPER_ADJUSTMENT_POLICY_VERSION,
+                "source_candidate_id": self.source_candidate.candidate_id,
+                "reason": self.reason,
+            },
+            length=64,
         )
 
     def verify_content_identity(self) -> None:
-        expected = ForwardPaperAdjustmentVeto(
-            source_candidate=self.source_candidate,
-            reason=self.reason,
-        )
-        if self.veto_id != expected.veto_id:
+        if type(self.source_candidate) is not ForwardPaperHistoryCandidate:
+            _fail("forward paper adjustment veto source is invalid")
+        self.source_candidate.verify_content_identity()
+        if (
+            self.reason is not ForwardPaperAdjustmentVetoReason.IDENTITY_BINDING_MISSING
+            or self.veto_id != self._calculated_id()
+        ):
             _fail("forward paper adjustment veto failed verification")
+
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        source_candidate: ForwardPaperHistoryCandidate,
+        reason: ForwardPaperAdjustmentVetoReason,
+    ) -> "ForwardPaperAdjustmentVeto":
+        value = object.__new__(cls)
+        object.__setattr__(value, "source_candidate", source_candidate)
+        object.__setattr__(value, "reason", reason)
+        object.__setattr__(value, "veto_id", value._calculated_id())
+        return value
 
 
 ForwardPaperAdjustedOutcome = Union[
@@ -514,6 +556,37 @@ class ForwardPaperAdjustedHistoryWindow:
         if self.window_id != self._calculated_id():
             _fail("forward paper adjusted window failed verification")
 
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        source_window: ForwardPaperRawHistoryWindow,
+        corporate_actions: CorporateActionSnapshot,
+        identity_bindings: tuple[ForwardPaperCorporateActionIdentityBinding, ...],
+        outcomes: tuple[ForwardPaperAdjustedOutcome, ...],
+        adjusted_candidate_count: int,
+        adjustment_veto_count: int,
+        source_veto_count: int,
+        resolved_histories_adjustment_complete: bool,
+    ) -> "ForwardPaperAdjustedHistoryWindow":
+        value = object.__new__(cls)
+        for name, item in (
+            ("source_window", source_window),
+            ("corporate_actions", corporate_actions),
+            ("identity_bindings", identity_bindings),
+            ("outcomes", outcomes),
+            ("adjusted_candidate_count", adjusted_candidate_count),
+            ("adjustment_veto_count", adjustment_veto_count),
+            ("source_veto_count", source_veto_count),
+            (
+                "resolved_histories_adjustment_complete",
+                resolved_histories_adjustment_complete,
+            ),
+        ):
+            object.__setattr__(value, name, item)
+        object.__setattr__(value, "window_id", value._calculated_id())
+        return value
+
     @property
     def collection_only(self) -> bool:
         return True
@@ -573,7 +646,7 @@ def _adjust_candidate(
                 )
                 raw = source.replay_record
                 adjusted.append(
-                    ForwardPaperAdjustedObservation(
+                    ForwardPaperAdjustedObservation._from_freshly_verified_derivation(
                         source_observation=source,
                         identity_binding_id=binding.binding_id,
                         corporate_action_snapshot_id=corporate_actions.snapshot_id,
@@ -601,7 +674,7 @@ def _adjust_candidate(
     if failed:
         _fail("forward paper candidate corporate action adjustment failed")
     observations = tuple(adjusted)
-    return ForwardPaperAdjustedCandidate(
+    return ForwardPaperAdjustedCandidate._from_freshly_verified_derivation(
         source_candidate=candidate,
         identity_binding=binding,
         observations=observations,
@@ -617,11 +690,12 @@ def _adjust_candidate(
     )
 
 
-def build_forward_paper_adjusted_history_window(
+def _build_forward_paper_adjusted_history_window(
     *,
     source_window: ForwardPaperRawHistoryWindow,
     corporate_actions: CorporateActionSnapshot,
     identity_bindings: tuple[ForwardPaperCorporateActionIdentityBinding, ...],
+    verify_inputs: bool,
 ) -> ForwardPaperAdjustedHistoryWindow:
     """Build an immutable adjustment view at the raw window's pinned cutoff."""
 
@@ -637,16 +711,17 @@ def build_forward_paper_adjusted_history_window(
         )
     ):
         _fail("forward paper adjustment identity bindings are invalid")
-    verification_failed = False
-    try:
-        source_window.verify_content_identity()
-        corporate_actions.verify_content_identity()
-        for binding in identity_bindings:
-            binding.verify_content_identity()
-    except Exception:
-        verification_failed = True
-    if verification_failed:
-        _fail("forward paper adjustment input failed verification")
+    if verify_inputs:
+        verification_failed = False
+        try:
+            source_window.verify_content_identity()
+            corporate_actions.verify_content_identity()
+            for binding in identity_bindings:
+                binding.verify_content_identity()
+        except Exception:
+            verification_failed = True
+        if verification_failed:
+            _fail("forward paper adjustment input failed verification")
     if (
         not corporate_actions.complete
         or not corporate_actions.actionable
@@ -693,7 +768,7 @@ def build_forward_paper_adjusted_history_window(
         binding = by_identity.get(source.research_identity_id)
         if binding is None:
             outcomes.append(
-                ForwardPaperAdjustmentVeto(
+                ForwardPaperAdjustmentVeto._from_freshly_verified_derivation(
                     source_candidate=source,
                     reason=ForwardPaperAdjustmentVetoReason.IDENTITY_BINDING_MISSING,
                 )
@@ -703,7 +778,7 @@ def build_forward_paper_adjusted_history_window(
         outcomes.append(_adjust_candidate(source, binding, corporate_actions))
         adjusted_count += 1
 
-    return ForwardPaperAdjustedHistoryWindow(
+    return ForwardPaperAdjustedHistoryWindow._from_freshly_verified_derivation(
         source_window=source_window,
         corporate_actions=corporate_actions,
         identity_bindings=canonical_bindings,
@@ -712,4 +787,34 @@ def build_forward_paper_adjusted_history_window(
         adjustment_veto_count=adjustment_veto_count,
         source_veto_count=source_veto_count,
         resolved_histories_adjustment_complete=adjustment_veto_count == 0,
+    )
+
+
+def build_forward_paper_adjusted_history_window(
+    *,
+    source_window: ForwardPaperRawHistoryWindow,
+    corporate_actions: CorporateActionSnapshot,
+    identity_bindings: tuple[ForwardPaperCorporateActionIdentityBinding, ...],
+) -> ForwardPaperAdjustedHistoryWindow:
+    """Build an immutable adjustment view after independently verifying inputs."""
+
+    return _build_forward_paper_adjusted_history_window(
+        source_window=source_window,
+        corporate_actions=corporate_actions,
+        identity_bindings=identity_bindings,
+        verify_inputs=True,
+    )
+
+
+def _build_forward_paper_adjusted_history_window_from_verified_inputs(
+    *,
+    source_window: ForwardPaperRawHistoryWindow,
+    corporate_actions: CorporateActionSnapshot,
+    identity_bindings: tuple[ForwardPaperCorporateActionIdentityBinding, ...],
+) -> ForwardPaperAdjustedHistoryWindow:
+    return _build_forward_paper_adjusted_history_window(
+        source_window=source_window,
+        corporate_actions=corporate_actions,
+        identity_bindings=identity_bindings,
+        verify_inputs=False,
     )

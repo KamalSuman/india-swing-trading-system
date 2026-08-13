@@ -22,13 +22,13 @@ from india_swing.forward_paper.history import (
 )
 from india_swing.forward_paper.operational import (
     ForwardPaperOperationalResearchGraph,
-    assemble_forward_paper_operational_research_graph,
+    _assemble_forward_paper_operational_research_graph_from_verified_inputs,
 )
 from india_swing.forward_paper.operational_gcs import (
     CompletedForwardPaperOperationalGraphPublication,
     ForwardPaperCorporateActionSnapshotResolver,
     ForwardPaperEffectiveTickPanelResolver,
-    publish_forward_paper_operational_graph,
+    _publish_forward_paper_operational_graph_from_verified_graph,
 )
 from india_swing.identity import content_id
 from india_swing.market_data.nse_archive_range import (
@@ -282,6 +282,31 @@ class ForwardPaperOperationalJobReceipt:
         if self.receipt_id != self._calculated_id():
             _fail("forward paper operational job receipt identity failed")
 
+    @classmethod
+    def _from_freshly_verified_run(
+        cls,
+        *,
+        request: ForwardPaperOperationalJobRequest,
+        graph: ForwardPaperOperationalResearchGraph,
+        publication: CompletedForwardPaperOperationalGraphPublication,
+    ) -> "ForwardPaperOperationalJobReceipt":
+        value = object.__new__(cls)
+        object.__setattr__(value, "request", request)
+        object.__setattr__(value, "graph", graph)
+        object.__setattr__(value, "publication", publication)
+        object.__setattr__(
+            value,
+            "schema_version",
+            FORWARD_PAPER_OPERATIONAL_JOB_RECEIPT_SCHEMA_VERSION,
+        )
+        object.__setattr__(
+            value,
+            "policy_version",
+            FORWARD_PAPER_OPERATIONAL_JOB_POLICY_VERSION,
+        )
+        object.__setattr__(value, "receipt_id", value._calculated_id())
+        return value
+
     @property
     def collection_only(self) -> bool:
         return True
@@ -337,10 +362,11 @@ def run_forward_paper_operational_job(
             raise ValueError
         _observe(stage_observer, "evidence_resolution", "completed")
         _observe(stage_observer, "graph_assembly", "started")
-        graph = assemble_forward_paper_operational_research_graph(
+        graph = _assemble_forward_paper_operational_research_graph_from_verified_inputs(
             source_window=source,
             corporate_actions=actions,
             tick_panel=ticks,
+            stage_observer=stage_observer,
         )
         _observe(
             stage_observer,
@@ -354,7 +380,7 @@ def run_forward_paper_operational_job(
             ),
         )
         _observe(stage_observer, "publication", "started")
-        publication = publish_forward_paper_operational_graph(
+        publication = _publish_forward_paper_operational_graph_from_verified_graph(
             graph=graph,
             bucket=request.bucket,
             writer=writer,
@@ -364,7 +390,7 @@ def run_forward_paper_operational_job(
         failed = True
     if failed or graph is None or publication is None:
         _fail("forward paper operational job failed safely")
-    return ForwardPaperOperationalJobReceipt(
+    return ForwardPaperOperationalJobReceipt._from_freshly_verified_run(
         request=request,
         graph=graph,
         publication=publication,

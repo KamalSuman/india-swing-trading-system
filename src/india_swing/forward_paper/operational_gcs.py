@@ -190,15 +190,20 @@ def _manifest_body(
     return body
 
 
-def operational_graph_manifest_from_graph(
-    graph: ForwardPaperOperationalResearchGraph, bucket: str
+def _operational_graph_manifest_from_graph(
+    graph: ForwardPaperOperationalResearchGraph,
+    bucket: str,
+    *,
+    verify_graph: bool,
 ) -> ForwardPaperOperationalGraphManifest:
     failed = False
     try:
         if type(graph) is not ForwardPaperOperationalResearchGraph:
             failed = True
-        else:
+        elif verify_graph:
             graph.verify_content_identity()
+        elif graph.graph_id != graph._calculated_id():
+            failed = True
     except Exception:
         failed = True
     if failed:
@@ -218,6 +223,16 @@ def operational_graph_manifest_from_graph(
         technical_feature_window_id=graph.technical_feature_window.window_id,
         signal_session=graph.source_window.spec.signal_session,
         decision_cutoff=graph.source_window.spec.decision_cutoff,
+    )
+
+
+def operational_graph_manifest_from_graph(
+    graph: ForwardPaperOperationalResearchGraph, bucket: str
+) -> ForwardPaperOperationalGraphManifest:
+    return _operational_graph_manifest_from_graph(
+        graph,
+        bucket,
+        verify_graph=True,
     )
 
 
@@ -383,7 +398,26 @@ def publish_forward_paper_operational_graph(
     bucket: str,
     writer: StateObjectWriter,
 ) -> CompletedForwardPaperOperationalGraphPublication:
-    manifest = operational_graph_manifest_from_graph(graph, bucket)
+    return _publish_forward_paper_operational_graph(
+        graph=graph,
+        bucket=bucket,
+        writer=writer,
+        verify_graph=True,
+    )
+
+
+def _publish_forward_paper_operational_graph(
+    *,
+    graph: ForwardPaperOperationalResearchGraph,
+    bucket: str,
+    writer: StateObjectWriter,
+    verify_graph: bool,
+) -> CompletedForwardPaperOperationalGraphPublication:
+    manifest = _operational_graph_manifest_from_graph(
+        graph,
+        bucket,
+        verify_graph=verify_graph,
+    )
     payload = encode_forward_paper_operational_manifest(manifest)
     name = forward_paper_operational_manifest_object_name(manifest)
     failed = False
@@ -412,6 +446,20 @@ def publish_forward_paper_operational_graph(
     return CompletedForwardPaperOperationalGraphPublication(
         manifest=manifest,
         manifest_object=published,
+    )
+
+
+def _publish_forward_paper_operational_graph_from_verified_graph(
+    *,
+    graph: ForwardPaperOperationalResearchGraph,
+    bucket: str,
+    writer: StateObjectWriter,
+) -> CompletedForwardPaperOperationalGraphPublication:
+    return _publish_forward_paper_operational_graph(
+        graph=graph,
+        bucket=bucket,
+        writer=writer,
+        verify_graph=False,
     )
 
 

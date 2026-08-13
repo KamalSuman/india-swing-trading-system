@@ -193,6 +193,26 @@ class ForwardPaperTechnicalFeatureResult:
         if self.result_id != self._calculated_id():
             _fail("forward paper technical feature result failed verification")
 
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        source_outcome: Union[
+            ForwardPaperFeatureInputCandidate,
+            ForwardPaperFeatureInputVeto,
+        ],
+        status: ForwardPaperTechnicalFeatureStatus,
+        observed_history_sessions: int,
+        feature_vector: PromotedTechnicalFeatureVector | None,
+    ) -> "ForwardPaperTechnicalFeatureResult":
+        value = object.__new__(cls)
+        object.__setattr__(value, "source_outcome", source_outcome)
+        object.__setattr__(value, "status", status)
+        object.__setattr__(value, "observed_history_sessions", observed_history_sessions)
+        object.__setattr__(value, "feature_vector", feature_vector)
+        object.__setattr__(value, "result_id", value._calculated_id())
+        return value
+
 
 @dataclass(frozen=True, slots=True)
 class ForwardPaperTechnicalFeatureWindow:
@@ -282,6 +302,33 @@ class ForwardPaperTechnicalFeatureWindow:
         if self.window_id != self._calculated_id():
             _fail("forward paper technical feature window failed verification")
 
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        source_window: ForwardPaperFeatureInputWindow,
+        config: PromotedTechnicalFeatureConfig,
+        results: tuple[ForwardPaperTechnicalFeatureResult, ...],
+        computed_feature_count: int,
+        blocked_feature_count: int,
+        resolved_histories_feature_complete: bool,
+    ) -> "ForwardPaperTechnicalFeatureWindow":
+        value = object.__new__(cls)
+        for name, item in (
+            ("source_window", source_window),
+            ("config", config),
+            ("results", results),
+            ("computed_feature_count", computed_feature_count),
+            ("blocked_feature_count", blocked_feature_count),
+            (
+                "resolved_histories_feature_complete",
+                resolved_histories_feature_complete,
+            ),
+        ):
+            object.__setattr__(value, name, item)
+        object.__setattr__(value, "window_id", value._calculated_id())
+        return value
+
     @property
     def collection_only(self) -> bool:
         return True
@@ -319,28 +366,31 @@ class ForwardPaperTechnicalFeatureWindow:
         return False
 
 
-def build_forward_paper_technical_feature_window(
-    *, source_window: ForwardPaperFeatureInputWindow
+def _build_forward_paper_technical_feature_window(
+    *,
+    source_window: ForwardPaperFeatureInputWindow,
+    verify_inputs: bool,
 ) -> ForwardPaperTechnicalFeatureWindow:
     """Compute descriptive features under the single pinned 60-bar policy."""
 
     if type(source_window) is not ForwardPaperFeatureInputWindow:
         _fail("forward paper technical feature source window is invalid")
-    verification_failed = False
-    try:
-        source_window.verify_content_identity()
-        FORWARD_PAPER_TECHNICAL_FEATURE_CONFIG.verify_content_identity()
-    except Exception:
-        verification_failed = True
-    if verification_failed:
-        _fail("forward paper technical feature input failed verification")
+    if verify_inputs:
+        verification_failed = False
+        try:
+            source_window.verify_content_identity()
+            FORWARD_PAPER_TECHNICAL_FEATURE_CONFIG.verify_content_identity()
+        except Exception:
+            verification_failed = True
+        if verification_failed:
+            _fail("forward paper technical feature input failed verification")
     cutoff = source_window.source_window.source_window.spec.decision_cutoff
     results: list[ForwardPaperTechnicalFeatureResult] = []
     computed = blocked = 0
     for source in source_window.outcomes:
         if type(source) is ForwardPaperFeatureInputVeto:
             results.append(
-                ForwardPaperTechnicalFeatureResult(
+                ForwardPaperTechnicalFeatureResult._from_freshly_verified_derivation(
                     source_outcome=source,
                     status=ForwardPaperTechnicalFeatureStatus.SOURCE_INPUT_VETO,
                     observed_history_sessions=0,
@@ -366,7 +416,7 @@ def build_forward_paper_technical_feature_window(
             _fail("forward paper technical feature calculation failed")
         if degenerate:
             results.append(
-                ForwardPaperTechnicalFeatureResult(
+                ForwardPaperTechnicalFeatureResult._from_freshly_verified_derivation(
                     source_outcome=source,
                     status=ForwardPaperTechnicalFeatureStatus.DEGENERATE_INPUT_VETO,
                     observed_history_sessions=len(source.bars),
@@ -378,7 +428,7 @@ def build_forward_paper_technical_feature_window(
         if type(vector) is not PromotedTechnicalFeatureVector:
             _fail("forward paper technical feature calculation returned invalid output")
         results.append(
-            ForwardPaperTechnicalFeatureResult(
+            ForwardPaperTechnicalFeatureResult._from_freshly_verified_derivation(
                 source_outcome=source,
                 status=(
                     ForwardPaperTechnicalFeatureStatus
@@ -389,11 +439,31 @@ def build_forward_paper_technical_feature_window(
             )
         )
         computed += 1
-    return ForwardPaperTechnicalFeatureWindow(
+    return ForwardPaperTechnicalFeatureWindow._from_freshly_verified_derivation(
         source_window=source_window,
         config=FORWARD_PAPER_TECHNICAL_FEATURE_CONFIG,
         results=tuple(results),
         computed_feature_count=computed,
         blocked_feature_count=blocked,
         resolved_histories_feature_complete=blocked == 0,
+    )
+
+
+def build_forward_paper_technical_feature_window(
+    *, source_window: ForwardPaperFeatureInputWindow
+) -> ForwardPaperTechnicalFeatureWindow:
+    """Compute features after independently verifying the input window."""
+
+    return _build_forward_paper_technical_feature_window(
+        source_window=source_window,
+        verify_inputs=True,
+    )
+
+
+def _build_forward_paper_technical_feature_window_from_verified_inputs(
+    *, source_window: ForwardPaperFeatureInputWindow
+) -> ForwardPaperTechnicalFeatureWindow:
+    return _build_forward_paper_technical_feature_window(
+        source_window=source_window,
+        verify_inputs=False,
     )

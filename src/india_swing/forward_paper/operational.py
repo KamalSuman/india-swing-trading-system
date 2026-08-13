@@ -8,6 +8,7 @@ artifacts into the descriptive feature graph used by later research stages.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable, Mapping
 
 from india_swing.corporate_actions.models import CorporateActionSnapshot
 from india_swing.evaluation.dataset_assembly import EffectiveTickSize
@@ -17,14 +18,17 @@ from india_swing.evaluation.nse_archive_research_identity import (
 from india_swing.forward_paper.adjustments import (
     ForwardPaperAdjustedHistoryWindow,
     ForwardPaperCorporateActionIdentityBinding,
+    _build_forward_paper_adjusted_history_window_from_verified_inputs,
     build_forward_paper_adjusted_history_window,
 )
 from india_swing.forward_paper.feature_inputs import (
     ForwardPaperFeatureInputWindow,
+    _build_forward_paper_feature_input_window_from_verified_inputs,
     build_forward_paper_feature_input_window,
 )
 from india_swing.forward_paper.features import (
     ForwardPaperTechnicalFeatureWindow,
+    _build_forward_paper_technical_feature_window_from_verified_inputs,
     build_forward_paper_technical_feature_window,
 )
 from india_swing.forward_paper.history import (
@@ -64,6 +68,19 @@ def _verify(value: object, message: str) -> None:
         failed = True
     if failed:
         _fail(message)
+
+
+OperationalGraphStageObserver = Callable[[str, str, Mapping[str, int]], None]
+
+
+def _observe(
+    observer: OperationalGraphStageObserver | None,
+    stage: str,
+    status: str,
+    **details: int,
+) -> None:
+    if observer is not None:
+        observer(stage, status, details)
 
 
 def _source_isin(result: object) -> str:
@@ -306,6 +323,38 @@ class ForwardPaperOperationalResearchGraph:
         if self.graph_id != self._calculated_id():
             _fail("forward paper operational graph identity failed")
 
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        source_window: ForwardPaperRawHistoryWindow,
+        corporate_actions: CorporateActionSnapshot,
+        tick_panel: ForwardPaperTickPanel,
+        identity_bindings: tuple[ForwardPaperCorporateActionIdentityBinding, ...],
+        tick_specifications: tuple[EffectiveTickSize, ...],
+        adjusted_window: ForwardPaperAdjustedHistoryWindow,
+        feature_input_window: ForwardPaperFeatureInputWindow,
+        technical_feature_window: ForwardPaperTechnicalFeatureWindow,
+        unmatched_tick_result_count: int,
+    ) -> "ForwardPaperOperationalResearchGraph":
+        value = object.__new__(cls)
+        for name, item in (
+            ("source_window", source_window),
+            ("corporate_actions", corporate_actions),
+            ("tick_panel", tick_panel),
+            ("identity_bindings", identity_bindings),
+            ("tick_specifications", tick_specifications),
+            ("adjusted_window", adjusted_window),
+            ("feature_input_window", feature_input_window),
+            ("technical_feature_window", technical_feature_window),
+            ("unmatched_tick_result_count", unmatched_tick_result_count),
+            ("schema_version", FORWARD_PAPER_OPERATIONAL_GRAPH_SCHEMA_VERSION),
+            ("policy_version", FORWARD_PAPER_OPERATIONAL_GRAPH_POLICY_VERSION),
+        ):
+            object.__setattr__(value, name, item)
+        object.__setattr__(value, "graph_id", value._calculated_id())
+        return value
+
     @property
     def collection_only(self) -> bool:
         return True
@@ -339,11 +388,13 @@ class ForwardPaperOperationalResearchGraph:
         return False
 
 
-def assemble_forward_paper_operational_research_graph(
+def _assemble_forward_paper_operational_research_graph(
     *,
     source_window: ForwardPaperRawHistoryWindow,
     corporate_actions: CorporateActionSnapshot,
     tick_panel: ForwardPaperTickPanel,
+    verify_inputs: bool,
+    stage_observer: OperationalGraphStageObserver | None,
 ) -> ForwardPaperOperationalResearchGraph:
     """Join three exact pinned artifacts and compute the descriptive graph."""
 
@@ -353,12 +404,18 @@ def assemble_forward_paper_operational_research_graph(
         _fail("forward paper operational corporate actions are invalid")
     if not is_forward_paper_tick_panel(tick_panel):
         _fail("forward paper operational tick panel is invalid")
-    _verify(source_window, "forward paper operational source failed verification")
-    _verify(
-        corporate_actions,
-        "forward paper operational corporate actions failed verification",
-    )
-    _verify(tick_panel, "forward paper operational tick panel failed verification")
+    if verify_inputs:
+        _verify(source_window, "forward paper operational source failed verification")
+        _verify(
+            corporate_actions,
+            "forward paper operational corporate actions failed verification",
+        )
+        _verify(tick_panel, "forward paper operational tick panel failed verification")
+    elif (
+        source_window.window_id != source_window._calculated_id()
+        or source_window.spec.spec_id != source_window.spec._calculated_id()
+    ):
+        _fail("forward paper operational source failed verification")
     if (
         tick_panel.cutoff > source_window.spec.decision_cutoff
         or tick_panel.knowledge_time > source_window.spec.decision_cutoff
@@ -369,25 +426,84 @@ def assemble_forward_paper_operational_research_graph(
         source_window=source_window,
         tick_panel=tick_panel,
     )
-    failed = False
     adjusted = inputs = features = None
+    _observe(stage_observer, "adjustment_derivation", "started")
     try:
-        adjusted = build_forward_paper_adjusted_history_window(
+        adjustment_builder = (
+            build_forward_paper_adjusted_history_window
+            if verify_inputs
+            else _build_forward_paper_adjusted_history_window_from_verified_inputs
+        )
+        adjusted = adjustment_builder(
             source_window=source_window,
             corporate_actions=corporate_actions,
             identity_bindings=bindings,
         )
-        inputs = build_forward_paper_feature_input_window(
+    except Exception:
+        _observe(stage_observer, "adjustment_derivation", "failed")
+        _fail("forward paper operational downstream assembly failed")
+    if adjusted is None:
+        _fail("forward paper operational downstream assembly failed")
+    _observe(
+        stage_observer,
+        "adjustment_derivation",
+        "completed",
+        adjusted_candidate_count=adjusted.adjusted_candidate_count,
+        adjustment_veto_count=adjusted.adjustment_veto_count,
+        source_veto_count=adjusted.source_veto_count,
+    )
+
+    _observe(stage_observer, "feature_input_derivation", "started")
+    try:
+        input_builder = (
+            build_forward_paper_feature_input_window
+            if verify_inputs
+            else _build_forward_paper_feature_input_window_from_verified_inputs
+        )
+        inputs = input_builder(
             source_window=adjusted,
             tick_specifications=ticks,
         )
-        features = build_forward_paper_technical_feature_window(source_window=inputs)
     except Exception:
-        failed = True
-    if failed or adjusted is None or inputs is None or features is None:
+        _observe(stage_observer, "feature_input_derivation", "failed")
         _fail("forward paper operational downstream assembly failed")
+    if inputs is None:
+        _fail("forward paper operational downstream assembly failed")
+    _observe(
+        stage_observer,
+        "feature_input_derivation",
+        "completed",
+        assembled_candidate_count=inputs.assembled_candidate_count,
+        veto_count=inputs.veto_count,
+    )
 
-    return ForwardPaperOperationalResearchGraph(
+    _observe(stage_observer, "technical_feature_derivation", "started")
+    try:
+        feature_builder = (
+            build_forward_paper_technical_feature_window
+            if verify_inputs
+            else _build_forward_paper_technical_feature_window_from_verified_inputs
+        )
+        features = feature_builder(source_window=inputs)
+    except Exception:
+        _observe(stage_observer, "technical_feature_derivation", "failed")
+        _fail("forward paper operational downstream assembly failed")
+    if features is None:
+        _fail("forward paper operational downstream assembly failed")
+    _observe(
+        stage_observer,
+        "technical_feature_derivation",
+        "completed",
+        computed_feature_count=features.computed_feature_count,
+        blocked_feature_count=features.blocked_feature_count,
+    )
+
+    constructor = (
+        ForwardPaperOperationalResearchGraph
+        if verify_inputs
+        else ForwardPaperOperationalResearchGraph._from_freshly_verified_derivation
+    )
+    return constructor(
         source_window=source_window,
         corporate_actions=corporate_actions,
         tick_panel=tick_panel,
@@ -397,4 +513,37 @@ def assemble_forward_paper_operational_research_graph(
         feature_input_window=inputs,
         technical_feature_window=features,
         unmatched_tick_result_count=unmatched,
+    )
+
+
+def assemble_forward_paper_operational_research_graph(
+    *,
+    source_window: ForwardPaperRawHistoryWindow,
+    corporate_actions: CorporateActionSnapshot,
+    tick_panel: ForwardPaperTickPanel,
+) -> ForwardPaperOperationalResearchGraph:
+    """Join three exact pinned artifacts after independent input verification."""
+
+    return _assemble_forward_paper_operational_research_graph(
+        source_window=source_window,
+        corporate_actions=corporate_actions,
+        tick_panel=tick_panel,
+        verify_inputs=True,
+        stage_observer=None,
+    )
+
+
+def _assemble_forward_paper_operational_research_graph_from_verified_inputs(
+    *,
+    source_window: ForwardPaperRawHistoryWindow,
+    corporate_actions: CorporateActionSnapshot,
+    tick_panel: ForwardPaperTickPanel,
+    stage_observer: OperationalGraphStageObserver | None,
+) -> ForwardPaperOperationalResearchGraph:
+    return _assemble_forward_paper_operational_research_graph(
+        source_window=source_window,
+        corporate_actions=corporate_actions,
+        tick_panel=tick_panel,
+        verify_inputs=False,
+        stage_observer=stage_observer,
     )
