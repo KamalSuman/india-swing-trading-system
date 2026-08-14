@@ -55,6 +55,7 @@ from .nse_archive_research_replay import (
     NseHistoricalArchiveSnapshotReader,
     _SYMBOL,
     iter_verified_nse_archive_research_sessions,
+    iter_verified_nse_archive_research_sessions_after,
     _iter_freshly_verified_nse_archive_research_sessions,
 )
 
@@ -772,8 +773,9 @@ def _verify_admission_dataset_safety_posture(dataset: NseArchiveResearchDataset)
 
 
 # One prior-admitted observation: (research_identity_id or listing_key peer
-# value, symbol, record_id, market_session).
-_PriorObservation = tuple[str, str, str, date]
+# value, source_isin, symbol, record_id, market_session). Retaining the ISIN
+# lets an authenticated state artifact independently re-derive every identity.
+_PriorObservation = tuple[str, str, str, str, date]
 
 
 def _admission_candidate(
@@ -909,7 +911,13 @@ def _build_admission_session_decisions_and_transitions(
 
         prior_listing = latest_by_listing_key.get(decision.listing_key)
         if prior_listing is not None:
-            prior_identity_id, prior_symbol, prior_record_id, prior_session = prior_listing
+            (
+                prior_identity_id,
+                _prior_isin,
+                prior_symbol,
+                prior_record_id,
+                prior_session,
+            ) = prior_listing
             if prior_identity_id != decision.research_identity_id:
                 transitions.append(
                     NseArchiveResearchIdentityTransition(
@@ -929,7 +937,13 @@ def _build_admission_session_decisions_and_transitions(
 
         prior_identity = latest_by_identity.get(decision.research_identity_id)
         if prior_identity is not None:
-            prior_listing_key, prior_symbol, prior_record_id, prior_session = prior_identity
+            (
+                prior_listing_key,
+                _prior_isin,
+                prior_symbol,
+                prior_record_id,
+                prior_session,
+            ) = prior_identity
             if prior_symbol != decision.symbol:
                 transitions.append(
                     NseArchiveResearchIdentityTransition(
@@ -1028,16 +1042,31 @@ def _iter_paired_sessions(
     reader: NseHistoricalArchiveSnapshotReader,
     *,
     yield_from_session: date | None = None,
+    latest_by_listing_key: dict[str, _PriorObservation] | None = None,
+    latest_by_identity: dict[str, _PriorObservation] | None = None,
+    replay_after_session: date | None = None,
 ) -> Iterator[NseArchiveResearchPairedSession]:
-    latest_by_listing_key: dict[str, _PriorObservation] = {}
-    latest_by_identity: dict[str, _PriorObservation] = {}
+    latest_by_listing_key = (
+        {} if latest_by_listing_key is None else dict(latest_by_listing_key)
+    )
+    latest_by_identity = (
+        {} if latest_by_identity is None else dict(latest_by_identity)
+    )
     freshly_verified = callable(
         getattr(type(reader), "get_hash_verified_from_date_partition", None)
     )
     replay_iterator = iter(
-        _iter_freshly_verified_nse_archive_research_sessions(dataset, reader)
-        if freshly_verified
-        else iter_verified_nse_archive_research_sessions(dataset, reader)
+        iter_verified_nse_archive_research_sessions_after(
+            dataset,
+            reader,
+            after_session=replay_after_session,
+        )
+        if replay_after_session is not None
+        else (
+            _iter_freshly_verified_nse_archive_research_sessions(dataset, reader)
+            if freshly_verified
+            else iter_verified_nse_archive_research_sessions(dataset, reader)
+        )
     )
 
     while True:
@@ -1072,12 +1101,14 @@ def _iter_paired_sessions(
             if decision.admission_status in _ADMITTED_STATUSES:
                 latest_by_listing_key[decision.listing_key] = (
                     decision.research_identity_id,
+                    decision.source_isin,
                     decision.symbol,
                     decision.record_id,
                     decision.market_session,
                 )
                 latest_by_identity[decision.research_identity_id] = (
                     decision.listing_key,
+                    decision.source_isin,
                     decision.symbol,
                     decision.record_id,
                     decision.market_session,
@@ -1159,12 +1190,11 @@ def iter_nse_archive_research_paired_sessions_from(
     *,
     start_session: date,
 ) -> Iterator[NseArchiveResearchPairedSession]:
-    """Warm identity state from dataset start and yield pairs only from a boundary.
+    """Warm identity state and yield pairs only from a boundary.
 
-    Every earlier replay session is still consumed and admitted in stored
-    order, so listing rebounds and identity-symbol changes remain point-in-
-    time correct.  Only the redundant paired-session graph for pre-window
-    warm-up sessions is omitted.
+    Every earlier replay session is consumed in stored order so listing
+    rebounds and identity-symbol changes remain point-in-time correct. Only
+    the redundant paired-session graph for pre-window warm-up is omitted.
     """
 
     if type(start_session) is not date:

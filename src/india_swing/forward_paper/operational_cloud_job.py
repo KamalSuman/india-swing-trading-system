@@ -27,6 +27,11 @@ from india_swing.evaluation.nse_archive_research_dataset_gcs import (
     PinnedNseArchiveResearchDatasetRequest,
     read_pinned_nse_archive_research_dataset,
 )
+from india_swing.evaluation.nse_archive_research_identity_checkpoint import (
+    PinnedNseArchiveResearchIdentityCheckpointRequest,
+    read_pinned_nse_archive_research_identity_checkpoint,
+    verify_nse_archive_research_identity_checkpoint_for_dataset,
+)
 from india_swing.forward_paper.operational_job import (
     ForwardPaperOperationalJobRequest,
     NseArchiveForwardPaperHistoryBuilder,
@@ -257,6 +262,12 @@ def _parser() -> argparse.ArgumentParser:
         "--dataset-generation", type=_positive_generation, required=True
     )
     parser.add_argument("--dataset-sha256", required=True)
+    parser.add_argument("--identity-checkpoint-id")
+    parser.add_argument("--identity-checkpoint-bucket")
+    parser.add_argument(
+        "--identity-checkpoint-generation", type=_positive_generation
+    )
+    parser.add_argument("--identity-checkpoint-sha256")
     parser.add_argument("--signal-session", type=_date, required=True)
     parser.add_argument("--decision-cutoff", type=_cutoff, required=True)
     parser.add_argument("--expected-market-sessions", type=_sessions, required=True)
@@ -295,6 +306,40 @@ def build_forward_paper_operational_cloud_runtime(
                 "record_count": dataset.record_count,
             },
         )
+    checkpoint_values = (
+        getattr(arguments, "identity_checkpoint_id", None),
+        getattr(arguments, "identity_checkpoint_bucket", None),
+        getattr(arguments, "identity_checkpoint_generation", None),
+        getattr(arguments, "identity_checkpoint_sha256", None),
+    )
+    checkpoint = None
+    if any(value is not None for value in checkpoint_values):
+        if any(value is None for value in checkpoint_values):
+            raise ForwardPaperOperationalCloudJobError(_ERROR)
+        if progress is not None:
+            progress("identity_checkpoint_read", "started", {})
+        checkpoint = read_pinned_nse_archive_research_identity_checkpoint(
+            request=PinnedNseArchiveResearchIdentityCheckpointRequest(
+                bucket=checkpoint_values[1],
+                checkpoint_id=checkpoint_values[0],
+                generation=checkpoint_values[2],
+                expected_sha256=checkpoint_values[3],
+            ),
+            reader=reader,
+        )
+        verify_nse_archive_research_identity_checkpoint_for_dataset(
+            checkpoint,
+            dataset,
+        )
+        if progress is not None:
+            progress(
+                "identity_checkpoint_read",
+                "completed",
+                {
+                    "listing_state_count": len(checkpoint.latest_by_listing_key),
+                    "identity_state_count": len(checkpoint.latest_by_identity),
+                },
+            )
     engine_stores = build_promoted_engine_stores(
         reference_root=arguments.reference_root,
         identity_evidence_root=arguments.identity_evidence_root,
@@ -314,6 +359,7 @@ def build_forward_paper_operational_cloud_runtime(
         history_builder=NseArchiveForwardPaperHistoryBuilder(
             datasets=ExactNseArchiveResearchDatasetResolver(dataset),
             reader=market_reader,
+            identity_checkpoint=checkpoint,
         ),
         corporate_actions=LocalCorporateActionSnapshotStore(promoted_root),
         tick_panels=ExactForwardPaperTickPanelResolver(

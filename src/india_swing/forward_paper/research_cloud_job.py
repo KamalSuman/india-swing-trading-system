@@ -127,6 +127,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-bucket", required=True)
     parser.add_argument("--dataset-generation", type=_positive_integer, required=True)
     parser.add_argument("--dataset-sha256", required=True)
+    parser.add_argument("--identity-checkpoint-id")
+    parser.add_argument("--identity-checkpoint-bucket")
+    parser.add_argument(
+        "--identity-checkpoint-generation", type=_positive_integer
+    )
+    parser.add_argument("--identity-checkpoint-sha256")
     parser.add_argument("--source-bucket", required=True)
     parser.add_argument("--source-graph-id", required=True)
     parser.add_argument("--source-manifest-object-name", required=True)

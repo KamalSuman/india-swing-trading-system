@@ -15,6 +15,9 @@ from india_swing.forward_paper.operational_cloud_job import (
     main,
 )
 from india_swing.forward_paper.signal_tick import ExactForwardPaperTickPanelResolver
+from india_swing.evaluation.nse_archive_research_identity_checkpoint import (
+    NseArchiveResearchIdentityCheckpoint,
+)
 from india_swing.forward_paper.operational_job import (
     NseArchiveForwardPaperHistoryBuilder,
 )
@@ -165,6 +168,61 @@ class ForwardPaperOperationalCloudJobTests(unittest.TestCase):
             runtime.tick_panels.signal_ticks.root,
             arguments.promoted_root / "forward-paper-signal-ticks",
         )
+
+    def test_partial_checkpoint_pin_is_rejected_without_a_gcs_read(self) -> None:
+        argv = self._argv() + ["--identity-checkpoint-id", "b" * 64]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = main(argv, reader_factory=lambda: object())
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(
+            json.loads(lines[-1]),
+            {
+                "error_type": "ForwardPaperOperationalCloudJobError",
+                "status": "FAILED",
+            },
+        )
+
+    def test_default_runtime_loads_one_complete_exact_checkpoint_pin(self) -> None:
+        arguments = type("Arguments", (), {})()
+        values = self._argv()
+        parser_values = {}
+        for index in range(0, len(values), 2):
+            parser_values[values[index][2:].replace("-", "_")] = values[index + 1]
+        for name, value in parser_values.items():
+            if name.endswith("_root"):
+                value = Path(value)
+            elif name == "dataset_generation":
+                value = int(value)
+            setattr(arguments, name, value)
+        arguments.identity_checkpoint_id = "b" * 64
+        arguments.identity_checkpoint_bucket = "india-swing-research-data"
+        arguments.identity_checkpoint_generation = 19
+        arguments.identity_checkpoint_sha256 = "c" * 64
+        checkpoint = object.__new__(NseArchiveResearchIdentityCheckpoint)
+        with patch(
+            "india_swing.forward_paper.operational_cloud_job."
+            "read_pinned_nse_archive_research_dataset",
+            return_value=self.dataset,
+        ), patch(
+            "india_swing.forward_paper.operational_cloud_job."
+            "read_pinned_nse_archive_research_identity_checkpoint",
+            return_value=checkpoint,
+        ) as read_checkpoint, patch(
+            "india_swing.forward_paper.operational_cloud_job."
+            "verify_nse_archive_research_identity_checkpoint_for_dataset",
+        ) as verify_checkpoint, patch(
+            "india_swing.forward_paper.operational_cloud_job."
+            "build_promoted_engine_stores",
+            return_value=SimpleNamespace(effective_session_ticks=object()),
+        ):
+            runtime = _default_runtime_factory(arguments, dataset_reader=object())
+        self.assertIs(runtime.history_builder.identity_checkpoint, checkpoint)
+        self.assertEqual(read_checkpoint.call_count, 1)
+        verify_checkpoint.assert_called_once_with(checkpoint, self.dataset)
 
 
 if __name__ == "__main__":

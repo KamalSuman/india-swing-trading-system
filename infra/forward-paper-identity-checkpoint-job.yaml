@@ -1,0 +1,55 @@
+# One-shot checkpoint builder. Replace the image placeholder with the immutable
+# digest produced from the reviewed implementation before deployment.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: india-swing-forward-paper-identity-checkpoint
+  labels:
+    app.kubernetes.io/name: india-swing-forward-paper-identity-checkpoint
+    app.kubernetes.io/part-of: india-swing-trading-system
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+    spec:
+      taskCount: 1
+      template:
+        spec:
+          serviceAccountName: eod-swing-runtime@indian-swing-trading-bot.iam.gserviceaccount.com
+          timeoutSeconds: "3600"
+          maxRetries: 0
+          containers:
+            - image: asia-south1-docker.pkg.dev/indian-swing-trading-bot/swing-repo/india-swing-app@sha256:REPLACE_WITH_REVIEWED_IMAGE_DIGEST
+              command:
+                - python
+              args:
+                - -m
+                - india_swing.evaluation.nse_archive_research_identity_checkpoint_cloud_job
+                - --market-data-root
+                - /mnt/india-swing-data/research/canonical-market-data
+                - --dataset-bucket
+                - swing-data-indian-swing-trading-bot
+                - --dataset-id
+                - ade90738281ca444c610804aaf52577a1f4125e1b1c74e83ad058218e25542cd
+                - --dataset-generation
+                - "1786542111409559"
+                - --dataset-sha256
+                - 32352fd3e21f7690af3bdb69e1a13de48160ef2dbde30d7ac14e779fc1f210fa
+                - --checkpoint-session
+                - "2026-05-05"
+                - --checkpoint-bucket
+                - swing-data-indian-swing-trading-bot
+              resources:
+                limits:
+                  cpu: "8"
+                  memory: 16Gi
+              volumeMounts:
+                - name: corpus
+                  mountPath: /mnt/india-swing-data
+          volumes:
+            - name: corpus
+              csi:
+                driver: gcsfuse.run.googleapis.com
+                volumeAttributes:
+                  bucketName: swing-data-indian-swing-trading-bot

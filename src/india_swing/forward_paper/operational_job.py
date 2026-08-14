@@ -16,6 +16,12 @@ from india_swing.evaluation.nse_archive_research_price_stream import (
     NseArchiveResearchPriceStreamSession,
     iter_nse_archive_research_price_stream_sessions_from,
 )
+from india_swing.evaluation.nse_archive_research_identity_checkpoint_runtime import (
+    iter_nse_archive_research_price_stream_sessions_from_checkpoint,
+)
+from india_swing.evaluation.nse_archive_research_identity_checkpoint import (
+    NseArchiveResearchIdentityCheckpoint,
+)
 from india_swing.forward_paper.history import (
     ForwardPaperHistoryWindowSpec,
     ForwardPaperRawHistoryWindow,
@@ -177,6 +183,7 @@ class ForwardPaperOperationalJobRequest:
 class NseArchiveForwardPaperHistoryBuilder:
     datasets: NseArchiveResearchDatasetResolver
     reader: NseHistoricalArchiveSnapshotReader
+    identity_checkpoint: NseArchiveResearchIdentityCheckpoint | None = None
 
     def sessions(
         self, spec: ForwardPaperHistoryWindowSpec
@@ -194,11 +201,19 @@ class NseArchiveForwardPaperHistoryBuilder:
             ):
                 raise ValueError
             dataset.verify_content_identity()
-            sessions = iter_nse_archive_research_price_stream_sessions_from(
-                dataset,
-                self.reader,
-                start_session=spec.expected_market_sessions[0],
-            )
+            if self.identity_checkpoint is None:
+                sessions = iter_nse_archive_research_price_stream_sessions_from(
+                    dataset,
+                    self.reader,
+                    start_session=spec.expected_market_sessions[0],
+                )
+            else:
+                sessions = iter_nse_archive_research_price_stream_sessions_from_checkpoint(
+                    dataset,
+                    self.reader,
+                    start_session=spec.expected_market_sessions[0],
+                    checkpoint=self.identity_checkpoint,
+                )
         except Exception:
             failed = True
         if failed or sessions is None:

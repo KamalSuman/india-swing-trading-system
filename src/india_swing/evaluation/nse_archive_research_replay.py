@@ -1220,6 +1220,8 @@ def _replay_range(
     binding: NseArchiveResearchRangeBinding,
     reader: NseHistoricalArchiveSnapshotReader,
     partition_index: Mapping[date, NseArchiveResearchDatasetSplitPartition],
+    *,
+    start_after_session: date | None = None,
 ) -> Iterator[NseArchiveResearchReplaySession]:
     range_load_failed = False
     verified: (
@@ -1232,9 +1234,17 @@ def _replay_range(
             getattr(type(reader), "get_hash_verified_from_date_partition", None)
         ):
             try:
-                verified = stream_verified_nse_historical_archive_range(
-                    reader,
-                    index_snapshot_id=binding.index_snapshot_id,
+                verified = (
+                    stream_verified_nse_historical_archive_range(
+                        reader,
+                        index_snapshot_id=binding.index_snapshot_id,
+                    )
+                    if start_after_session is None
+                    else stream_verified_nse_historical_archive_range(
+                        reader,
+                        index_snapshot_id=binding.index_snapshot_id,
+                        start_after_session=start_after_session,
+                    )
                 )
             except NseHistoricalArchiveLegacyIndexSchema:
                 # Legacy v1/v2 ranges retain the original full-range verifier.
@@ -1243,6 +1253,8 @@ def _replay_range(
                     index_snapshot_id=binding.index_snapshot_id,
                 )
         else:
+            if start_after_session is not None:
+                _fail("research replay suffix requires an exact hash-verified reader")
             verified = load_verified_nse_historical_archive_range(
                 reader, index_snapshot_id=binding.index_snapshot_id
             )
@@ -1265,10 +1277,26 @@ def _replay_range(
     streamed_session_count = 0
     streamed_identity_issue_count = 0
     streamed_quarantined_session_count = 0
+    session_offset = (
+        verified.session_start_index
+        if type(verified) is StreamingVerifiedNseHistoricalArchiveRange
+        else (
+            binding.accepted_sessions.index(start_after_session) + 1
+            if start_after_session is not None
+            else 0
+        )
+    )
+    expected_snapshot_ids = binding.session_snapshot_ids[session_offset:]
+    expected_sessions = binding.accepted_sessions[session_offset:]
+    verified_sessions = (
+        verified.sessions[session_offset:]
+        if type(verified) is VerifiedNseHistoricalArchiveRange
+        else verified.sessions
+    )
     for session_snapshot_id, accepted_session, stored in zip(
-        binding.session_snapshot_ids,
-        binding.accepted_sessions,
-        verified.sessions,
+        expected_snapshot_ids,
+        expected_sessions,
+        verified_sessions,
         strict=True,
     ):
         if type(stored) is not StoredMarketSnapshot:
@@ -1315,6 +1343,7 @@ def _replay_range(
             _fail("research replay session could not be reconstructed")
         if (
             type(verified) is StreamingVerifiedNseHistoricalArchiveRange
+            and session_offset == 0
             and streamed_session_count == len(binding.accepted_sessions)
             and (
                 tuple(sorted(streamed_profile_counts.items()))
@@ -1337,7 +1366,7 @@ def _replay_range(
         yield session_obj
     if type(verified) is StreamingVerifiedNseHistoricalArchiveRange:
         if (
-            streamed_session_count != len(binding.accepted_sessions)
+            streamed_session_count != len(expected_sessions)
         ):
             _fail(
                 "research replay archive range session lineage does not match "
@@ -1349,9 +1378,39 @@ def _iter_replay_sessions(
     dataset: NseArchiveResearchDataset,
     partition_index: Mapping[date, NseArchiveResearchDatasetSplitPartition],
     reader: NseHistoricalArchiveSnapshotReader,
+    *,
+    start_after_session: date | None = None,
 ) -> Iterator[NseArchiveResearchReplaySession]:
-    for binding in dataset.range_bindings:
-        yield from _replay_range(dataset, binding, reader, partition_index)
+    if start_after_session is not None:
+        containing_binding = next(
+            (
+                binding
+                for binding in dataset.range_bindings
+                if start_after_session in binding.accepted_sessions
+            ),
+            None,
+        )
+        if containing_binding is None:
+            _fail("research replay session boundary is invalid")
+        containing_index = dataset.range_bindings.index(containing_binding)
+        if start_after_session == containing_binding.accepted_sessions[-1]:
+            suffix_bindings = dataset.range_bindings[containing_index + 1 :]
+            containing_binding = None
+        else:
+            suffix_bindings = dataset.range_bindings[containing_index:]
+    else:
+        containing_binding = None
+        suffix_bindings = dataset.range_bindings
+    for binding in suffix_bindings:
+        yield from _replay_range(
+            dataset,
+            binding,
+            reader,
+            partition_index,
+            start_after_session=(
+                start_after_session if binding is containing_binding else None
+            ),
+        )
 
 
 def iter_verified_nse_archive_research_sessions(
@@ -1383,6 +1442,38 @@ def iter_verified_nse_archive_research_sessions(
 
     partition_index = _session_partition_index(dataset)
     return _iter_replay_sessions(dataset, partition_index, reader)
+
+
+def iter_verified_nse_archive_research_sessions_after(
+    dataset: NseArchiveResearchDataset,
+    reader: NseHistoricalArchiveSnapshotReader,
+    *,
+    after_session: date,
+) -> Iterator[NseArchiveResearchReplaySession]:
+    """Replay only the authenticated suffix after one exact accepted session."""
+
+    if type(dataset) is not NseArchiveResearchDataset or reader is None:
+        _fail("research replay dataset or reader is invalid")
+    if (
+        type(after_session) is not date
+        or after_session not in dataset.accepted_sessions
+        or after_session == dataset.accepted_sessions[-1]
+    ):
+        _fail("research replay session boundary is invalid")
+    failed = False
+    try:
+        dataset.verify_content_identity()
+        _verify_dataset_safety_posture(dataset)
+    except Exception:
+        failed = True
+    if failed:
+        _fail("research replay dataset identity failed")
+    return _iter_replay_sessions(
+        dataset,
+        _session_partition_index(dataset),
+        reader,
+        start_after_session=after_session,
+    )
 
 
 def _iter_freshly_verified_nse_archive_research_sessions(

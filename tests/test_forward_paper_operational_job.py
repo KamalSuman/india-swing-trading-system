@@ -13,6 +13,9 @@ from india_swing.forward_paper.operational_job import (
     NseArchiveForwardPaperHistoryBuilder,
     run_forward_paper_operational_job,
 )
+from india_swing.evaluation.nse_archive_research_identity_checkpoint import (
+    NseArchiveResearchIdentityCheckpoint,
+)
 
 from tests.test_forward_paper_operational import _operational_artifacts
 from tests.test_forward_paper_operational_gcs import ExactResolver, FakeWriter
@@ -75,6 +78,32 @@ class ForwardPaperOperationalJobTests(unittest.TestCase):
             self.dataset,
             builder.reader,
             start_session=self.raw.spec.expected_market_sessions[0],
+        )
+
+    def test_builder_uses_exact_checkpoint_path_when_supplied(self) -> None:
+        checkpoint = object.__new__(NseArchiveResearchIdentityCheckpoint)
+        datasets = DatasetResolver(self.dataset)
+        builder = NseArchiveForwardPaperHistoryBuilder(
+            datasets=datasets,
+            reader=object(),
+            identity_checkpoint=checkpoint,
+        )
+        with patch.object(
+            job_module,
+            "iter_nse_archive_research_price_stream_sessions_from_checkpoint",
+            return_value=iter(self.raw.sessions),
+        ) as bounded, patch.object(
+            job_module,
+            "iter_nse_archive_research_price_stream_sessions_from",
+            side_effect=AssertionError("full replay fallback was used"),
+        ):
+            rebuilt = builder.build(self.raw.spec)
+        self.assertEqual(rebuilt.window_id, self.raw.window_id)
+        bounded.assert_called_once_with(
+            self.dataset,
+            builder.reader,
+            start_session=self.raw.spec.expected_market_sessions[0],
+            checkpoint=checkpoint,
         )
 
     def test_job_rebuilds_assembles_and_seals_one_manifest(self) -> None:

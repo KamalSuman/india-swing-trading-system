@@ -280,6 +280,7 @@ class StreamingVerifiedNseHistoricalArchiveRange:
     identity_quarantined_session_count: int
     incomplete_evidence_session_count: int
     evidence_profile_counts: Mapping[str, int]
+    session_start_index: int = 0
 
 
 def _fail(message: str) -> None:
@@ -751,8 +752,9 @@ def _verified_v3_session_iterator(
     index_schema: str,
     observed_date: date,
     index_observed_at: object,
+    start_index: int = 0,
 ) -> Iterator[StoredMarketSnapshot]:
-    for value in index_records:
+    for value in index_records[start_index:]:
         try:
             session_value = _get_session_snapshot(
                 reader,
@@ -785,10 +787,18 @@ def stream_verified_nse_historical_archive_range(
     reader: NseHistoricalArchiveSnapshotReader,
     *,
     index_snapshot_id: str,
+    start_after_session: date | None = None,
 ) -> StreamingVerifiedNseHistoricalArchiveRange:
-    """Verify one exact v3 range header and stream authenticated sessions."""
+    """Verify one exact range header and stream authenticated sessions.
+
+    ``start_after_session`` is reserved for an authenticated-state caller. The
+    complete index remains verified and exposed for exact binding checks, but
+    session blobs at or before that accepted session are not opened.
+    """
 
     _sha256(index_snapshot_id, "archive range index snapshot id is invalid")
+    if start_after_session is not None and type(start_after_session) is not date:
+        _fail("archive range session boundary is invalid")
     try:
         index = reader.get(NSE_HISTORICAL_ARCHIVE_INDEX_DATASET, index_snapshot_id)
     except Exception:
@@ -867,6 +877,15 @@ def stream_verified_nse_historical_archive_range(
         )
     ):
         _fail("archive range index record is invalid")
+    session_start_index = 0
+    if start_after_session is not None:
+        if index_schema != NSE_HISTORICAL_ARCHIVE_INDEX_SCHEMA_VERSION:
+            raise NseHistoricalArchiveLegacyIndexSchema(
+                "archive range session boundary requires full legacy verification"
+            )
+        if start_after_session not in sessions or start_after_session >= sessions[-1]:
+            _fail("archive range session boundary is invalid")
+        session_start_index = sessions.index(start_after_session) + 1
     for value in index_records:
         _sha256(value["snapshot_id"], "archive range session snapshot id is invalid")
         _sha256(value["source_container_sha256"], "archive range source hash is invalid")
@@ -925,6 +944,7 @@ def stream_verified_nse_historical_archive_range(
             index_schema=index_schema,
             observed_date=manifest.observed_at.date(),
             index_observed_at=manifest.observed_at,
+            start_index=session_start_index,
         ),
         record_count=sum(value["record_count"] for value in index_records),
         identity_issue_count=(
@@ -939,6 +959,7 @@ def stream_verified_nse_historical_archive_range(
         ),
         incomplete_evidence_session_count=incomplete_evidence_session_count,
         evidence_profile_counts=evidence_profile_counts,
+        session_start_index=session_start_index,
     )
 
 
