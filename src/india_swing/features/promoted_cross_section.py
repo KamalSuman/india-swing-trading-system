@@ -308,11 +308,14 @@ def _rank_tiers(
     ):
         raise PromotedCrossSectionError(_ERR_GRAPH)
     unique_scores = tuple(sorted({value for _, value in values}, reverse=True))
+    dense_rank_by_score = {
+        value: index for index, value in enumerate(unique_scores, start=1)
+    }
+    tie_count_by_score: dict[Decimal, int] = {}
+    for _, value in values:
+        tie_count_by_score[value] = tie_count_by_score.get(value, 0) + 1
     return {
-        key: (
-            unique_scores.index(value) + 1,
-            sum(other == value for _, other in values),
-        )
+        key: (dense_rank_by_score[value], tie_count_by_score[value])
         for key, value in values
     }
 
@@ -820,11 +823,12 @@ def _score_parts(
     return tuple(output)
 
 
-def score_promoted_feature_vectors(
+def _score_promoted_feature_vectors(
     *,
     vectors: tuple[PromotedTechnicalFeatureVector, ...],
     source_feature_panel_id: str,
     config: PromotedCrossSectionConfig,
+    verify_vectors: bool,
 ) -> tuple[
     PromotedMarketRegimeEvidence | None,
     tuple[PromotedOpportunityScore, ...],
@@ -846,8 +850,9 @@ def score_promoted_feature_vectors(
         raise PromotedCrossSectionError(_ERR_INPUT)
     try:
         config.verify_content_identity()
-        for value in vectors:
-            value.verify_content_identity()
+        if verify_vectors:
+            for value in vectors:
+                value.verify_content_identity()
     except Exception:
         raise PromotedCrossSectionError(_ERR_VERIFY) from None
     keys = tuple(
@@ -916,6 +921,25 @@ def score_promoted_feature_vectors(
     except Exception:
         raise PromotedCrossSectionError(_ERR_GRAPH) from None
     return regime_evidence, opportunities
+
+
+def score_promoted_feature_vectors(
+    *,
+    vectors: tuple[PromotedTechnicalFeatureVector, ...],
+    source_feature_panel_id: str,
+    config: PromotedCrossSectionConfig,
+) -> tuple[
+    PromotedMarketRegimeEvidence | None,
+    tuple[PromotedOpportunityScore, ...],
+]:
+    """Apply the scoring kernel after independently verifying every vector."""
+
+    return _score_promoted_feature_vectors(
+        vectors=vectors,
+        source_feature_panel_id=source_feature_panel_id,
+        config=config,
+        verify_vectors=True,
+    )
 
 
 @dataclass(frozen=True, slots=True)

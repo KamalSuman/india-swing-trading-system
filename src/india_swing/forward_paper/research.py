@@ -17,6 +17,7 @@ from india_swing.features.promoted_cross_section import (
     PromotedCrossSectionConfig,
     PromotedMarketRegimeEvidence,
     PromotedOpportunityScore,
+    _score_promoted_feature_vectors,
     score_promoted_feature_vectors,
 )
 from india_swing.features.promoted_technical import PromotedTechnicalFeatureVector
@@ -165,6 +166,30 @@ class ForwardPaperResearchArmResult:
         self._validate()
         if self.arm_id != self._calculated_id():
             _fail("forward paper research arm identity failed")
+
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        name: ForwardPaperResearchArmName,
+        source_window: ForwardPaperTechnicalFeatureWindow,
+        config: PromotedCrossSectionConfig,
+        regime_evidence: PromotedMarketRegimeEvidence | None,
+        opportunities: tuple[PromotedOpportunityScore, ...],
+        blocked_result_ids: tuple[str, ...],
+    ) -> "ForwardPaperResearchArmResult":
+        value = object.__new__(cls)
+        for field_name, item in (
+            ("name", name),
+            ("source_window", source_window),
+            ("config", config),
+            ("regime_evidence", regime_evidence),
+            ("opportunities", opportunities),
+            ("blocked_result_ids", blocked_result_ids),
+        ):
+            object.__setattr__(value, field_name, item)
+        object.__setattr__(value, "arm_id", value._calculated_id())
+        return value
 
     @property
     def collection_only(self) -> bool:
@@ -350,6 +375,34 @@ class ForwardPaperBaselineChallengerRun:
         if self.run_id != self._calculated_id():
             _fail("forward paper research run identity failed")
 
+    @classmethod
+    def _from_freshly_verified_derivation(
+        cls,
+        *,
+        source_graph: ForwardPaperOperationalResearchGraph,
+        baseline: ForwardPaperResearchArmResult,
+        challenger: ForwardPaperResearchArmResult,
+        comparison_top_tiers: int,
+        comparisons: tuple[ForwardPaperResearchComparison, ...],
+        baseline_top_count: int,
+        challenger_top_count: int,
+        overlap_count: int,
+    ) -> "ForwardPaperBaselineChallengerRun":
+        value = object.__new__(cls)
+        for field_name, item in (
+            ("source_graph", source_graph),
+            ("baseline", baseline),
+            ("challenger", challenger),
+            ("comparison_top_tiers", comparison_top_tiers),
+            ("comparisons", comparisons),
+            ("baseline_top_count", baseline_top_count),
+            ("challenger_top_count", challenger_top_count),
+            ("overlap_count", overlap_count),
+        ):
+            object.__setattr__(value, field_name, item)
+        object.__setattr__(value, "run_id", value._calculated_id())
+        return value
+
     @property
     def collection_only(self) -> bool:
         return True
@@ -376,13 +429,15 @@ def _build_arm(
     name: ForwardPaperResearchArmName,
     source: ForwardPaperTechnicalFeatureWindow,
     config: PromotedCrossSectionConfig,
+    verify_vectors: bool,
 ) -> ForwardPaperResearchArmResult:
-    regime, opportunities = score_promoted_feature_vectors(
+    regime, opportunities = _score_promoted_feature_vectors(
         vectors=_vectors(source),
         source_feature_panel_id=source.window_id,
         config=config,
+        verify_vectors=verify_vectors,
     )
-    return ForwardPaperResearchArmResult(
+    return ForwardPaperResearchArmResult._from_freshly_verified_derivation(
         name=name,
         source_window=source,
         config=config,
@@ -467,14 +522,81 @@ def run_forward_paper_baseline_challenger_research(
         name=ForwardPaperResearchArmName.BASELINE,
         source=source,
         config=baseline_config,
+        verify_vectors=False,
     )
     challenger = _build_arm(
         name=ForwardPaperResearchArmName.CHALLENGER,
         source=source,
         config=challenger_config,
+        verify_vectors=False,
     )
     comparisons = _comparisons(baseline, challenger, comparison_top_tiers)
-    return ForwardPaperBaselineChallengerRun(
+    return ForwardPaperBaselineChallengerRun._from_freshly_verified_derivation(
+        source_graph=source_graph,
+        baseline=baseline,
+        challenger=challenger,
+        comparison_top_tiers=comparison_top_tiers,
+        comparisons=comparisons,
+        baseline_top_count=sum(
+            value.rank_tier <= comparison_top_tiers
+            for value in baseline.opportunities
+        ),
+        challenger_top_count=sum(
+            value.rank_tier <= comparison_top_tiers
+            for value in challenger.opportunities
+        ),
+        overlap_count=len(comparisons),
+    )
+
+
+def _run_forward_paper_baseline_challenger_research_from_verified_graph(
+    *,
+    source_graph: ForwardPaperOperationalResearchGraph,
+    baseline_config: PromotedCrossSectionConfig,
+    challenger_config: PromotedCrossSectionConfig,
+    comparison_top_tiers: int = 10,
+) -> ForwardPaperBaselineChallengerRun:
+    """Score one graph freshly reconstructed from exact, verified inputs.
+
+    The caller owns the expensive input verification. This boundary still checks
+    the graph's shallow content binding and both small configuration identities.
+    """
+
+    if (
+        type(source_graph) is not ForwardPaperOperationalResearchGraph
+        or type(baseline_config) is not PromotedCrossSectionConfig
+        or type(challenger_config) is not PromotedCrossSectionConfig
+        or baseline_config.config_id == challenger_config.config_id
+        or type(comparison_top_tiers) is not int
+        or isinstance(comparison_top_tiers, bool)
+        or comparison_top_tiers <= 0
+    ):
+        _fail("forward paper research request is invalid")
+    failed = False
+    try:
+        if source_graph.graph_id != source_graph._calculated_id():
+            raise ValueError
+        baseline_config.verify_content_identity()
+        challenger_config.verify_content_identity()
+    except Exception:
+        failed = True
+    if failed:
+        _fail("forward paper research request failed verification")
+    source = source_graph.technical_feature_window
+    baseline = _build_arm(
+        name=ForwardPaperResearchArmName.BASELINE,
+        source=source,
+        config=baseline_config,
+        verify_vectors=False,
+    )
+    challenger = _build_arm(
+        name=ForwardPaperResearchArmName.CHALLENGER,
+        source=source,
+        config=challenger_config,
+        verify_vectors=False,
+    )
+    comparisons = _comparisons(baseline, challenger, comparison_top_tiers)
+    return ForwardPaperBaselineChallengerRun._from_freshly_verified_derivation(
         source_graph=source_graph,
         baseline=baseline,
         challenger=challenger,

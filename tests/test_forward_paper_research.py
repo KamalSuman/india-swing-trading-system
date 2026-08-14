@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from decimal import Decimal, getcontext
 from pathlib import Path
+from unittest.mock import patch
 
 from india_swing.features.promoted_cross_section import PromotedCrossSectionConfig
 from india_swing.forward_paper import research as research_module
@@ -64,6 +65,16 @@ class ForwardPaperBaselineChallengerResearchTests(unittest.TestCase):
         self.assertEqual(len(result.comparisons), 1)
         self.assertNotEqual(result.baseline.arm_id, result.challenger.arm_id)
         result.verify_content_identity()
+
+    def test_each_arm_is_scored_once_during_fresh_derivation(self) -> None:
+        scorer = research_module._score_promoted_feature_vectors
+        with patch.object(
+            research_module,
+            "_score_promoted_feature_vectors",
+            wraps=scorer,
+        ) as wrapped:
+            self._run()
+        self.assertEqual(wrapped.call_count, 2)
 
     def test_insufficient_challenger_cross_section_is_blocked_not_dropped(self) -> None:
         result = self._run(challenger_minimum=2)

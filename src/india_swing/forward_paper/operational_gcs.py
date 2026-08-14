@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Protocol
+from typing import Iterable, Protocol
 
 from india_swing.corporate_actions.models import CorporateActionSnapshot
 from india_swing.daily_pipeline.acquisition import GCSObjectPayload, GCSObjectReader
@@ -18,6 +18,10 @@ from india_swing.daily_pipeline.state_publication import (
 from india_swing.forward_paper.history import (
     ForwardPaperHistoryWindowSpec,
     ForwardPaperRawHistoryWindow,
+    build_forward_paper_raw_history_window,
+)
+from india_swing.evaluation.nse_archive_research_price_stream import (
+    NseArchiveResearchPriceStreamSession,
 )
 from india_swing.forward_paper.operational import (
     ForwardPaperOperationalResearchGraph,
@@ -50,7 +54,9 @@ class ForwardPaperOperationalManifestError(ValueError):
 
 
 class ForwardPaperRawHistoryWindowResolver(Protocol):
-    def build(self, spec: ForwardPaperHistoryWindowSpec) -> ForwardPaperRawHistoryWindow: ...
+    def sessions(
+        self, spec: ForwardPaperHistoryWindowSpec
+    ) -> Iterable[NseArchiveResearchPriceStreamSession]: ...
 
 
 class ForwardPaperCorporateActionSnapshotResolver(Protocol):
@@ -538,7 +544,10 @@ def restore_forward_paper_operational_graph(
         )
         if spec.spec_id != manifest.source_spec_id:
             raise ValueError
-        source = history_windows.build(spec)
+        source = build_forward_paper_raw_history_window(
+            spec,
+            history_windows.sessions(spec),
+        )
         actions = corporate_actions.get(manifest.corporate_action_snapshot_id)
         ticks = tick_panels.get(manifest.tick_panel_id)
         if (
@@ -551,6 +560,8 @@ def restore_forward_paper_operational_graph(
             or ticks.panel_id != manifest.tick_panel_id
         ):
             raise ValueError
+        actions.verify_content_identity()
+        ticks.verify_content_identity()
         # Each exact resolver above already reconstructs or loads a content-bound
         # artifact and this boundary independently checks every expected top-level
         # identity before derivation. Use the same verified-input graph path as the
@@ -576,5 +587,6 @@ def restore_forward_paper_operational_graph(
         or graph.source_window.spec.decision_cutoff != manifest.decision_cutoff
     ):
         _fail("forward paper operational recomputed graph differs")
-    graph.verify_content_identity()
+    if graph.graph_id != graph._calculated_id():
+        _fail("forward paper operational recomputed graph identity differs")
     return graph

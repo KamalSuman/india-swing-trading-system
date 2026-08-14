@@ -5,11 +5,16 @@ import inspect
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from india_swing.daily_pipeline.acquisition import GCSObjectPayload
 from india_swing.daily_pipeline.state_publication import PublishedStateObject
+from india_swing.evaluation.nse_archive_research_price_stream import (
+    NseArchiveResearchPriceStreamSession,
+)
 from india_swing.forward_paper import operational_gcs as gcs_module
 from india_swing.forward_paper.operational import (
+    ForwardPaperOperationalResearchGraph,
     assemble_forward_paper_operational_research_graph,
 )
 from india_swing.forward_paper.operational_gcs import (
@@ -95,9 +100,9 @@ class ExactResolver:
         self.calls.append(artifact_id)
         return self.artifact
 
-    def build(self, spec):
+    def sessions(self, spec):
         self.calls.append(spec.spec_id)
-        return self.artifact
+        return iter(self.artifact.sessions)
 
 
 class ForwardPaperOperationalGCSTests(unittest.TestCase):
@@ -175,6 +180,116 @@ class ForwardPaperOperationalGCSTests(unittest.TestCase):
         self.assertEqual(history.calls, [self.raw.spec.spec_id])
         self.assertEqual(actions.calls, [self.actions.snapshot_id])
         self.assertEqual(ticks.calls, [self.ticks.panel_id])
+
+    def test_restore_does_not_repeat_recursive_graph_verification(self) -> None:
+        writer, completed = self._publication()
+        with patch.object(
+            ForwardPaperOperationalResearchGraph,
+            "verify_content_identity",
+            side_effect=AssertionError("recursive verification must not repeat"),
+        ):
+            restored = restore_forward_paper_operational_graph(
+                expected_graph_id=self.graph.graph_id,
+                bucket=self.bucket,
+                manifest_object_name=completed.manifest_object.object_name,
+                manifest_generation=completed.manifest_object.generation,
+                manifest_sha256=completed.manifest_object.sha256,
+                reader=FakeReader(writer),
+                history_windows=ExactResolver(self.raw),
+                corporate_actions=ExactResolver(self.actions),
+                tick_panels=ExactResolver(self.ticks),
+            )
+        self.assertEqual(restored.graph_id, self.graph.graph_id)
+
+    def test_restore_deeply_verifies_each_streamed_session_once(self) -> None:
+        writer, completed = self._publication()
+        original = NseArchiveResearchPriceStreamSession.verify_content_identity
+        calls: list[str] = []
+
+        def counted(session):
+            calls.append(session.price_stream_session_id)
+            return original(session)
+
+        with patch.object(
+            NseArchiveResearchPriceStreamSession,
+            "verify_content_identity",
+            counted,
+        ):
+            restore_forward_paper_operational_graph(
+                expected_graph_id=self.graph.graph_id,
+                bucket=self.bucket,
+                manifest_object_name=completed.manifest_object.object_name,
+                manifest_generation=completed.manifest_object.generation,
+                manifest_sha256=completed.manifest_object.sha256,
+                reader=FakeReader(writer),
+                history_windows=ExactResolver(self.raw),
+                corporate_actions=ExactResolver(self.actions),
+                tick_panels=ExactResolver(self.ticks),
+            )
+        self.assertEqual(
+            calls,
+            [value.price_stream_session_id for value in self.raw.sessions],
+        )
+
+    def test_nested_history_mutation_with_cached_ids_fails_closed(self) -> None:
+        writer, completed = self._publication()
+        record = self.raw.sessions[0].observations[0].replay_record
+        original_trade_count = record.trade_count
+        object.__setattr__(record, "trade_count", original_trade_count + 1)
+        try:
+            with self.assertRaises(ForwardPaperOperationalManifestError):
+                restore_forward_paper_operational_graph(
+                    expected_graph_id=self.graph.graph_id,
+                    bucket=self.bucket,
+                    manifest_object_name=completed.manifest_object.object_name,
+                    manifest_generation=completed.manifest_object.generation,
+                    manifest_sha256=completed.manifest_object.sha256,
+                    reader=FakeReader(writer),
+                    history_windows=ExactResolver(self.raw),
+                    corporate_actions=ExactResolver(self.actions),
+                    tick_panels=ExactResolver(self.ticks),
+                )
+        finally:
+            object.__setattr__(record, "trade_count", original_trade_count)
+
+    def test_tampered_exact_evidence_fails_before_derivation(self) -> None:
+        writer, completed = self._publication()
+        common = {
+            "expected_graph_id": self.graph.graph_id,
+            "bucket": self.bucket,
+            "manifest_object_name": completed.manifest_object.object_name,
+            "manifest_generation": completed.manifest_object.generation,
+            "manifest_sha256": completed.manifest_object.sha256,
+            "reader": FakeReader(writer),
+            "history_windows": ExactResolver(self.raw),
+        }
+        original_complete = self.actions.complete
+        object.__setattr__(self.actions, "complete", not original_complete)
+        try:
+            with self.assertRaises(ForwardPaperOperationalManifestError):
+                restore_forward_paper_operational_graph(
+                    **common,
+                    corporate_actions=ExactResolver(self.actions),
+                    tick_panels=ExactResolver(self.ticks),
+                )
+        finally:
+            object.__setattr__(self.actions, "complete", original_complete)
+
+        original_feature_eligible = self.ticks.feature_eligible
+        object.__setattr__(self.ticks, "feature_eligible", True)
+        try:
+            with self.assertRaises(ForwardPaperOperationalManifestError):
+                restore_forward_paper_operational_graph(
+                    **common,
+                    corporate_actions=ExactResolver(self.actions),
+                    tick_panels=ExactResolver(self.ticks),
+                )
+        finally:
+            object.__setattr__(
+                self.ticks,
+                "feature_eligible",
+                original_feature_eligible,
+            )
 
     def test_direct_signal_tick_panel_survives_publish_and_exact_restore(self) -> None:
         writer = FakeWriter()

@@ -7,12 +7,14 @@ from dataclasses import fields
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from india_swing.daily_pipeline.state_publication import PublishedStateObject
 from india_swing.features.promoted_cross_section import PromotedCrossSectionConfig
 from india_swing.forward_paper import research_gcs as gcs_module
 from india_swing.forward_paper import research_job as job_module
 from india_swing.forward_paper.operational import (
+    ForwardPaperOperationalResearchGraph,
     assemble_forward_paper_operational_research_graph,
 )
 from india_swing.forward_paper.operational_gcs import (
@@ -140,6 +142,24 @@ class ForwardPaperResearchGCSTests(unittest.TestCase):
             ],
         )
         receipt.verify_content_identity()
+
+    def test_job_does_not_repeat_recursive_graph_verification(self) -> None:
+        writer = FakeWriter()
+        request = self._request(writer)
+        with patch.object(
+            ForwardPaperOperationalResearchGraph,
+            "verify_content_identity",
+            side_effect=AssertionError("recursive verification must not repeat"),
+        ):
+            receipt = run_forward_paper_research_job(
+                request=request,
+                reader=FakeReader(writer),
+                history_windows=ExactResolver(self.raw),
+                corporate_actions=ExactResolver(self.actions),
+                tick_panels=ExactResolver(self.ticks),
+                writer=writer,
+            )
+        self.assertEqual(receipt.run.source_graph.graph_id, self.graph.graph_id)
 
     def test_research_restore_reads_exact_research_and_source_generations(self) -> None:
         writer, _, receipt, _ = self._run()

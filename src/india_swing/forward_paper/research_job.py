@@ -19,12 +19,12 @@ from .operational_gcs import (
 )
 from .research import (
     ForwardPaperBaselineChallengerRun,
-    run_forward_paper_baseline_challenger_research,
+    _run_forward_paper_baseline_challenger_research_from_verified_graph,
 )
 from .research_gcs import (
     CompletedForwardPaperResearchPublication,
     ForwardPaperOperationalManifestPin,
-    publish_forward_paper_research_run,
+    _publish_forward_paper_research_run_from_verified_run,
 )
 
 
@@ -195,6 +195,26 @@ class ForwardPaperResearchJobReceipt:
         if self.receipt_id != self._calculated_id():
             _fail("forward paper research job receipt identity failed")
 
+    @classmethod
+    def _from_freshly_verified_run(
+        cls,
+        *,
+        request: ForwardPaperResearchJobRequest,
+        run: ForwardPaperBaselineChallengerRun,
+        publication: CompletedForwardPaperResearchPublication,
+    ) -> "ForwardPaperResearchJobReceipt":
+        value = object.__new__(cls)
+        for field_name, item in (
+            ("request", request),
+            ("run", run),
+            ("publication", publication),
+            ("schema_version", FORWARD_PAPER_RESEARCH_JOB_RECEIPT_SCHEMA_VERSION),
+            ("policy_version", FORWARD_PAPER_RESEARCH_JOB_POLICY_VERSION),
+        ):
+            object.__setattr__(value, field_name, item)
+        object.__setattr__(value, "receipt_id", value._calculated_id())
+        return value
+
     @property
     def collection_only(self) -> bool:
         return True
@@ -254,7 +274,7 @@ def run_forward_paper_research_job(
             blocked_feature_count=graph.technical_feature_window.blocked_feature_count,
         )
         _observe(stage_observer, "baseline_challenger", "started")
-        run = run_forward_paper_baseline_challenger_research(
+        run = _run_forward_paper_baseline_challenger_research_from_verified_graph(
             source_graph=graph,
             baseline_config=request.baseline_config,
             challenger_config=request.challenger_config,
@@ -269,7 +289,7 @@ def run_forward_paper_research_job(
             overlap_count=run.overlap_count,
         )
         _observe(stage_observer, "research_publication", "started")
-        publication = publish_forward_paper_research_run(
+        publication = _publish_forward_paper_research_run_from_verified_run(
             run=run,
             source_pin=request.source_pin,
             bucket=request.output_bucket,
@@ -280,7 +300,7 @@ def run_forward_paper_research_job(
         failed = True
     if failed or graph is None or run is None or publication is None:
         _fail("forward paper research job failed safely")
-    return ForwardPaperResearchJobReceipt(
+    return ForwardPaperResearchJobReceipt._from_freshly_verified_run(
         request=request,
         run=run,
         publication=publication,

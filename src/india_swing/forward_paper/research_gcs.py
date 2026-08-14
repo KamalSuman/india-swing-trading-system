@@ -24,7 +24,7 @@ from .operational_gcs import (
 )
 from .research import (
     ForwardPaperBaselineChallengerRun,
-    run_forward_paper_baseline_challenger_research,
+    _run_forward_paper_baseline_challenger_research_from_verified_graph,
 )
 
 
@@ -270,6 +270,46 @@ def research_run_manifest_from_run(
     )
 
 
+def _research_run_manifest_from_verified_run(
+    *,
+    run: ForwardPaperBaselineChallengerRun,
+    source_pin: ForwardPaperOperationalManifestPin,
+    bucket: str,
+) -> ForwardPaperResearchRunManifest:
+    """Bind a run derived immediately from an exact restored graph."""
+
+    failed = False
+    try:
+        if (
+            type(run) is not ForwardPaperBaselineChallengerRun
+            or run.run_id != run._calculated_id()
+            or run.baseline.arm_id != run.baseline._calculated_id()
+            or run.challenger.arm_id != run.challenger._calculated_id()
+        ):
+            raise ValueError
+        source_pin.verify_content_identity()
+    except Exception:
+        failed = True
+    if failed:
+        _fail("forward paper research run failed manifest verification")
+    if run.source_graph.graph_id != source_pin.expected_graph_id:
+        _fail("forward paper research run source binding differs")
+    return ForwardPaperResearchRunManifest(
+        bucket=_bucket(bucket),
+        signal_session=run.source_graph.source_window.spec.signal_session,
+        source_pin=source_pin,
+        run_id=run.run_id,
+        baseline_config_id=run.baseline.config.config_id,
+        challenger_config_id=run.challenger.config.config_id,
+        baseline_arm_id=run.baseline.arm_id,
+        challenger_arm_id=run.challenger.arm_id,
+        comparison_top_tiers=run.comparison_top_tiers,
+        baseline_top_count=run.baseline_top_count,
+        challenger_top_count=run.challenger_top_count,
+        overlap_count=run.overlap_count,
+    )
+
+
 def encode_forward_paper_research_manifest(
     manifest: ForwardPaperResearchRunManifest,
 ) -> bytes:
@@ -439,18 +479,10 @@ class CompletedForwardPaperResearchPublication:
             _fail("forward paper research published manifest differs")
 
 
-def publish_forward_paper_research_run(
-    *,
-    run: ForwardPaperBaselineChallengerRun,
-    source_pin: ForwardPaperOperationalManifestPin,
-    bucket: str,
+def _publish_forward_paper_research_manifest(
+    manifest: ForwardPaperResearchRunManifest,
     writer: StateObjectWriter,
 ) -> CompletedForwardPaperResearchPublication:
-    manifest = research_run_manifest_from_run(
-        run=run,
-        source_pin=source_pin,
-        bucket=bucket,
-    )
     payload = encode_forward_paper_research_manifest(manifest)
     object_name = forward_paper_research_manifest_object_name(manifest)
     published = None
@@ -480,6 +512,36 @@ def publish_forward_paper_research_run(
         manifest=manifest,
         manifest_object=published,
     )
+
+
+def publish_forward_paper_research_run(
+    *,
+    run: ForwardPaperBaselineChallengerRun,
+    source_pin: ForwardPaperOperationalManifestPin,
+    bucket: str,
+    writer: StateObjectWriter,
+) -> CompletedForwardPaperResearchPublication:
+    manifest = research_run_manifest_from_run(
+        run=run,
+        source_pin=source_pin,
+        bucket=bucket,
+    )
+    return _publish_forward_paper_research_manifest(manifest, writer)
+
+
+def _publish_forward_paper_research_run_from_verified_run(
+    *,
+    run: ForwardPaperBaselineChallengerRun,
+    source_pin: ForwardPaperOperationalManifestPin,
+    bucket: str,
+    writer: StateObjectWriter,
+) -> CompletedForwardPaperResearchPublication:
+    manifest = _research_run_manifest_from_verified_run(
+        run=run,
+        source_pin=source_pin,
+        bucket=bucket,
+    )
+    return _publish_forward_paper_research_manifest(manifest, writer)
 
 
 def restore_forward_paper_research_run(
@@ -559,13 +621,12 @@ def restore_forward_paper_research_run(
             corporate_actions=corporate_actions,
             tick_panels=tick_panels,
         )
-        run = run_forward_paper_baseline_challenger_research(
+        run = _run_forward_paper_baseline_challenger_research_from_verified_graph(
             source_graph=graph,
             baseline_config=baseline_config,
             challenger_config=challenger_config,
             comparison_top_tiers=manifest.comparison_top_tiers,
         )
-        run.verify_content_identity()
     except Exception:
         failed = True
     if failed or run is None:

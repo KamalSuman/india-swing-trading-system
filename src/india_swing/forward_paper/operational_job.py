@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Mapping, Protocol
+from typing import Iterable, Mapping, Protocol
 
 from india_swing.corporate_actions.models import CorporateActionSnapshot
 from india_swing.daily_pipeline.state_publication import StateObjectWriter
@@ -13,6 +13,7 @@ from india_swing.evaluation.nse_archive_research_dataset import (
     NseArchiveResearchDataset,
 )
 from india_swing.evaluation.nse_archive_research_price_stream import (
+    NseArchiveResearchPriceStreamSession,
     iter_nse_archive_research_price_stream_sessions_from,
 )
 from india_swing.forward_paper.history import (
@@ -177,11 +178,13 @@ class NseArchiveForwardPaperHistoryBuilder:
     datasets: NseArchiveResearchDatasetResolver
     reader: NseHistoricalArchiveSnapshotReader
 
-    def build(self, spec: ForwardPaperHistoryWindowSpec) -> ForwardPaperRawHistoryWindow:
+    def sessions(
+        self, spec: ForwardPaperHistoryWindowSpec
+    ) -> Iterable[NseArchiveResearchPriceStreamSession]:
         if type(spec) is not ForwardPaperHistoryWindowSpec:
             _fail("forward paper operational history specification is invalid")
         failed = False
-        dataset = window = None
+        dataset = sessions = None
         try:
             spec.verify_content_identity()
             dataset = self.datasets.get(spec.dataset_id)
@@ -196,7 +199,17 @@ class NseArchiveForwardPaperHistoryBuilder:
                 self.reader,
                 start_session=spec.expected_market_sessions[0],
             )
-            window = build_forward_paper_raw_history_window(spec, sessions)
+        except Exception:
+            failed = True
+        if failed or sessions is None:
+            _fail("forward paper operational raw history reconstruction failed safely")
+        return sessions
+
+    def build(self, spec: ForwardPaperHistoryWindowSpec) -> ForwardPaperRawHistoryWindow:
+        failed = False
+        window = None
+        try:
+            window = build_forward_paper_raw_history_window(spec, self.sessions(spec))
             if (
                 type(window) is not ForwardPaperRawHistoryWindow
                 or window.spec.spec_id != spec.spec_id
@@ -360,6 +373,8 @@ def run_forward_paper_operational_job(
             or ticks.panel_id != request.tick_panel_id
         ):
             raise ValueError
+        actions.verify_content_identity()
+        ticks.verify_content_identity()
         _observe(stage_observer, "evidence_resolution", "completed")
         _observe(stage_observer, "graph_assembly", "started")
         graph = _assemble_forward_paper_operational_research_graph_from_verified_inputs(
